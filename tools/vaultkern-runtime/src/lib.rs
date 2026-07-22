@@ -4,6 +4,7 @@ mod match_fill;
 pub mod native_host;
 mod passkey;
 mod providers;
+mod resident_protocol;
 mod runtime;
 mod session;
 mod state_paths;
@@ -20,6 +21,7 @@ pub use passkey::{
 pub use providers::biometric::BiometricProvider;
 pub use providers::onedrive_token_store::OneDriveRefreshTokenStore;
 pub use providers::secure_storage::{SecureStorageError, SecureStorageProvider};
+pub use resident_protocol::{MAX_RESIDENT_PROTOCOL_MESSAGE_BYTES, ResidentProtocolSession};
 pub use runtime::{
     ExternalKdfDisposition, ExternalKdfFailure, QuickUnlockOutcome,
     QuickUnlockReconciliationCredentials, ResidentKdfPolicy, ResidentRuntimeConfig, Runtime,

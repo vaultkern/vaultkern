@@ -17,8 +17,9 @@ use vaultkern_runtime::{
     PlatformPasskeyCredential as RuntimePlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput as RuntimePlatformPasskeyRegistrationInput,
     PlatformPasskeyRegistrationOutput as RuntimePlatformPasskeyRegistrationOutput,
-    QuickUnlockOutcome, ResidentKdfPolicy, ResidentRuntimeConfig, Runtime, SecureStorageError,
-    SecureStorageProvider, classify_external_kdf_error,
+    QuickUnlockOutcome, ResidentKdfPolicy,
+    ResidentProtocolSession as RuntimeResidentProtocolSession, ResidentRuntimeConfig, Runtime,
+    SecureStorageError, SecureStorageProvider, classify_external_kdf_error,
 };
 use vaultkern_runtime_protocol as protocol;
 use zeroize::{Zeroize, Zeroizing};
@@ -1205,6 +1206,14 @@ impl VaultSession {
         })
     }
 
+    pub fn protocol_session(&self) -> Arc<VaultProtocolSession> {
+        Arc::new(VaultProtocolSession {
+            shared: Arc::clone(&self.shared),
+            protocol: Mutex::new(RuntimeResidentProtocolSession::new()),
+            canceled: AtomicBool::new(false),
+        })
+    }
+
     pub fn open_vault(&self, path: String) -> Result<VaultHandleDto, VaultKernError> {
         self.shared
             .lock_for_session_mutation()?
@@ -1325,6 +1334,34 @@ impl VaultSession {
             fresh_user_verification,
             closed: AtomicBool::new(false),
         }))
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct VaultProtocolSession {
+    shared: Arc<SharedRuntime>,
+    protocol: Mutex<RuntimeResidentProtocolSession>,
+    canceled: AtomicBool,
+}
+
+#[uniffi::export]
+impl VaultProtocolSession {
+    pub fn handle_message(
+        &self,
+        message: SensitiveBytes,
+    ) -> Result<SensitiveBytes, VaultKernError> {
+        let mut protocol = self
+            .protocol
+            .lock()
+            .map_err(|_| VaultKernError::StateUnavailable)?;
+        let mut runtime = self.shared.lock_for_session_mutation()?;
+        let response =
+            protocol.handle_message(&mut runtime, message.into_zeroizing(), &self.canceled);
+        Ok(SensitiveBytes(response))
+    }
+
+    pub fn cancel(&self) {
+        self.canceled.store(true, Ordering::Release);
     }
 }
 

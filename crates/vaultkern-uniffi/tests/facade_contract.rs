@@ -202,7 +202,7 @@ fn resident_runtime_requires_explicit_absolute_host_directories() {
 
     let result = VaultSession::new(
         invalid,
-        adapter,
+        adapter.clone(),
         Arc::new(FakeOneDriveTokenAdapter::default()),
     );
 
@@ -234,6 +234,73 @@ fn resident_runtime_reports_an_unusable_host_temporary_directory_without_panicki
         "constructor must not panic on a host path error"
     );
     assert!(result.unwrap().is_err());
+}
+
+#[test]
+fn resident_protocol_binding_negotiates_preserves_ids_and_cancels_closed_channels() {
+    let root = tempfile::tempdir().unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let adapter = Arc::new(FakeUnlockBlobAdapter::default());
+    let session = VaultSession::new(
+        session_config(&root_path, ResidentPlatform::Macos),
+        adapter.clone(),
+        Arc::new(FakeOneDriveTokenAdapter::default()),
+    )
+    .unwrap();
+    let protocol = session.protocol_session();
+
+    let handshake = serde_json::json!({
+        "version": 1,
+        "requestId": "ffi-handshake",
+        "command": {
+            "type": "handshake",
+            "protocol_version": 1,
+            "capabilities": ["runtime-core", "browser-extension"]
+        }
+    });
+    let response = protocol
+        .handle_message(SensitiveBytes::from(
+            serde_json::to_vec(&handshake).unwrap(),
+        ))
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(response.as_slice()).unwrap();
+    assert_eq!(response["type"], "handshake");
+    assert_eq!(response["requestId"], "ffi-handshake");
+
+    let protected = serde_json::json!({
+        "version": 1,
+        "requestId": "ffi-protected",
+        "command": {
+            "type": "get_entry_detail",
+            "vault_id": "missing-vault",
+            "entry_id": "missing-entry"
+        }
+    });
+    let response = protocol
+        .handle_message(SensitiveBytes::from(
+            serde_json::to_vec(&protected).unwrap(),
+        ))
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(response.as_slice()).unwrap();
+    assert_eq!(response["type"], "error");
+    assert_eq!(response["requestId"], "ffi-protected");
+    assert_eq!(
+        adapter.authorization_reasons.lock().unwrap().as_slice(),
+        ["Approve this VaultKern browser request"]
+    );
+
+    protocol.cancel();
+    let state = serde_json::json!({
+        "version": 1,
+        "requestId": "ffi-canceled",
+        "command": { "type": "get_session_state" }
+    });
+    let response = protocol
+        .handle_message(SensitiveBytes::from(serde_json::to_vec(&state).unwrap()))
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_slice(response.as_slice()).unwrap();
+    assert_eq!(response["code"], "request_canceled");
+    assert_eq!(response["requestId"], "ffi-canceled");
 }
 
 fn opened_session() -> (
