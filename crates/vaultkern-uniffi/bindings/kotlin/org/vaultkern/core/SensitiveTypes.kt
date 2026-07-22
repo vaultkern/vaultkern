@@ -18,9 +18,18 @@ public class VaultKernSensitiveString private constructor(
         @JvmStatic
         public fun fromString(value: String): VaultKernSensitiveString =
             VaultKernSensitiveString(value.toByteArray(Charsets.UTF_8))
+
+        @JvmStatic
+        public fun fromUtf8Bytes(value: ByteArray): VaultKernSensitiveString {
+            val owned = value.copyOf()
+            value.fill(0)
+            return VaultKernSensitiveString(owned)
+        }
     }
 
     public fun reveal(): String = lock.withLock { bytes.toString(Charsets.UTF_8) }
+
+    public fun copyUtf8Bytes(): ByteArray = lock.withLock { bytes.copyOf() }
 
     override fun close() {
         lock.withLock {
