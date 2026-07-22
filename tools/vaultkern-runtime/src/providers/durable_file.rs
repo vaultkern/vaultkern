@@ -899,16 +899,37 @@ pub(crate) fn create_dir_all_durable(path: &Path) -> io::Result<()> {
 fn validate_trusted_directory_component(metadata: &Metadata) -> io::Result<()> {
     use std::os::unix::fs::MetadataExt;
 
-    let owner = metadata.uid();
-    let effective_user = unsafe { libc::geteuid() };
-    if owner != effective_user && owner != 0 {
+    validate_trusted_directory_component_values(
+        metadata.uid(),
+        metadata.mode(),
+        unsafe { libc::geteuid() },
+        cfg!(target_os = "android"),
+    )
+}
+
+#[cfg(unix)]
+fn validate_trusted_directory_component_values(
+    owner: u32,
+    mode: u32,
+    effective_user: u32,
+    android_system_ancestors: bool,
+) -> io::Result<()> {
+    const ANDROID_SYSTEM_UID: u32 = 1_000;
+
+    let android_system_owner = android_system_ancestors && matches!(owner, 0 | ANDROID_SYSTEM_UID);
+    if owner != effective_user && owner != 0 && !android_system_owner {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is owned by an untrusted user",
         ));
     }
-    let mode = metadata.mode();
-    if mode & 0o022 != 0 && u64::from(mode) & u64::from(libc::S_ISVTX) == 0 {
+    // Android app-data paths descend through /data and /data/user/0, which are
+    // deliberately owned and group-writable by AID_SYSTEM. That UID and root
+    // are part of Android's trusted computing base; arbitrary foreign owners
+    // and world-writable ancestry remain rejected. The final app directory is
+    // still required below to be owned by the app UID with mode 0700.
+    let untrusted_write_mask = if android_system_owner { 0o002 } else { 0o022 };
+    if mode & untrusted_write_mask != 0 && u64::from(mode) & u64::from(libc::S_ISVTX) == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is writable without sticky protection",
@@ -1440,6 +1461,8 @@ pub(crate) fn remove_and_sync_absence(path: &Path) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::validate_trusted_directory_component_values;
     #[cfg(any(unix, windows))]
     use super::{
         DurableFaultInjector, DurableFaultPoint, TempWriteFaultPoints, write_verified_temp,
@@ -1450,6 +1473,29 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    #[cfg(unix)]
+    #[test]
+    fn android_app_storage_trusts_only_system_owned_group_writable_ancestors() {
+        let app_uid = 10_123;
+
+        assert!(
+            validate_trusted_directory_component_values(1_000, 0o040771, app_uid, true).is_ok(),
+            "Android's system-owned /data ancestry is part of the platform TCB"
+        );
+        assert!(
+            validate_trusted_directory_component_values(1_001, 0o040771, app_uid, true).is_err(),
+            "an arbitrary foreign owner must not become trusted on Android"
+        );
+        assert!(
+            validate_trusted_directory_component_values(1_000, 0o040773, app_uid, true).is_err(),
+            "world-writable system ancestry still requires sticky protection"
+        );
+        assert!(
+            validate_trusted_directory_component_values(app_uid, 0o040770, app_uid, true).is_err(),
+            "app-owned ancestry must remain private"
+        );
+    }
 
     #[test]
     fn bounded_lock_times_out_under_contention_and_recovers_after_release() {

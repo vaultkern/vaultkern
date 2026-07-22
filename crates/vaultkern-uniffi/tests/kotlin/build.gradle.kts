@@ -12,6 +12,11 @@ android {
     namespace = "org.vaultkern.core.smoke"
     compileSdk = 34
 
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
     defaultConfig {
         applicationId = "org.vaultkern.core.smoke"
         minSdk = 34
@@ -23,6 +28,10 @@ android {
 
     sourceSets["main"].java.srcDir("../../bindings/kotlin")
     sourceSets["androidTest"].assets.srcDir("../../../vaultkern-kdbx/tests/fixtures")
+}
+
+kotlin {
+    jvmToolchain(17)
 }
 
 dependencies {
