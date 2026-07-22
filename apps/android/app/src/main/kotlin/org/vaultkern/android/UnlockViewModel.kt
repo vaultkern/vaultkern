@@ -11,12 +11,15 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.vaultkern.android.security.UnlockEnrollmentState
+import org.vaultkern.android.security.UnlockKeySecurityLevel
 import org.vaultkern.android.settings.QuickUnlockSettingsApplier
 import org.vaultkern.android.settings.QuickUnlockSettingsApplyOutcome
 import org.vaultkern.android.sync.AndroidSyncStatus
 import org.vaultkern.android.sync.OneDriveBrowserItem
+import org.vaultkern.android.sync.OneDriveVaultPreloadException
 import org.vaultkern.android.ui.UnlockUiState
 import org.vaultkern.android.unlock.UnlockAttemptOutcome
+import org.vaultkern.android.vault.CurrentVaultSelection
 import org.vaultkern.android.vault.VaultEntryDraft
 import org.vaultkern.android.vault.VaultEntryListItem
 import org.vaultkern.android.vault.VaultSaveResult
@@ -45,6 +48,7 @@ class UnlockViewModel(
                     unlocked = unlocked,
                     entries = if (unlocked) graph.vaultWorkflow.browse() else emptyList(),
                     syncStatus = graph.oneDriveWorkflow.status(),
+                    currentSelection = graph.vaultSelection.current(),
                     oneDriveConnected = graph.oneDriveTokenAdapter.hasStoredToken(),
                 )
             }
@@ -54,14 +58,14 @@ class UnlockViewModel(
                 } else {
                     refreshed.fold(
                         onSuccess = { snapshot ->
-                            current.copy(
+                            current.withRestoredVaultSelection(
+                                snapshot.currentSelection,
+                                snapshot.syncStatus,
+                            ).copy(
                                 enrollmentState = snapshot.enrollment,
                                 keySecurityLevel = snapshot.security,
                                 vaultUnlocked = snapshot.unlocked,
                                 entries = snapshot.entries,
-                                syncStatus = snapshot.syncStatus,
-                                oneDriveVaultSelected =
-                                    snapshot.syncStatus?.sourceKind == "onedrive",
                                 oneDriveConnected = snapshot.oneDriveConnected,
                             )
                         },
@@ -89,12 +93,14 @@ class UnlockViewModel(
             mutableState.update { current ->
                 selected.fold(
                     onSuccess = {
-                        current.copy(
-                            vaultPath = it.privatePath,
-                            selectedVaultName = it.displayName,
-                            busy = false,
-                            status = "Local vault selected",
-                        )
+                        current.withSelectedLocalVault(it.privatePath, it.displayName)
+                            .withCurrentVaultUnlockState(
+                                graph.currentEnrollmentState(),
+                                graph.currentKeySecurityLevel(),
+                            ).copy(
+                                busy = false,
+                                status = "Local vault selected",
+                            )
                     },
                     onFailure = {
                         current.copy(
@@ -111,10 +117,10 @@ class UnlockViewModel(
     fun interactiveUnlock() {
         val snapshot = mutableState.value
         if (snapshot.busy ||
-            (snapshot.vaultPath.isBlank() && !snapshot.oneDriveVaultSelected)
+            (snapshot.vaultPath.isBlank() && !snapshot.currentVaultSelected)
         ) return
         val path = snapshot.vaultPath
-        val unlockCurrent = snapshot.oneDriveVaultSelected
+        val unlockCurrent = path.isBlank() && snapshot.currentVaultSelected
         val credential = snapshot.password.toCharArray()
         mutableState.update {
             it.copy(password = "", busy = true, status = "Unlocking vault")
@@ -356,25 +362,41 @@ class UnlockViewModel(
         mutableState.update { it.copy(busy = true, status = "Selecting OneDrive vault") }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching { graph.oneDriveWorkflow.select(item) }
-            val syncStatus = result.mapCatching { graph.oneDriveWorkflow.status() }.getOrNull()
+            val syncStatus = runCatching { graph.oneDriveWorkflow.status() }.getOrNull()
             val connected = graph.oneDriveTokenAdapter.hasStoredToken()
             mutableState.update { current ->
                 result.fold(
                     onSuccess = { selected ->
-                        current.copy(
+                        current.withSelectedOneDriveVault(
+                            selected.displayName,
+                            syncStatus,
+                        ).withCurrentVaultUnlockState(
+                            graph.currentEnrollmentState(),
+                            graph.currentKeySecurityLevel(),
+                        ).copy(
                             busy = false,
                             status = "OneDrive vault selected; enter its master password",
-                            vaultPath = "",
-                            oneDriveVaultSelected = true,
-                            oneDriveSelectedName = selected.displayName,
-                            syncStatus = syncStatus,
                         ).reconcileOneDriveTokenPresence(connected)
                     },
-                    onFailure = {
-                        current.copy(
-                            busy = false,
-                            status = "OneDrive selection failed: ${it.javaClass.simpleName}",
-                        ).reconcileOneDriveTokenPresence(connected)
+                    onFailure = { error ->
+                        val failed = if (error is OneDriveVaultPreloadException) {
+                            current.withSelectedOneDriveVault(
+                                error.selected.displayName,
+                                syncStatus,
+                            ).withCurrentVaultUnlockState(
+                                graph.currentEnrollmentState(),
+                                graph.currentKeySecurityLevel(),
+                            ).copy(
+                                busy = false,
+                                status = "OneDrive vault selected; private download failed, retry unlock",
+                            )
+                        } else {
+                            current.copy(
+                                busy = false,
+                                status = "OneDrive selection failed: ${error.javaClass.simpleName}",
+                            )
+                        }
+                        failed.reconcileOneDriveTokenPresence(connected)
                     },
                 )
             }
@@ -525,11 +547,74 @@ internal fun UnlockUiState.reconcileOneDriveTokenPresence(connected: Boolean): U
         )
     }
 
+internal fun UnlockUiState.withSelectedLocalVault(
+    privatePath: String,
+    displayName: String,
+): UnlockUiState = copy(
+    vaultPath = privatePath,
+    selectedVaultName = displayName,
+    currentVaultSelected = true,
+    oneDriveVaultSelected = false,
+    oneDriveSelectedName = null,
+    syncStatus = null,
+)
+
+internal fun UnlockUiState.withSelectedOneDriveVault(
+    displayName: String,
+    status: AndroidSyncStatus?,
+): UnlockUiState = copy(
+    vaultPath = "",
+    selectedVaultName = null,
+    currentVaultSelected = true,
+    oneDriveVaultSelected = true,
+    oneDriveSelectedName = displayName,
+    syncStatus = status,
+)
+
+internal fun UnlockUiState.withCurrentVaultUnlockState(
+    enrollment: UnlockEnrollmentState,
+    securityLevel: UnlockKeySecurityLevel?,
+): UnlockUiState = copy(
+    enrollmentState = enrollment,
+    keySecurityLevel = securityLevel,
+)
+
+internal fun UnlockUiState.withRestoredVaultSelection(
+    selection: CurrentVaultSelection?,
+    status: AndroidSyncStatus?,
+): UnlockUiState = when {
+    selection == null -> copy(
+        vaultPath = "",
+        selectedVaultName = null,
+        currentVaultSelected = false,
+        oneDriveVaultSelected = false,
+        oneDriveSelectedName = null,
+        syncStatus = null,
+    )
+    selection.sourceKind == "onedrive" -> copy(
+        vaultPath = "",
+        selectedVaultName = null,
+        currentVaultSelected = true,
+        oneDriveVaultSelected = true,
+        oneDriveSelectedName = selection.displayName,
+        syncStatus = status,
+    )
+    else -> copy(
+        vaultPath = "",
+        selectedVaultName = selection.displayName,
+        currentVaultSelected = true,
+        oneDriveVaultSelected = false,
+        oneDriveSelectedName = null,
+        syncStatus = null,
+    )
+}
+
 private data class StartupSnapshot(
     val enrollment: UnlockEnrollmentState,
-    val security: org.vaultkern.android.security.UnlockKeySecurityLevel?,
+    val security: UnlockKeySecurityLevel?,
     val unlocked: Boolean,
     val entries: List<VaultEntryListItem>,
     val syncStatus: AndroidSyncStatus?,
+    val currentSelection: CurrentVaultSelection?,
     val oneDriveConnected: Boolean,
 )

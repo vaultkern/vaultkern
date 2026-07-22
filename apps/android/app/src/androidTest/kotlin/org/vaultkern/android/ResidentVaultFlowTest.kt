@@ -29,6 +29,26 @@ import org.vaultkern.core.VaultSessionConfig
 @RunWith(AndroidJUnit4::class)
 class ResidentVaultFlowTest {
     @Test
+    fun currentVaultPreloadBindingReopensThePrivateSnapshot() {
+        withOpenedFixture("m4-preload-binding") { _, _, session ->
+            val vaultId = requireNotNull(session.sessionState().activeVaultId)
+            session.lockSession()
+            session.closeVault(vaultId)
+
+            val preloaded = session.sources().use { it.preloadCurrentVault() }
+
+            assertTrue(!preloaded.unlocked)
+            assertNotNull(preloaded.currentVaultRefId)
+            VaultKernSensitiveString.fromString(FIXTURE_PASSWORD).use { password ->
+                session.unlock().use { unlock ->
+                    assertTrue(unlock.unlockCurrent(password, null, false).unlocked)
+                }
+            }
+            assertTrue(session.listEntries(vaultId).isNotEmpty())
+        }
+    }
+
+    @Test
     fun browseEditAndSaveRoundTripUsesTheResidentCore() {
         withOpenedFixture("m2-save") { root, vault, session ->
             val port = VaultKernResidentVaultPort(session)

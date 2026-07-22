@@ -27,7 +27,14 @@ class OneDriveWorkflowTest {
         assertEquals("alice@example.com", account.accountLabel)
         assertEquals("Cloud Vault.kdbx", selected.displayName)
         assertEquals(
-            listOf("begin-login", "complete-login", "list:root", "add:item-vault", "set:ref-1"),
+            listOf(
+                "begin-login",
+                "complete-login",
+                "list:root",
+                "add:item-vault",
+                "set:ref-1",
+                "preload",
+            ),
             core.events,
         )
     }
@@ -48,6 +55,23 @@ class OneDriveWorkflowTest {
     }
 
     @Test
+    fun failedPrivatePreloadKeepsTheSelectedReferenceAvailableForRetry() {
+        val core = RecordingOneDriveGateway().apply { failPreload = true }
+        val workflow = OneDriveWorkflow(core, OneDriveAuthPresenter {})
+        val item = workflow.browse(null).single { !it.folder }
+
+        val failure = assertThrows(OneDriveVaultPreloadException::class.java) {
+            workflow.select(item)
+        }
+
+        assertEquals("Cloud Vault.kdbx", failure.selected.displayName)
+        assertEquals(
+            listOf("list:root", "add:item-vault", "set:ref-1", "preload"),
+            core.events,
+        )
+    }
+
+    @Test
     fun syncUsesTheActiveVaultAndPreservesConflictFallbackDiagnostics() {
         val core = RecordingOneDriveGateway()
         val workflow = OneDriveWorkflow(core, OneDriveAuthPresenter {})
@@ -63,6 +87,7 @@ class OneDriveWorkflowTest {
 
 private class RecordingOneDriveGateway : OneDriveCoreGateway {
     val events = mutableListOf<String>()
+    var failPreload = false
 
     override fun beginLogin(): OneDriveAuthSessionDto {
         events += "begin-login"
@@ -102,6 +127,11 @@ private class RecordingOneDriveGateway : OneDriveCoreGateway {
 
     override fun setCurrent(vaultRefId: String) {
         events += "set:$vaultRefId"
+    }
+
+    override fun preloadCurrent() {
+        events += "preload"
+        if (failPreload) throw IllegalStateException("injected preload failure")
     }
 
     override fun activeVaultId(): String? = "vault-1"

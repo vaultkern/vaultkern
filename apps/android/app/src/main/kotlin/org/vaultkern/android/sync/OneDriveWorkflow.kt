@@ -24,6 +24,11 @@ class OneDriveAccount(val accountLabel: String?) {
     override fun toString(): String = "OneDriveAccount(accountLabel=[REDACTED])"
 }
 
+class OneDriveVaultPreloadException(
+    val selected: SelectedOneDriveVault,
+    cause: Exception,
+) : Exception("the selected OneDrive vault could not be cached privately", cause)
+
 data class OneDriveBrowserItem(
     val driveId: String,
     val itemId: String,
@@ -69,6 +74,7 @@ internal interface OneDriveCoreGateway {
     fun listChildren(parentItemId: String?): List<OneDriveItemDto>
     fun addVault(driveId: String, itemId: String): VaultReferenceDto
     fun setCurrent(vaultRefId: String)
+    fun preloadCurrent()
     fun activeVaultId(): String?
     fun sync(vaultId: String): VaultSourceStatusDto
     fun status(): VaultSourceStatusDto?
@@ -113,7 +119,13 @@ class OneDriveWorkflow internal constructor(
         }
         val reference = core.addVault(item.driveId, item.itemId)
         core.setCurrent(reference.vaultRefId)
-        return SelectedOneDriveVault(reference.vaultRefId, reference.displayName)
+        val selected = SelectedOneDriveVault(reference.vaultRefId, reference.displayName)
+        try {
+            core.preloadCurrent()
+        } catch (error: Exception) {
+            throw OneDriveVaultPreloadException(selected, error)
+        }
+        return selected
     }
 
     fun status(): AndroidSyncStatus? = core.status()?.toAndroidStatus()
@@ -149,6 +161,10 @@ private class UniFfiOneDriveCoreGateway(
 
     override fun setCurrent(vaultRefId: String) {
         session.sources().use { it.setCurrentVault(vaultRefId) }
+    }
+
+    override fun preloadCurrent() {
+        session.sources().use { it.preloadCurrentVault() }
     }
 
     override fun activeVaultId(): String? = session.sessionState().activeVaultId

@@ -38,6 +38,7 @@ import org.vaultkern.android.unlock.CorePostUnlockReconciliation
 import org.vaultkern.android.unlock.UnlockCoordinator
 import org.vaultkern.android.unlock.reconcilePlatformStores
 import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
+import org.vaultkern.android.vault.ResidentVaultSelection
 import org.vaultkern.android.vault.VaultEditorWorkflow
 import org.vaultkern.android.vault.VaultKernResidentVaultPort
 import org.vaultkern.core.ResidentPlatform
@@ -81,10 +82,6 @@ class VaultKernGraph(context: Context) {
         File(applicationContext.noBackupFilesDir, "local-document-workspaces"),
         localDocumentAccess,
     )
-    private val localDocumentSelection = LocalDocumentSelectionService(
-        localDocumentAccess,
-        localDocumentWorkspace,
-    )
     private val localDocumentSaves = SelectedLocalDocumentSaveCoordinator(
         localDocumentWorkspace,
     )
@@ -97,6 +94,13 @@ class VaultKernGraph(context: Context) {
         unlockBlobAdapter,
         oneDriveTokenAdapter,
     )
+    private val localDocumentSelection = LocalDocumentSelectionService(
+        localDocumentAccess,
+        localDocumentWorkspace,
+    ) { privatePath ->
+        session.openVault(privatePath)
+        Unit
+    }
 
     private val residentUnlockPort = VaultKernResidentUnlockPort(session)
     private val actualState = CurrentVaultQuickUnlockActualState(
@@ -137,6 +141,7 @@ class VaultKernGraph(context: Context) {
         desiredSettings,
         ReconciliationScheduler { scheduleReconciliation() },
     )
+    val vaultSelection = ResidentVaultSelection(session)
     val vaultWorkflow = VaultEditorWorkflow(
         VaultKernResidentVaultPort(session, localDocumentSaves),
     )

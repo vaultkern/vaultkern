@@ -40,6 +40,7 @@ data class UnlockUiState(
     val keySecurityLevel: UnlockKeySecurityLevel? = null,
     val busy: Boolean = false,
     val status: String = "Select a vault and unlock it",
+    val currentVaultSelected: Boolean = false,
     val vaultUnlocked: Boolean = false,
     val entries: List<VaultEntryListItem> = emptyList(),
     val editor: VaultEntryDraft? = null,
@@ -63,6 +64,7 @@ data class UnlockUiState(
             "keySecurityLevel=$keySecurityLevel, " +
             "busy=$busy, " +
             "status=$status, " +
+            "currentVaultSelected=$currentVaultSelected, " +
             "vaultUnlocked=$vaultUnlocked, " +
             "entryCount=${entries.size}, " +
             "editor=${if (editor == null) "closed" else "[REDACTED]"}, " +
@@ -124,7 +126,7 @@ fun VaultKernUnlockScreen(
             Button(
                 onClick = onInteractiveUnlock,
                 enabled = !state.busy &&
-                    (state.vaultPath.isNotBlank() || state.oneDriveVaultSelected),
+                    (state.vaultPath.isNotBlank() || state.currentVaultSelected),
                 modifier = Modifier.fillMaxWidth().testTag("interactive-unlock"),
             ) {
                 Text(if (state.oneDriveVaultSelected) "Unlock selected OneDrive vault" else "Open and unlock")

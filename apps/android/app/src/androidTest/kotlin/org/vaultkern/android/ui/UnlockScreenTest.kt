@@ -100,6 +100,7 @@ class UnlockScreenTest {
             VaultKernUnlockScreen(
                 state = UnlockUiState(
                     oneDriveAuthPending = true,
+                    currentVaultSelected = true,
                     oneDriveVaultSelected = true,
                     oneDriveSelectedName = "Cloud Vault.kdbx",
                 ),

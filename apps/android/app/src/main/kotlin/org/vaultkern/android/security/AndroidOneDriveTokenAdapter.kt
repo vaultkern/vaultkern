@@ -255,6 +255,7 @@ class AndroidOneDriveTokenAdapter(
         maintenancePending.set(runCatching { reconcileStorageInternal() }.isFailure)
     }
 
+    @Synchronized
     override fun loadRefreshToken(): VaultKernSensitiveString? {
         val record = try {
             records.read()
@@ -281,6 +282,7 @@ class AndroidOneDriveTokenAdapter(
         }
     }
 
+    @Synchronized
     override fun storeRefreshToken(token: VaultKernSensitiveString) {
         val plaintext = try {
             token.copyUtf8Bytes()
@@ -316,6 +318,7 @@ class AndroidOneDriveTokenAdapter(
         maintenancePending.set(runCatching { cleanupOrphans() }.isFailure)
     }
 
+    @Synchronized
     override fun deleteRefreshToken() {
         val record = runCatching { records.read() }.getOrNull()
         try {
@@ -329,11 +332,13 @@ class AndroidOneDriveTokenAdapter(
         }
     }
 
+    @Synchronized
     fun securityLevel(): UnlockKeySecurityLevel? =
         runCatching { records.read()?.securityLevel }.getOrNull()
 
     fun hasStoredToken(): Boolean = securityLevel() != null
 
+    @Synchronized
     fun reconcileStorage() {
         try {
             reconcileStorageInternal()

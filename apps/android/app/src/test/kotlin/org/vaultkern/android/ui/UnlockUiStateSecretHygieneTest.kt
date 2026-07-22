@@ -20,12 +20,14 @@ class UnlockUiStateSecretHygieneTest {
         val state = UnlockUiState(
             vaultPath = "/data/user/0/org.vaultkern.android/no_backup/private-name.kdbx",
             selectedVaultName = "personal-finances.kdbx",
+            conflictCopyPath = "/data/user/0/org.vaultkern.android/no_backup/private-conflict.kdbx",
         )
 
         val rendered = state.toString()
 
         assertFalse(rendered.contains("private-name.kdbx"))
         assertFalse(rendered.contains("personal-finances.kdbx"))
+        assertFalse(rendered.contains("private-conflict.kdbx"))
         assertTrue(rendered.contains("[REDACTED]"))
     }
 

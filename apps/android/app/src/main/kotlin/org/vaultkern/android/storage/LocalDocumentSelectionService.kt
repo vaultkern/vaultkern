@@ -8,9 +8,12 @@ interface PersistableLocalDocumentAccess : LocalDocumentAccess {
 class LocalDocumentSelectionService(
     private val access: PersistableLocalDocumentAccess,
     private val workspace: LocalDocumentWorkspace,
+    private val openSelectedPrivateVault: (String) -> Unit = {},
 ) {
     fun select(uri: String): SelectedLocalDocument {
         access.retainReadWrite(uri)
-        return workspace.select(uri, access.displayName(uri))
+        val selected = workspace.select(uri, access.displayName(uri))
+        openSelectedPrivateVault(selected.privatePath)
+        return selected
     }
 }
