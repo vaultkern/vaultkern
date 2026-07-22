@@ -28,6 +28,7 @@ import org.vaultkern.android.vault.VaultEntryListItem
 
 data class UnlockUiState(
     val vaultPath: String = "",
+    val selectedVaultName: String? = null,
     val password: String = "",
     val quickUnlockDesired: Boolean = false,
     val enrollmentState: UnlockEnrollmentState = UnlockEnrollmentState.NOT_ENROLLED,
@@ -41,7 +42,8 @@ data class UnlockUiState(
 ) {
     override fun toString(): String =
         "UnlockUiState(" +
-            "vaultPath=$vaultPath, " +
+            "vaultPath=${if (vaultPath.isBlank()) "none" else "[APP-PRIVATE]"}, " +
+            "selectedVaultName=${if (selectedVaultName == null) "none" else "[REDACTED]"}, " +
             "password=[REDACTED], " +
             "quickUnlockDesired=$quickUnlockDesired, " +
             "enrollmentState=$enrollmentState, " +
@@ -57,11 +59,11 @@ data class UnlockUiState(
 @Composable
 fun VaultKernUnlockScreen(
     state: UnlockUiState,
-    onPathChanged: (String) -> Unit,
     onPasswordChanged: (String) -> Unit,
     onInteractiveUnlock: () -> Unit,
     onQuickUnlock: () -> Unit,
     onQuickUnlockDesiredChanged: (Boolean) -> Unit,
+    onChooseLocalVault: () -> Unit = {},
 ) {
     MaterialTheme {
         Column(
@@ -72,13 +74,16 @@ fun VaultKernUnlockScreen(
         ) {
             Text("VaultKern", style = MaterialTheme.typography.headlineMedium)
             Text(state.status, modifier = Modifier.testTag("unlock-status"))
-            OutlinedTextField(
-                value = state.vaultPath,
-                onValueChange = onPathChanged,
+            Button(
+                onClick = onChooseLocalVault,
                 enabled = !state.busy,
-                label = { Text("Vault path") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("vault-path"),
+                modifier = Modifier.fillMaxWidth().testTag("choose-local-vault"),
+            ) {
+                Text("Choose local vault")
+            }
+            Text(
+                state.selectedVaultName?.let { "Selected: $it" } ?: "No local vault selected",
+                modifier = Modifier.testTag("selected-vault-name"),
             )
             OutlinedTextField(
                 value = state.password,

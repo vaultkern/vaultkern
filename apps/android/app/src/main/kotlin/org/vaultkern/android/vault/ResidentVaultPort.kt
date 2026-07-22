@@ -73,6 +73,7 @@ class VaultEditorWorkflow(
 
 class VaultKernResidentVaultPort(
     private val session: VaultSession,
+    private val selectedLocalDocuments: SelectedLocalDocumentSaveCoordinator? = null,
 ) : ResidentVaultPort {
     override fun listEntries(): List<VaultEntryListItem> =
         session.listEntries(activeVaultId()).map { entry ->
@@ -134,8 +135,9 @@ class VaultKernResidentVaultPort(
             edited = session.editEntry(vaultId, draft.id, fields)
             edited.closeSecrets()
             edited = null
+            val localSave = selectedLocalDocuments?.prepare(vaultId)
             val result = session.save(vaultId)
-            VaultSaveResult(
+            val coreResult = VaultSaveResult(
                 status = when (result.status) {
                     SaveVaultStatusDto.SAVED -> VaultSaveStatus.SAVED
                     SaveVaultStatusDto.MERGED -> VaultSaveStatus.MERGED
@@ -144,6 +146,7 @@ class VaultKernResidentVaultPort(
                 },
                 conflictCopyPath = result.conflictCopyPath,
             )
+            localSave?.complete(coreResult) ?: coreResult
         } finally {
             var cleanupFailure: Throwable? = null
             try {

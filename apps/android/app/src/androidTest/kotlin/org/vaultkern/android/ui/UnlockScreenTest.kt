@@ -6,6 +6,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
@@ -26,7 +27,6 @@ class UnlockScreenTest {
                     enrollmentState = UnlockEnrollmentState.INVALIDATED,
                     keySecurityLevel = UnlockKeySecurityLevel.TRUSTED_ENVIRONMENT,
                 ),
-                onPathChanged = {},
                 onPasswordChanged = {},
                 onInteractiveUnlock = {},
                 onQuickUnlock = {},
@@ -47,7 +47,6 @@ class UnlockScreenTest {
         compose.setContent {
             VaultKernUnlockScreen(
                 state = UnlockUiState(enrollmentState = UnlockEnrollmentState.ENROLLED),
-                onPathChanged = {},
                 onPasswordChanged = {},
                 onInteractiveUnlock = {},
                 onQuickUnlock = {},
@@ -63,7 +62,6 @@ class UnlockScreenTest {
         compose.setContent {
             VaultKernUnlockScreen(
                 state = UnlockUiState(enrollmentState = UnlockEnrollmentState.NOT_ENROLLED),
-                onPathChanged = {},
                 onPasswordChanged = {},
                 onInteractiveUnlock = {},
                 onQuickUnlock = {},
@@ -72,5 +70,24 @@ class UnlockScreenTest {
         }
         compose.onNodeWithTag("unlock-enrollment-state")
             .assertTextContains("not enrolled", substring = true, ignoreCase = true)
+    }
+
+    @Test
+    fun localVaultButtonLaunchesTheDocumentPickerCallback() {
+        var launches = 0
+        compose.setContent {
+            VaultKernUnlockScreen(
+                state = UnlockUiState(),
+                onPasswordChanged = {},
+                onInteractiveUnlock = {},
+                onQuickUnlock = {},
+                onQuickUnlockDesiredChanged = {},
+                onChooseLocalVault = { launches += 1 },
+            )
+        }
+
+        compose.onNodeWithTag("choose-local-vault").performClick()
+
+        assertEquals(1, launches)
     }
 }

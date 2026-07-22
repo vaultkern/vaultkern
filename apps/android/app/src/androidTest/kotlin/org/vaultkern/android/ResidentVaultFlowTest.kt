@@ -11,6 +11,10 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.vaultkern.android.storage.LocalDocumentAccess
+import org.vaultkern.android.storage.LocalDocumentSnapshot
+import org.vaultkern.android.storage.LocalDocumentWorkspace
+import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
 import org.vaultkern.android.vault.VaultKernResidentVaultPort
 import org.vaultkern.android.vault.VaultSaveStatus
 import org.vaultkern.core.OneDriveTokenAdapter
@@ -85,6 +89,41 @@ class ResidentVaultFlowTest {
         }
     }
 
+    @Test
+    fun normalResidentSavePublishesBackToTheUserSelectedUri() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val root = File(context.noBackupFilesDir, "m2-selected-uri-${System.nanoTime()}")
+        root.mkdirs()
+        val fixture = instrumentation.context.assets
+            .open("keepassxc-2.7.6-kdbx4.1.kdbx")
+            .use { it.readBytes() }
+        val uri = "content://documents/local/selected-vault.kdbx"
+        val access = ResidentSelectedDocumentAccess(uri, fixture)
+        fixture.fill(0)
+        val workspace = LocalDocumentWorkspace(root.resolve("documents"), access)
+        val selected = workspace.select(uri, "selected-vault.kdbx")
+        val session = newSession(root.resolve("resident"))
+        try {
+            val handle = session.openVault(selected.privatePath)
+            unlock(session, handle.vaultId)
+            val port = VaultKernResidentVaultPort(
+                session,
+                SelectedLocalDocumentSaveCoordinator(workspace),
+            )
+            val first = port.listEntries().first()
+            val draft = port.readEntry(first.id).copy(title = "Saved through selected URI")
+
+            val result = port.editAndSave(draft)
+
+            assertEquals(VaultSaveStatus.SAVED, result.status)
+            assertArrayEquals(File(selected.privatePath).readBytes(), access.bytes())
+        } finally {
+            session.close()
+            root.deleteRecursively()
+        }
+    }
+
     private fun withOpenedFixture(
         label: String,
         body: (File, File, VaultSession) -> Unit,
@@ -129,6 +168,34 @@ class ResidentVaultFlowTest {
     companion object {
         private const val FIXTURE_PASSWORD = "vaultkern-external-fixture"
     }
+}
+
+private class ResidentSelectedDocumentAccess(
+    private val expectedUri: String,
+    initial: ByteArray,
+) : LocalDocumentAccess {
+    private var content = initial.copyOf()
+    private var modifiedAt = 1L
+
+    override fun read(uri: String): LocalDocumentSnapshot {
+        require(uri == expectedUri)
+        return LocalDocumentSnapshot(content.copyOf(), modifiedAt)
+    }
+
+    override fun replace(uri: String, bytes: ByteArray) {
+        require(uri == expectedUri)
+        content.fill(0)
+        content = bytes.copyOf()
+        modifiedAt += 1
+    }
+
+    override fun createConflictCopy(
+        sourceUri: String,
+        displayName: String,
+        bytes: ByteArray,
+    ): String? = null
+
+    fun bytes(): ByteArray = content.copyOf()
 }
 
 private class MemoryUnlockBlobAdapter : UnlockBlobAdapter {

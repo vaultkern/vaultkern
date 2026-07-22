@@ -18,6 +18,18 @@ interface ResidentUnlockPort {
     fun enrollQuickUnlock(credential: CharArray)
 }
 
+internal fun reconcilePlatformStores(vararg stores: () -> Unit) {
+    var failure: Exception? = null
+    stores.forEach { reconcile ->
+        try {
+            reconcile()
+        } catch (error: Exception) {
+            if (failure == null) failure = error else failure?.addSuppressed(error)
+        }
+    }
+    failure?.let { throw it }
+}
+
 fun interface PostUnlockReconciliation {
     fun reconcile(enrollCurrentVault: (() -> Unit)?)
 }
@@ -49,6 +61,7 @@ class CorePostUnlockReconciliation(
 class UnlockCoordinator(
     private val port: ResidentUnlockPort,
     private val reconciliation: PostUnlockReconciliation,
+    private val beforeQuickUnlock: () -> Unit = {},
 ) {
     private val reconciliationFailure = AtomicReference<String?>(null)
 
@@ -68,6 +81,7 @@ class UnlockCoordinator(
     }
 
     fun quickUnlock(): UnlockAttemptOutcome {
+        beforeQuickUnlock()
         val outcome = port.quickUnlock()
         if (outcome == UnlockAttemptOutcome.UNLOCKED) {
             reconciliationFailure.set(null)

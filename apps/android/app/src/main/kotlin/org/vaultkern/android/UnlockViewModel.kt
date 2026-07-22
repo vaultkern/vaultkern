@@ -69,12 +69,34 @@ class UnlockViewModel(
         }
     }
 
-    fun onPathChanged(value: String) {
-        mutableState.update { it.copy(vaultPath = value) }
-    }
-
     fun onPasswordChanged(value: String) {
         mutableState.update { it.copy(password = value) }
+    }
+
+    fun selectLocalDocument(uri: String) {
+        if (uri.isBlank() || mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, status = "Opening selected local vault") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val selected = runCatching { graph.selectLocalDocument(uri) }
+            mutableState.update { current ->
+                selected.fold(
+                    onSuccess = {
+                        current.copy(
+                            vaultPath = it.privatePath,
+                            selectedVaultName = it.displayName,
+                            busy = false,
+                            status = "Local vault selected",
+                        )
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "Vault selection failed: ${it.javaClass.simpleName}",
+                        )
+                    },
+                )
+            }
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)

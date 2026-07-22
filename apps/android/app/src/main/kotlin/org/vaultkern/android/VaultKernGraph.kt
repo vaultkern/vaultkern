@@ -15,8 +15,14 @@ import org.vaultkern.android.settings.CurrentVaultQuickUnlockActualState
 import org.vaultkern.android.settings.QuickUnlockReconciler
 import org.vaultkern.android.settings.QuickUnlockSettingsController
 import org.vaultkern.android.settings.ReconciliationScheduler
+import org.vaultkern.android.storage.AndroidLocalDocumentAccess
+import org.vaultkern.android.storage.LocalDocumentSelectionService
+import org.vaultkern.android.storage.LocalDocumentWorkspace
+import org.vaultkern.android.storage.SelectedLocalDocument
 import org.vaultkern.android.unlock.CorePostUnlockReconciliation
 import org.vaultkern.android.unlock.UnlockCoordinator
+import org.vaultkern.android.unlock.reconcilePlatformStores
+import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
 import org.vaultkern.android.vault.VaultEditorWorkflow
 import org.vaultkern.android.vault.VaultKernResidentVaultPort
 import org.vaultkern.core.OneDriveTokenAdapter
@@ -47,6 +53,20 @@ class VaultKernGraph(context: Context) {
         },
     )
     val desiredSettings = AtomicDesiredSettingsStore(applicationContext)
+    private val localDocumentAccess = AndroidLocalDocumentAccess(
+        applicationContext.contentResolver,
+    )
+    private val localDocumentWorkspace = LocalDocumentWorkspace(
+        File(applicationContext.noBackupFilesDir, "local-document-workspaces"),
+        localDocumentAccess,
+    )
+    private val localDocumentSelection = LocalDocumentSelectionService(
+        localDocumentAccess,
+        localDocumentWorkspace,
+    )
+    private val localDocumentSaves = SelectedLocalDocumentSaveCoordinator(
+        localDocumentWorkspace,
+    )
     val session = VaultSession(
         VaultSessionConfig(
             ResidentPlatform.ANDROID,
@@ -67,13 +87,16 @@ class VaultKernGraph(context: Context) {
 
     val unlockCoordinator = UnlockCoordinator(
         residentUnlockPort,
-        CorePostUnlockReconciliation(reconciler, unlockBlobAdapter::reconcileStorage),
+        CorePostUnlockReconciliation(reconciler, ::reconcilePlatformStorage),
+        beforeQuickUnlock = ::reconcileLocalDocuments,
     )
     val settingsController = QuickUnlockSettingsController(
         desiredSettings,
         ReconciliationScheduler { scheduleReconciliation() },
     )
-    val vaultWorkflow = VaultEditorWorkflow(VaultKernResidentVaultPort(session))
+    val vaultWorkflow = VaultEditorWorkflow(
+        VaultKernResidentVaultPort(session, localDocumentSaves),
+    )
 
     @Volatile
     private var lastReconciliation: Future<*>? = null
@@ -93,11 +116,26 @@ class VaultKernGraph(context: Context) {
             currentEnrollmentState() == UnlockEnrollmentState.ENROLLED
         }
 
+    fun selectLocalDocument(uri: String): SelectedLocalDocument =
+        localDocumentSelection.select(uri)
+
+    private fun reconcileLocalDocuments() {
+        localDocumentWorkspace.reconcilePending()
+        localDocumentWorkspace.refreshFromAuthorities()
+    }
+
+    private fun reconcilePlatformStorage() {
+        reconcilePlatformStores(
+            unlockBlobAdapter::reconcileStorage,
+            ::reconcileLocalDocuments,
+        )
+    }
+
     private fun scheduleReconciliation() {
         lastReconciliation = reconciliationExecutor.submit {
             CorePostUnlockReconciliation(
                 reconciler,
-                unlockBlobAdapter::reconcileStorage,
+                ::reconcilePlatformStorage,
             ).reconcile(null)
         }
     }
