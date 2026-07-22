@@ -222,6 +222,8 @@ mod tests {
 
     use super::{MAX_RESIDENT_PROTOCOL_MESSAGE_BYTES, ResidentProtocolSession};
     use crate::Runtime;
+    use crate::runtime::resident_browser_command_requires_fresh_verification;
+    use vaultkern_runtime_protocol::RuntimeCommand;
 
     fn send(
         session: &mut ResidentProtocolSession,
@@ -337,5 +339,21 @@ mod tests {
         );
         let response: Value = serde_json::from_slice(&response).unwrap();
         assert_eq!(response["code"], "invalid_request");
+    }
+
+    #[test]
+    fn browser_uv_classifier_covers_policy_changes_without_reprompting_internal_uv() {
+        assert!(resident_browser_command_requires_fresh_verification(
+            &RuntimeCommand::DisableQuickUnlockForCurrentVault
+        ));
+        assert!(resident_browser_command_requires_fresh_verification(
+            &RuntimeCommand::CompletePendingOneDriveLogin
+        ));
+        assert!(!resident_browser_command_requires_fresh_verification(
+            &RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+        ));
+        assert!(!resident_browser_command_requires_fresh_verification(
+            &RuntimeCommand::GetSessionState
+        ));
     }
 }

@@ -1,8 +1,23 @@
+import Darwin
 import SwiftUI
 
 @main
 struct VaultKernApp: App {
-  @StateObject private var model = VaultAppModel()
+  @StateObject private var model: VaultAppModel
+
+  init() {
+    if CommandLine.arguments.dropFirst() == ["--unregister-native-messaging"] {
+      do {
+        let status = try ResidentIPCController.unregisterService()
+        print("native messaging service status: \(status.rawValue)")
+        exit(0)
+      } catch {
+        fputs("native messaging service unregister failed: \(error.localizedDescription)\n", stderr)
+        exit(1)
+      }
+    }
+    _model = StateObject(wrappedValue: VaultAppModel())
+  }
 
   var body: some Scene {
     WindowGroup {

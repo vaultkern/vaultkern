@@ -10749,30 +10749,72 @@ impl std::error::Error for ResidentBrowserRequestCanceled {}
 pub(crate) fn resident_browser_command_requires_fresh_verification(
     command: &RuntimeCommand,
 ) -> bool {
-    matches!(
-        command,
+    // Keep this exhaustive so every protocol addition gets an explicit browser-UV review.
+    // Unlock and passkey ceremony commands in the false arm own their bounded interactive proof.
+    match command {
         RuntimeCommand::AddOneDriveVaultReference { .. }
-            | RuntimeCommand::DeleteVaultReference { .. }
-            | RuntimeCommand::DeleteVaultReferenceIfNotCurrent { .. }
-            | RuntimeCommand::CreateEntry { .. }
-            | RuntimeCommand::UpdateEntryFields { .. }
-            | RuntimeCommand::CompareAndUpdateEntryFields { .. }
-            | RuntimeCommand::PersistAutofillMutation { .. }
-            | RuntimeCommand::ClearEntryTotp { .. }
-            | RuntimeCommand::SetEntryPasskey { .. }
-            | RuntimeCommand::ClearEntryPasskey { .. }
-            | RuntimeCommand::DeleteEntry { .. }
-            | RuntimeCommand::GetEntryDetail { .. }
-            | RuntimeCommand::GetEntryHistoryDetail { .. }
-            | RuntimeCommand::GetEntryAttachmentContent { .. }
-            | RuntimeCommand::AddEntryAttachment { .. }
-            | RuntimeCommand::UpdateEntryAttachmentMetadata { .. }
-            | RuntimeCommand::ReplaceEntryAttachmentContent { .. }
-            | RuntimeCommand::DeleteEntryAttachment { .. }
-            | RuntimeCommand::UpdateEntry { .. }
-            | RuntimeCommand::SaveVault { .. }
-            | RuntimeCommand::UpdateDatabaseSettings { .. }
-    )
+        | RuntimeCommand::AddLocalVaultReference { .. }
+        | RuntimeCommand::CompletePendingOneDriveLogin
+        | RuntimeCommand::SetCurrentVault { .. }
+        | RuntimeCommand::RetryVaultSourceSync { .. }
+        | RuntimeCommand::DeleteVaultReference { .. }
+        | RuntimeCommand::DeleteVaultReferenceIfNotCurrent { .. }
+        | RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
+        | RuntimeCommand::DisableQuickUnlockForCurrentVault
+        | RuntimeCommand::CreateEntry { .. }
+        | RuntimeCommand::UpdateEntryFields { .. }
+        | RuntimeCommand::CompareAndUpdateEntryFields { .. }
+        | RuntimeCommand::PersistAutofillMutation { .. }
+        | RuntimeCommand::ClearEntryTotp { .. }
+        | RuntimeCommand::SetEntryPasskey { .. }
+        | RuntimeCommand::ClearEntryPasskey { .. }
+        | RuntimeCommand::DeleteEntry { .. }
+        | RuntimeCommand::GetEntryDetail { .. }
+        | RuntimeCommand::GetEntryHistoryDetail { .. }
+        | RuntimeCommand::GetEntryAttachmentContent { .. }
+        | RuntimeCommand::AddEntryAttachment { .. }
+        | RuntimeCommand::UpdateEntryAttachmentMetadata { .. }
+        | RuntimeCommand::ReplaceEntryAttachmentContent { .. }
+        | RuntimeCommand::DeleteEntryAttachment { .. }
+        | RuntimeCommand::UpdateEntry { .. }
+        | RuntimeCommand::SaveVault { .. }
+        | RuntimeCommand::UpdateDatabaseSettings { .. } => true,
+        RuntimeCommand::Handshake { .. }
+        | RuntimeCommand::GetSessionState
+        | RuntimeCommand::ListRecentVaults
+        | RuntimeCommand::PreloadCurrentVault
+        | RuntimeCommand::BeginOneDriveLogin
+        | RuntimeCommand::ListOneDriveChildren { .. }
+        | RuntimeCommand::UnlockCurrentVaultWithPassword { .. }
+        | RuntimeCommand::UnlockCurrentVault { .. }
+        | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+        | RuntimeCommand::OpenLocalVault { .. }
+        | RuntimeCommand::LockSession
+        | RuntimeCommand::UnlockWithPassword { .. }
+        | RuntimeCommand::UnlockVault { .. }
+        | RuntimeCommand::ListGroups { .. }
+        | RuntimeCommand::ListEntries { .. }
+        | RuntimeCommand::ListEntryHistory { .. }
+        | RuntimeCommand::GetPasskeyUserVerificationCapability
+        | RuntimeCommand::VerifyPasskeyUser { .. }
+        | RuntimeCommand::ListPasskeyCredentials { .. }
+        | RuntimeCommand::RegisterPasskeyCeremony { .. }
+        | RuntimeCommand::AdvancePasskeyCeremonyPhase { .. }
+        | RuntimeCommand::BindPasskeyCeremonyVault { .. }
+        | RuntimeCommand::QueryPasskeyCeremonyLedger { .. }
+        | RuntimeCommand::ReconcilePasskeyCeremonyLedger { .. }
+        | RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery { .. }
+        | RuntimeCommand::CreatePasskeyAssertion { .. }
+        | RuntimeCommand::CreatePasskeyRegistration { .. }
+        | RuntimeCommand::SavePasskeyRegistration { .. }
+        | RuntimeCommand::AbortPasskeyRegistration { .. }
+        | RuntimeCommand::CommitPasskeyRegistration { .. }
+        | RuntimeCommand::PasskeyCredentialStatus { .. }
+        | RuntimeCommand::PasskeyCredentialStatusBatch { .. }
+        | RuntimeCommand::GetDatabaseSettings { .. }
+        | RuntimeCommand::FindFillCandidates { .. }
+        | RuntimeCommand::FindExactMatchingEntryIds { .. } => false,
+    }
 }
 
 fn write_local_save_warning(destination: &mut impl std::io::Write, warning: &str) {

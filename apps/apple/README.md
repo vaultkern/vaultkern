@@ -31,3 +31,23 @@ VAULTKERN_ONEDRIVE_CLIENT_ID=<public-client-id> \
 
 The sandbox permits outbound HTTPS and the fixed loopback OAuth callback
 listener. No AutoFill credential-provider entitlement is part of this target.
+
+## Browser native messaging
+
+The app embeds a signed `VaultKernNativeMessagingShim`. The same executable is
+registered as an `SMAppService` LaunchAgent for its Mach broker and is launched
+per browser port for native-messaging stdio. The resident and helper refuse XPC
+peers that do not match the fixed Team ID and signing identifiers in
+`Sources/IPC/IPCContract.swift`.
+
+After building a signed app, install Chrome and Edge host manifests for the
+current extension id:
+
+```zsh
+apps/apple/Scripts/install-native-host.zsh <32-letter-extension-id> \
+  /absolute/path/to/VaultKern.app
+```
+
+The helper forwards framed protocol bytes only. Rust in the resident app owns
+handshake negotiation, per-port cancellation, command dispatch, and fresh
+Touch ID authorization for secret release or mutation commands.

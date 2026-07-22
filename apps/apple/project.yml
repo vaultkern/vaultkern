@@ -15,11 +15,29 @@ settings:
     SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
     SWIFT_VERSION: "6.0"
 targets:
+  VaultKernNativeMessagingShim:
+    type: tool
+    platform: macOS
+    sources:
+      - path: NativeMessagingShim
+      - path: Sources/IPC
+        includes:
+          - IPCContract.swift
+          - IPCInterfaces.swift
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        PRODUCT_BUNDLE_IDENTIFIER: com.vaultkern.macos.native-messaging-shim
+        PRODUCT_NAME: VaultKernNativeMessagingShim
+        SKIP_INSTALL: YES
   VaultKern:
     type: application
     platform: macOS
     sources:
-      - path: Sources
+      - path: Sources/App
+      - path: Sources/IPC
+      - path: Sources/Model
+      - path: Sources/Platform
       - path: ../../crates/vaultkern-uniffi/bindings/swift/SensitiveTypes.swift
       - path: ../../crates/vaultkern-uniffi/bindings/swift/VaultKernCore.swift
       - path: ../../crates/vaultkern-uniffi/bindings/swift/MacOSUnlockBlobAdapter.swift
@@ -28,6 +46,14 @@ targets:
       - name: Build Rust UniFFI library
         script: "$SRCROOT/Scripts/build-rust.zsh"
         basedOnDependencyAnalysis: false
+    postBuildScripts:
+      - name: Embed signed native messaging helper
+        script: "$SRCROOT/Scripts/embed-native-messaging.zsh"
+        basedOnDependencyAnalysis: false
+    dependencies:
+      - target: VaultKernNativeMessagingShim
+        link: false
+        embed: false
     settings:
       base:
         CODE_SIGN_ENTITLEMENTS: Config/VaultKern.entitlements
@@ -82,6 +108,7 @@ schemes:
   VaultKern:
     build:
       targets:
+        VaultKernNativeMessagingShim: all
         VaultKern: all
         VaultKernTests: [test]
     test:
