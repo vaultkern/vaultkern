@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -68,6 +68,7 @@ use crate::providers::biometric::{
     BiometricProvider, TestBiometricProvider, UnsupportedBiometricProvider,
     default_biometric_provider,
 };
+use crate::providers::durable_file::create_dir_all_durable;
 use crate::providers::local_file::{
     LocalFileCommitError, LocalFileVaultSourceProvider, VaultSourceFingerprint,
 };
@@ -75,6 +76,7 @@ use crate::providers::onedrive::{
     OneDriveConditionalWriteOutcome, OneDriveMemoryAccessCounts, OneDriveMemoryWriteBehavior,
     OneDriveVaultSourceProvider, is_onedrive_item_not_found,
 };
+use crate::providers::onedrive_token_store::OneDriveRefreshTokenStore;
 use crate::providers::remote_cache::{
     GenericPendingKind, PendingRemoteCacheChain, PendingRemoteCacheChainError,
     PendingRemoteCacheCompletion, RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry,
@@ -82,7 +84,8 @@ use crate::providers::remote_cache::{
 use crate::providers::secure_storage::{
     FailingContainsSecureStorageProvider, FailingDeleteSecureStorageProvider,
     MemorySecureStorageProvider, SecureStorageProvider, UnsupportedSecureStorageProvider,
-    default_secure_storage_provider, purge_legacy_extension_quick_unlock_storage,
+    default_secure_storage_provider, is_secure_storage_cancelled,
+    purge_legacy_extension_quick_unlock_storage,
 };
 use crate::session::{
     LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id,
@@ -90,8 +93,8 @@ use crate::session::{
 use crate::state_paths::extension_id_from_browser_origin;
 use crate::sync::{SessionBaseStore, SyncedBaseStore, write_local_conflict_copy};
 use crate::unlock::{
-    MasterCredential, MasterCredentialShape, UnlockAttempt, enroll_unlock_blob, unlock_from_blob,
-    unlock_historical_snapshot_from_blob,
+    MasterCredential, MasterCredentialShape, UnlockAttempt, enroll_unlock_blob,
+    unlock_from_blob_with_policy, unlock_historical_snapshot_from_blob_with_policy,
 };
 use crate::vault_reference_store::{PendingVaultCleanup, StoredVaultSource, VaultReferenceStore};
 
@@ -270,6 +273,125 @@ enum SourceRefreshConflictDisposition {
     Pending { status: VaultSourceStatusDto },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResidentKdfPolicy {
+    Desktop,
+    Mobile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuickUnlockOutcome {
+    Unlocked,
+    NotEnrolled,
+    Cancelled,
+    OpenAppRequired,
+    CredentialRequired,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalKdfDisposition {
+    ConfirmationRequired,
+    Refused,
+    Forbidden,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalKdfFailure {
+    pub algorithm: &'static str,
+    pub resource: &'static str,
+    pub observed: u64,
+    pub limit: Option<u64>,
+    pub disposition: ExternalKdfDisposition,
+}
+
+pub fn classify_external_kdf_error(error: &anyhow::Error) -> Option<ExternalKdfFailure> {
+    let policy_error = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<KdbxError>())?;
+    let KdbxError::ExternalKdfPolicy {
+        algorithm,
+        observed,
+        decision,
+    } = policy_error
+    else {
+        return None;
+    };
+    let (algorithm, resource) = match algorithm {
+        vaultkern_core::ExternalKdfAlgorithm::AesKdbx3 => ("aes_kdbx3", "rounds"),
+        vaultkern_core::ExternalKdfAlgorithm::AesKdbx4 => ("aes_kdbx4", "rounds"),
+        vaultkern_core::ExternalKdfAlgorithm::Argon2d => ("argon2d", "memory_bytes"),
+        vaultkern_core::ExternalKdfAlgorithm::Argon2id => ("argon2id", "memory_bytes"),
+    };
+    let (limit, disposition) = match decision {
+        vaultkern_core::ExternalKdfDecision::Confirm(limit) => {
+            (Some(*limit), ExternalKdfDisposition::ConfirmationRequired)
+        }
+        vaultkern_core::ExternalKdfDecision::Refuse(limit) => {
+            (Some(*limit), ExternalKdfDisposition::Refused)
+        }
+        vaultkern_core::ExternalKdfDecision::Forbid => (None, ExternalKdfDisposition::Forbidden),
+        vaultkern_core::ExternalKdfDecision::Allow => return None,
+    };
+    Some(ExternalKdfFailure {
+        algorithm,
+        resource,
+        observed: *observed,
+        limit,
+        disposition,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentRuntimeConfig {
+    pub state_directory: PathBuf,
+    pub temporary_directory: PathBuf,
+    pub kdf_policy: ResidentKdfPolicy,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuntimeRole {
+    allow_unlock_kdf: bool,
+    resident_kdf_policy: ResidentKdfPolicy,
+}
+
+impl RuntimeRole {
+    const DESKTOP_RESIDENT: Self = Self {
+        allow_unlock_kdf: true,
+        resident_kdf_policy: ResidentKdfPolicy::Desktop,
+    };
+
+    const EXTENSION: Self = Self {
+        allow_unlock_kdf: false,
+        resident_kdf_policy: ResidentKdfPolicy::Desktop,
+    };
+
+    const fn resident(kdf_policy: ResidentKdfPolicy) -> Self {
+        Self {
+            allow_unlock_kdf: true,
+            resident_kdf_policy: kdf_policy,
+        }
+    }
+}
+
+impl ResidentRuntimeConfig {
+    fn validate(&self) -> Result<()> {
+        if !self.state_directory.is_absolute() {
+            anyhow::bail!("resident runtime state directory must be absolute");
+        }
+        if !self.temporary_directory.is_absolute() {
+            anyhow::bail!("resident runtime temporary directory must be absolute");
+        }
+        create_dir_all_durable(&self.state_directory).with_context(|| {
+            format!(
+                "failed to prepare resident runtime state directory: {}",
+                self.state_directory.display()
+            )
+        })?;
+        Ok(())
+    }
+}
+
 pub struct Runtime {
     core: KeepassCore,
     vault_session: VaultSession,
@@ -283,6 +405,7 @@ pub struct Runtime {
     secure_storage: Box<dyn SecureStorageProvider>,
     parent_window_handle: Option<usize>,
     allow_unlock_kdf: bool,
+    resident_kdf_policy: ResidentKdfPolicy,
     require_protocol_handshake: bool,
     negotiated_capabilities: Option<Vec<String>>,
     pending_quick_unlock_enrollment: Option<PendingQuickUnlockEnrollment>,
@@ -369,10 +492,13 @@ impl Runtime {
     }
 
     fn external_open_kdf_policy(&self) -> (ExternalKdfPolicy, ExternalKdfConfirmation) {
-        let policy = if self.allow_unlock_kdf {
-            ExternalKdfPolicy::Desktop
-        } else {
+        let policy = if !self.allow_unlock_kdf {
             ExternalKdfPolicy::Extension
+        } else {
+            match self.resident_kdf_policy {
+                ResidentKdfPolicy::Desktop => ExternalKdfPolicy::Desktop,
+                ResidentKdfPolicy::Mobile => ExternalKdfPolicy::Mobile,
+            }
         };
         (policy, ExternalKdfConfirmation::Unconfirmed)
     }
@@ -443,8 +569,9 @@ impl Runtime {
             OneDriveVaultSourceProvider::new_from_env(),
             RemoteVaultCache::new_default(),
             SyncedBaseStore::new_default(),
+            SessionBaseStore::new(),
             default_secure_storage_provider(),
-            true,
+            RuntimeRole::DESKTOP_RESIDENT,
         )
     }
 
@@ -453,19 +580,33 @@ impl Runtime {
     /// The adapters stay behind the same runtime traits used by the Windows slice; this
     /// constructor only supplies them for hosts that reach the core through UniFFI.
     pub fn new_with_platform_adapters(
+        config: ResidentRuntimeConfig,
         biometric: Box<dyn BiometricProvider>,
         secure_storage: Box<dyn SecureStorageProvider>,
-    ) -> Self {
+        one_drive_refresh_tokens: Box<dyn OneDriveRefreshTokenStore>,
+    ) -> Result<Self> {
+        config.validate()?;
+        let session_bases =
+            SessionBaseStore::new_in(&config.temporary_directory).with_context(|| {
+                format!(
+                    "failed to create resident runtime session directory in {}",
+                    config.temporary_directory.display()
+                )
+            })?;
+        let state_directory = config.state_directory;
         let mut runtime = Self::new_with_state(
-            VaultReferenceStore::new_default(),
-            OneDriveVaultSourceProvider::new_from_env(),
-            RemoteVaultCache::new_default(),
-            SyncedBaseStore::new_default(),
+            VaultReferenceStore::new_at(state_directory.join("vault-references.json")),
+            OneDriveVaultSourceProvider::new_with_platform_refresh_token_store(
+                one_drive_refresh_tokens,
+            ),
+            RemoteVaultCache::new_at(state_directory.join("remote-cache")),
+            SyncedBaseStore::new_at(state_directory.join("synced-bases")),
+            session_bases,
             secure_storage,
-            true,
+            RuntimeRole::resident(config.kdf_policy),
         );
         runtime.biometric = biometric;
-        runtime
+        Ok(runtime)
     }
 
     pub fn new_for_browser_origin(origin: &str) -> Self {
@@ -480,8 +621,9 @@ impl Runtime {
                 OneDriveVaultSourceProvider::new_from_env_for_extension_id(extension_id),
                 RemoteVaultCache::new_for_extension_id(extension_id),
                 SyncedBaseStore::new_for_extension_id(extension_id),
+                SessionBaseStore::new(),
                 default_secure_storage_provider(),
-                false,
+                RuntimeRole::EXTENSION,
             );
         }
 
@@ -493,8 +635,9 @@ impl Runtime {
         one_drive: OneDriveVaultSourceProvider,
         remote_cache: RemoteVaultCache,
         synced_bases: SyncedBaseStore,
+        session_bases: SessionBaseStore,
         secure_storage: Box<dyn SecureStorageProvider>,
-        allow_unlock_kdf: bool,
+        role: RuntimeRole,
     ) -> Self {
         let mut vault_session = VaultSession::default();
         match references.current_vault_ref_id() {
@@ -513,12 +656,13 @@ impl Runtime {
             one_drive,
             remote_cache,
             synced_bases,
-            session_bases: SessionBaseStore::new(),
+            session_bases,
             biometric: default_biometric_provider(),
             secure_storage,
             parent_window_handle: None,
-            allow_unlock_kdf,
-            require_protocol_handshake: !allow_unlock_kdf,
+            allow_unlock_kdf: role.allow_unlock_kdf,
+            resident_kdf_policy: role.resident_kdf_policy,
+            require_protocol_handshake: !role.allow_unlock_kdf,
             negotiated_capabilities: None,
             pending_quick_unlock_enrollment: None,
             session_generation: 0,
@@ -559,6 +703,7 @@ impl Runtime {
             secure_storage: Box::new(UnsupportedSecureStorageProvider),
             parent_window_handle: None,
             allow_unlock_kdf: true,
+            resident_kdf_policy: ResidentKdfPolicy::Desktop,
             require_protocol_handshake: false,
             negotiated_capabilities: None,
             pending_quick_unlock_enrollment: None,
@@ -1318,13 +1463,28 @@ impl Runtime {
         password: Option<&str>,
         key_file_path: Option<&str>,
     ) -> Result<()> {
+        self.unlock_vault_with_kdf_confirmation(
+            vault_id,
+            password,
+            key_file_path,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    pub fn unlock_vault_with_kdf_confirmation(
+        &mut self,
+        vault_id: &str,
+        password: Option<&str>,
+        key_file_path: Option<&str>,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<()> {
         let master_credential = master_credential_from_parts(password, key_file_path)?;
         let current_vault_ref_id = self.references.find_ref_id_by_path(vault_id)?.or_else(|| {
             self.vault_session
                 .current_vault_ref_id()
                 .map(ToOwned::to_owned)
         });
-        let (policy, confirmation) = self.external_open_kdf_policy();
+        let (policy, _) = self.external_open_kdf_policy();
         let loaded = self
             .vault_session
             .find_loaded_mut(vault_id)
@@ -1442,6 +1602,19 @@ impl Runtime {
         password: Option<&str>,
         key_file_path: Option<&str>,
     ) -> Result<()> {
+        self.unlock_current_vault_with_kdf_confirmation(
+            password,
+            key_file_path,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    pub fn unlock_current_vault_with_kdf_confirmation(
+        &mut self,
+        password: Option<&str>,
+        key_file_path: Option<&str>,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<()> {
         let current_vault_ref_id = self
             .vault_session
             .current_vault_ref_id()
@@ -1450,10 +1623,20 @@ impl Runtime {
         let source = self.references.source_for(&current_vault_ref_id)?;
         let vault_id = vault_id_for_stored_source(&source);
         if self.vault_session.is_preloaded_for_unlock(&vault_id) {
-            return self.unlock_vault(&vault_id, password, key_file_path);
+            return self.unlock_vault_with_kdf_confirmation(
+                &vault_id,
+                password,
+                key_file_path,
+                confirmation,
+            );
         }
         let handle = self.load_source_snapshot(source)?;
-        self.unlock_vault(&handle.vault_id, password, key_file_path)
+        self.unlock_vault_with_kdf_confirmation(
+            &handle.vault_id,
+            password,
+            key_file_path,
+            confirmation,
+        )
     }
 
     pub fn lock_session(&mut self) {
@@ -1505,6 +1688,33 @@ impl Runtime {
         self.vault_session.lock_all();
     }
 
+    pub fn try_lock_session(&mut self) -> Result<()> {
+        self.ensure_no_active_platform_passkey_operation()?;
+        self.lock_session();
+        Ok(())
+    }
+
+    pub fn ensure_no_active_platform_passkey_operation(&self) -> Result<()> {
+        if !self.platform_passkey_operations.is_empty() {
+            anyhow::bail!("session has an active platform passkey operation");
+        }
+        Ok(())
+    }
+
+    pub fn close_vault(&mut self, vault_id: &str) -> Result<()> {
+        if self.vault_session.find_loaded(vault_id).is_none() {
+            anyhow::bail!("vault not opened: {vault_id}");
+        }
+        self.ensure_no_active_platform_passkey_operation()?;
+        self.session_bases.delete(vault_id).with_context(|| {
+            format!("failed to remove session base for closed vault: {vault_id}")
+        })?;
+        self.pending_quick_unlock_enrollment = None;
+        self.vault_session.remove_loaded(vault_id);
+        self.advance_session_generation();
+        Ok(())
+    }
+
     pub fn enable_quick_unlock_for_current_vault(
         &mut self,
         password: Option<&str>,
@@ -1517,6 +1727,19 @@ impl Runtime {
         &mut self,
         password: Option<&str>,
         key_file_path: Option<&str>,
+    ) -> Result<()> {
+        self.enroll_quick_unlock_for_current_vault_with_kdf_confirmation(
+            password,
+            key_file_path,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    pub fn enroll_quick_unlock_for_current_vault_with_kdf_confirmation(
+        &mut self,
+        password: Option<&str>,
+        key_file_path: Option<&str>,
+        confirmation: ExternalKdfConfirmation,
     ) -> Result<()> {
         if !self.allow_unlock_kdf {
             anyhow::bail!("quick unlock enrollment requires the resident app");
@@ -1562,7 +1785,7 @@ impl Runtime {
                 .session_base_for_fingerprint(&active_vault_id, &baseline_fingerprint)
                 .context("synced base is unavailable for quick unlock enrollment")?,
         };
-        let (policy, confirmation) = self.external_open_kdf_policy();
+        let (policy, _) = self.external_open_kdf_policy();
         let transformed_key = derive_transformed_key_with_policy(
             &file_bytes,
             &master_credential.to_composite_key(),
@@ -1581,8 +1804,32 @@ impl Runtime {
     }
 
     pub fn unlock_current_vault_with_quick_unlock(&mut self) -> Result<()> {
+        match self
+            .try_unlock_current_vault_with_quick_unlock(ExternalKdfConfirmation::Unconfirmed)?
+        {
+            QuickUnlockOutcome::Unlocked => Ok(()),
+            QuickUnlockOutcome::NotEnrolled => {
+                anyhow::bail!("quick unlock is not enabled for the current vault")
+            }
+            QuickUnlockOutcome::Cancelled => anyhow::bail!("quick unlock was cancelled"),
+            QuickUnlockOutcome::OpenAppRequired => {
+                anyhow::bail!("quick unlock cache miss; open the resident app once")
+            }
+            QuickUnlockOutcome::CredentialRequired => {
+                anyhow::bail!("stored master credential no longer unlocks this vault")
+            }
+            QuickUnlockOutcome::Unsupported => {
+                anyhow::bail!("biometric quick unlock is not implemented on this host")
+            }
+        }
+    }
+
+    pub fn try_unlock_current_vault_with_quick_unlock(
+        &mut self,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<QuickUnlockOutcome> {
         if !self.biometric.supports_quick_unlock() {
-            anyhow::bail!("biometric quick unlock is not implemented on this host");
+            return Ok(QuickUnlockOutcome::Unsupported);
         }
         let current_vault_ref_id = self
             .vault_session
@@ -1590,7 +1837,12 @@ impl Runtime {
             .context("no current vault selected")?
             .to_owned();
         if !self.secure_storage.load_requires_user_presence() {
-            self.biometric.authorize("Unlock this vault")?;
+            if let Err(error) = self.biometric.authorize("Unlock this vault") {
+                if is_secure_storage_cancelled(&error) {
+                    return Ok(QuickUnlockOutcome::Cancelled);
+                }
+                return Err(error);
+            }
         }
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
         let source = self.references.source_for(&current_vault_ref_id)?;
@@ -1604,11 +1856,13 @@ impl Runtime {
                 .core
                 .inspect_database(&loaded.bytes)
                 .with_context(|| format!("failed to inspect vault: {}", handle.vault_id))?;
-            let attempt = unlock_from_blob(
+            let (policy, _) = self.external_open_kdf_policy();
+            let attempt = unlock_from_blob_with_policy(
                 self.secure_storage.as_ref(),
                 &storage_key,
                 &loaded.bytes,
-                self.allow_unlock_kdf,
+                &policy,
+                confirmation,
             )?;
             (
                 attempt,
@@ -1622,15 +1876,11 @@ impl Runtime {
         };
         let unlocked = match attempt {
             UnlockAttempt::Unlocked(unlocked) => unlocked,
-            UnlockAttempt::NotEnrolled => {
-                anyhow::bail!("quick unlock is not enabled for the current vault")
-            }
-            UnlockAttempt::Cancelled => anyhow::bail!("quick unlock was cancelled"),
-            UnlockAttempt::OpenAppRequired => {
-                anyhow::bail!("quick unlock cache miss; open the resident app once")
-            }
+            UnlockAttempt::NotEnrolled => return Ok(QuickUnlockOutcome::NotEnrolled),
+            UnlockAttempt::Cancelled => return Ok(QuickUnlockOutcome::Cancelled),
+            UnlockAttempt::OpenAppRequired => return Ok(QuickUnlockOutcome::OpenAppRequired),
             UnlockAttempt::CredentialRequired => {
-                anyhow::bail!("stored master credential no longer unlocks this vault")
+                return Ok(QuickUnlockOutcome::CredentialRequired);
             }
         };
         self.vault_session.finish_unlock_from_blob(
@@ -1647,7 +1897,7 @@ impl Runtime {
         loaded.save_profile = save_profile;
         loaded.name = handle.name;
         self.advance_session_generation();
-        Ok(())
+        Ok(QuickUnlockOutcome::Unlocked)
     }
 
     pub fn disable_quick_unlock_for_current_vault(&mut self) -> Result<()> {
@@ -6815,19 +7065,22 @@ impl Runtime {
             self.biometric
                 .authorize("Refresh quick unlock after a vault key change")?;
         }
+        let (policy, confirmation) = self.external_open_kdf_policy();
         let attempt = if refresh_cached_transformed_key {
-            unlock_from_blob(
+            unlock_from_blob_with_policy(
                 self.secure_storage.as_ref(),
                 &storage_key,
                 bytes,
-                self.allow_unlock_kdf,
+                &policy,
+                confirmation,
             )?
         } else {
-            unlock_historical_snapshot_from_blob(
+            unlock_historical_snapshot_from_blob_with_policy(
                 self.secure_storage.as_ref(),
                 &storage_key,
                 bytes,
-                self.allow_unlock_kdf,
+                &policy,
+                confirmation,
             )?
         };
         let unlocked = match attempt {
@@ -11097,6 +11350,16 @@ mod tests {
             )
         );
 
+        let mut mobile = Runtime::for_tests();
+        mobile.resident_kdf_policy = ResidentKdfPolicy::Mobile;
+        assert_eq!(
+            mobile.external_open_kdf_policy(),
+            (
+                vaultkern_core::ExternalKdfPolicy::Mobile,
+                vaultkern_core::ExternalKdfConfirmation::Unconfirmed,
+            )
+        );
+
         let mut extension = Runtime::for_tests();
         extension.allow_unlock_kdf = false;
         assert_eq!(
@@ -11105,6 +11368,26 @@ mod tests {
                 vaultkern_core::ExternalKdfPolicy::Extension,
                 vaultkern_core::ExternalKdfConfirmation::Unconfirmed,
             )
+        );
+    }
+
+    #[test]
+    fn external_kdf_failures_preserve_machine_readable_policy_details() {
+        let error = anyhow::Error::new(vaultkern_core::KdbxError::ExternalKdfPolicy {
+            algorithm: vaultkern_core::ExternalKdfAlgorithm::Argon2id,
+            observed: 300 * 1024 * 1024,
+            decision: vaultkern_core::ExternalKdfDecision::Confirm(256 * 1024 * 1024),
+        });
+
+        let failure = super::classify_external_kdf_error(&error).unwrap();
+
+        assert_eq!(failure.algorithm, "argon2id");
+        assert_eq!(failure.resource, "memory_bytes");
+        assert_eq!(failure.observed, 300 * 1024 * 1024);
+        assert_eq!(failure.limit, Some(256 * 1024 * 1024));
+        assert_eq!(
+            failure.disposition,
+            super::ExternalKdfDisposition::ConfirmationRequired
         );
     }
 

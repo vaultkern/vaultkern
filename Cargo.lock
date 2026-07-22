@@ -6161,6 +6161,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "uniffi",
+ "vaultkern-core",
  "vaultkern-runtime",
  "vaultkern-runtime-protocol",
  "zeroize",

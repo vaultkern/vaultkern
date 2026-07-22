@@ -37,6 +37,19 @@ impl SessionBaseStore {
         }
     }
 
+    pub(crate) fn new_in(root: impl AsRef<Path>) -> io::Result<Self> {
+        let root = root.as_ref();
+        create_dir_all_durable(root)?;
+        let directory = tempfile::Builder::new()
+            .prefix("vaultkern-session-bases-")
+            .tempdir_in(root)?;
+        let store = SyncedBaseStore::new_at(directory.path());
+        Ok(Self {
+            _directory: directory,
+            store,
+        })
+    }
+
     pub(crate) fn store(&self, vault_id: &str, bytes: &[u8]) -> io::Result<()> {
         self.store.store(vault_id, bytes)
     }

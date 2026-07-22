@@ -30,6 +30,8 @@ import java.nio.CharBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.ConcurrentHashMap
+import android.os.Build
+import androidx.annotation.RequiresApi
 import java.util.concurrent.atomic.AtomicBoolean
 
 // This is a helper for safely working with byte buffers returned from the Rust code.
@@ -613,6 +615,15 @@ internal open class UniffiForeignFutureResultVoid(
 internal interface UniffiForeignFutureCompleteVoid : com.sun.jna.Callback {
     fun callback(`callbackData`: Long,`result`: UniffiForeignFutureResultVoid.UniffiByValue,)
 }
+internal interface UniffiCallbackInterfaceOneDriveTokenAdapterMethod0 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceOneDriveTokenAdapterMethod1 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`token`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+internal interface UniffiCallbackInterfaceOneDriveTokenAdapterMethod2 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
 internal interface UniffiCallbackInterfaceUnlockBlobAdapterMethod0 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: ByteByReference,uniffiCallStatus: UniffiRustCallStatus,)
 }
@@ -639,6 +650,31 @@ internal interface UniffiCallbackInterfaceUnlockBlobAdapterMethod7 : com.sun.jna
 }
 internal interface UniffiCallbackInterfaceUnlockBlobAdapterMethod8 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`key`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
+}
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "loadRefreshToken", "storeRefreshToken", "deleteRefreshToken")
+internal open class UniffiVTableCallbackInterfaceOneDriveTokenAdapter(
+    @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+    @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+    @JvmField internal var `loadRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod0? = null,
+    @JvmField internal var `storeRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod1? = null,
+    @JvmField internal var `deleteRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod2? = null,
+) : Structure() {
+    class UniffiByValue(
+        `uniffiFree`: UniffiCallbackInterfaceFree? = null,
+        `uniffiClone`: UniffiCallbackInterfaceClone? = null,
+        `loadRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod0? = null,
+        `storeRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod1? = null,
+        `deleteRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod2? = null,
+    ): UniffiVTableCallbackInterfaceOneDriveTokenAdapter(`uniffiFree`,`uniffiClone`,`loadRefreshToken`,`storeRefreshToken`,`deleteRefreshToken`,), Structure.ByValue
+
+   internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceOneDriveTokenAdapter) {
+        `uniffiFree` = other.`uniffiFree`
+        `uniffiClone` = other.`uniffiClone`
+        `loadRefreshToken` = other.`loadRefreshToken`
+        `storeRefreshToken` = other.`storeRefreshToken`
+        `deleteRefreshToken` = other.`deleteRefreshToken`
+    }
+
 }
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "supportsUnlockBlob", "authorize", "storeRequiresUserPresence", "loadRequiresUserPresence", "authorizeStoreUserPresence", "storeBlob", "loadBlob", "containsBlob", "deleteBlob")
 internal open class UniffiVTableCallbackInterfaceUnlockBlobAdapter(
@@ -706,6 +742,12 @@ internal object IntegrityCheckingUniffiLib {
         uniffiCheckContractApiVersion(this)
         uniffiCheckApiChecksums(this)
     }
+    external fun uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_load_refresh_token(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_store_refresh_token(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_delete_refresh_token(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_supports_unlock_blob(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_authorize(
@@ -724,35 +766,57 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob(
     ): Short
-    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey(
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_commit_registration(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_credentials(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_finish(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_fresh_user_verification(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_register_passkey(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_begin_passkey_operation(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_capabilities(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault(
     ): Short
-    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_commit_passkey_registration(
-    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry(
-    ): Short
-    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_end_passkey_operation(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_passkey_credentials(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_lock_session(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault(
     ): Short
-    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_prepare_passkey_operation(
-    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry(
-    ): Short
-    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_save(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_session_state(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_sources(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_sync(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_begin_one_drive_login(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_set_current_vault(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsync_status(
     ): Short
@@ -761,6 +825,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault(
     ): Short
@@ -784,10 +850,23 @@ internal object UniffiLib {
 
     init {
         Native.register(UniffiLib::class.java, findLibraryName(componentName = "vaultkern_uniffi"))
+        uniffiCallbackInterfaceOneDriveTokenAdapter.register(this)
         uniffiCallbackInterfaceUnlockBlobAdapter.register(this)
 
     }
-    external fun uniffi_vaultkern_uniffi_fn_clone_unlockblobadapter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+    external fun uniffi_vaultkern_uniffi_fn_clone_onedrivetokenadapter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_vaultkern_uniffi_fn_free_onedrivetokenadapter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_init_callback_vtable_onedrivetokenadapter(`vtable`: UniffiVTableCallbackInterfaceOneDriveTokenAdapter,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_load_refresh_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_store_refresh_token(`ptr`: Long,`token`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_delete_refresh_token(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_clone_unlockblobadapter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_unlockblobadapter(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
@@ -811,42 +890,72 @@ external fun uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_contains_blob(`
 ): Byte
 external fun uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_delete_blob(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+external fun uniffi_vaultkern_uniffi_fn_clone_vaultpasskeyoperation(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_vaultkern_uniffi_fn_free_vaultpasskeyoperation(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_assert_passkey(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_commit_registration(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_credentials(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_finish(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_fresh_user_verification(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Byte
+external fun uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_register_passkey(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_clone_vaultsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_vaultsession(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-external fun uniffi_vaultkern_uniffi_fn_constructor_vaultsession_new(`unlockBlobAdapter`: Long,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_constructor_vaultsession_new(`config`: RustBuffer.ByValue,`unlockBlobAdapter`: Long,`oneDriveTokenAdapter`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(`ptr`: Long,`operationId`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_begin_passkey_operation(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_capabilities(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_commit_passkey_registration(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_edit_entry(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`entryId`: RustBuffer.ByValue,`fields`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_end_passkey_operation(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_list_entries(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_list_passkey_credentials(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_lock_session(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_open_vault(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_prepare_passkey_operation(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_read_entry(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`entryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(`ptr`: Long,`operationId`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_save(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_session_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_sources(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_sync(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_unlock(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
+external fun uniffi_vaultkern_uniffi_fn_clone_vaultsources(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
+external fun uniffi_vaultkern_uniffi_fn_free_vaultsources(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(`ptr`: Long,`driveId`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_begin_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_list_one_drive_children(`ptr`: Long,`parentItemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_list_recent(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_set_current_vault(`ptr`: Long,`vaultRefId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_clone_vaultsync(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_vaultsync(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -859,13 +968,15 @@ external fun uniffi_vaultkern_uniffi_fn_clone_vaultunlock(`handle`: Long,uniffi_
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_vaultunlock(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
-external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_revoke(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_with_blob(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_with_blob(`ptr`: Long,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun ffi_vaultkern_uniffi_rustbuffer_alloc(`size`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -986,6 +1097,15 @@ private fun uniffiCheckContractApiVersion(lib: IntegrityCheckingUniffiLib) {
 }
 @Suppress("UNUSED_PARAMETER")
 private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_load_refresh_token() != 40331.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_store_refresh_token() != 22343.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_delete_refresh_token() != 25563.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_supports_unlock_blob() != 33090.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1001,10 +1121,10 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_authorize_store_user_presence() != 37169.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_store_blob() != 5135.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_store_blob() != 5825.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_load_blob() != 27970.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_load_blob() != 65183.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_contains_blob() != 3540.toShort()) {
@@ -1013,19 +1133,34 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob() != 21760.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey() != 4142.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey() != 55408.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 50807.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_commit_registration() != 64419.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_commit_passkey_registration() != 63552.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_credentials() != 39607.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_finish() != 21697.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_fresh_user_verification() != 45948.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_register_passkey() != 64246.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_begin_passkey_operation() != 62156.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_capabilities() != 14783.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 52312.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_end_passkey_operation() != 10527.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708.toShort()) {
@@ -1034,16 +1169,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_passkey_credentials() != 52070.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_lock_session() != 62296.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault() != 65313.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_prepare_passkey_operation() != 8343.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey() != 32599.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_save() != 19815.toShort()) {
@@ -1052,10 +1184,31 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_session_state() != 59333.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_sources() != 1502.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_sync() != 40588.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock() != 47569.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault() != 18786.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_begin_one_drive_login() != 11177.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login() != 5690.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children() != 2771.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent() != 25381.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_set_current_vault() != 19482.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsync_status() != 21985.toShort()) {
@@ -1064,19 +1217,22 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsync_trigger() != 9777.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 49862.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 1793.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current() != 40935.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_with_blob() != 33761.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 44285.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_constructor_vaultsession_new() != 42979.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_with_blob() != 42173.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_constructor_vaultsession_new() != 46493.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
 }
@@ -1241,28 +1397,28 @@ private class UniffiJnaCleanable(
 // using Android or not.
 // There are further runtime checks to chose the correct implementation
 // of the cleaner.
+
+
 private fun UniffiCleaner.Companion.create(): UniffiCleaner =
-    try {
-        // For safety's sake: if the library hasn't been run in android_cleaner = true
-        // mode, but is being run on Android, then we still need to think about
-        // Android API versions.
-        // So we check if java.lang.ref.Cleaner is there, and use that…
-        java.lang.Class.forName("java.lang.ref.Cleaner")
-        JavaLangRefCleaner()
-    } catch (e: ClassNotFoundException) {
-        // … otherwise, fallback to the JNA cleaner.
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+        AndroidSystemCleaner()
+    } else {
         UniffiJnaCleaner()
     }
 
-private class JavaLangRefCleaner : UniffiCleaner {
-    val cleaner = java.lang.ref.Cleaner.create()
+// The SystemCleaner, available from API Level 33.
+// Some API Level 33 OSes do not support using it, so we require API Level 34.
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+private class AndroidSystemCleaner : UniffiCleaner {
+    val cleaner = android.system.SystemCleaner.cleaner()
 
     override fun register(value: Any, cleanUpTask: Runnable): UniffiCleaner.Cleanable =
-        JavaLangRefCleanable(cleaner.register(value, cleanUpTask))
+        AndroidSystemCleanable(cleaner.register(value, cleanUpTask))
 }
 
-private class JavaLangRefCleanable(
-    val cleanable: java.lang.ref.Cleaner.Cleanable
+@RequiresApi(Build.VERSION_CODES.UPSIDE_DOWN_CAKE)
+private class AndroidSystemCleanable(
+    private val cleanable: java.lang.ref.Cleaner.Cleanable,
 ) : UniffiCleaner.Cleanable {
     override fun clean() = cleanable.clean()
 }
@@ -1555,6 +1711,390 @@ public object FfiConverterByteArray: FfiConverterRustBuffer<ByteArray> {
 
 
 /**
+ * Platform-owned protected storage for the existing OneDrive refresh token.
+ * OAuth presentation remains a platform concern; the runtime owns token use.
+ */
+public interface OneDriveTokenAdapter {
+
+    fun `loadRefreshToken`(): SensitiveString?
+
+    fun `storeRefreshToken`(`token`: SensitiveString)
+
+    fun `deleteRefreshToken`()
+
+    companion object
+}
+
+/**
+ * Platform-owned protected storage for the existing OneDrive refresh token.
+ * OAuth presentation remains a platform concern; the runtime owns token use.
+ */
+open class OneDriveTokenAdapterImpl: Disposable, AutoCloseable, OneDriveTokenAdapter
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_vaultkern_uniffi_fn_free_onedrivetokenadapter(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_vaultkern_uniffi_fn_clone_onedrivetokenadapter(handle, status)
+        }
+    }
+
+
+    @Throws(PlatformAdapterException::class)override fun `loadRefreshToken`(): SensitiveString? {
+            return FfiConverterOptionalTypeSensitiveString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(PlatformAdapterException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_load_refresh_token(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(PlatformAdapterException::class)override fun `storeRefreshToken`(`token`: SensitiveString)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(PlatformAdapterException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_store_refresh_token(
+        it,
+        FfiConverterTypeSensitiveString.lower(`token`),_status)
+}
+    }
+
+
+
+
+    @Throws(PlatformAdapterException::class)override fun `deleteRefreshToken`()
+        =
+    callWithHandle {
+    uniffiRustCallWithError(PlatformAdapterException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_delete_refresh_token(
+        it,
+        _status)
+}
+    }
+
+
+
+
+
+
+
+
+
+
+    /**
+     * @suppress
+     */
+    companion object
+
+}
+
+
+
+// Put the implementation in an object so we don't pollute the top-level namespace
+internal object uniffiCallbackInterfaceOneDriveTokenAdapter {
+    internal object `loadRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod0 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: RustBuffer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeOneDriveTokenAdapter.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`loadRefreshToken`(
+                )
+            }
+            val writeReturn = { value: SensitiveString? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: PlatformAdapterException -> FfiConverterTypePlatformAdapterError.lower(e) }
+            )
+        }
+    }
+    internal object `storeRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod1 {
+        override fun callback(`uniffiHandle`: Long,`token`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeOneDriveTokenAdapter.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`storeRefreshToken`(
+                    FfiConverterTypeSensitiveString.lift(`token`),
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: PlatformAdapterException -> FfiConverterTypePlatformAdapterError.lower(e) }
+            )
+        }
+    }
+    internal object `deleteRefreshToken`: UniffiCallbackInterfaceOneDriveTokenAdapterMethod2 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeOneDriveTokenAdapter.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`deleteRefreshToken`(
+                )
+            }
+            val writeReturn = { _: Unit -> Unit }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: PlatformAdapterException -> FfiConverterTypePlatformAdapterError.lower(e) }
+            )
+        }
+    }
+
+    internal object uniffiFree: UniffiCallbackInterfaceFree {
+        override fun callback(handle: Long) {
+            FfiConverterTypeOneDriveTokenAdapter.handleMap.remove(handle)
+        }
+    }
+
+    internal object uniffiClone: UniffiCallbackInterfaceClone {
+        override fun callback(handle: Long): Long {
+            return FfiConverterTypeOneDriveTokenAdapter.handleMap.clone(handle)
+        }
+    }
+
+    internal var vtable = UniffiVTableCallbackInterfaceOneDriveTokenAdapter.UniffiByValue(
+        uniffiFree,
+        uniffiClone,
+        `loadRefreshToken`,
+        `storeRefreshToken`,
+        `deleteRefreshToken`,
+    )
+
+    // Registers the foreign callback with the Rust side.
+    // This method is generated for each callback interface.
+    internal fun register(lib: UniffiLib) {
+        lib.uniffi_vaultkern_uniffi_fn_init_callback_vtable_onedrivetokenadapter(vtable)
+    }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOneDriveTokenAdapter: FfiConverter<OneDriveTokenAdapter, Long> {
+    internal val handleMap = UniffiHandleMap<OneDriveTokenAdapter>()
+
+    override fun lower(value: OneDriveTokenAdapter): Long {
+        if (value is OneDriveTokenAdapterImpl) {
+             // Rust-implemented object.  Clone the handle and return it
+            return value.uniffiCloneHandle()
+         } else {
+            // Kotlin object, generate a new vtable handle and return that.
+            return handleMap.insert(value)
+         }
+    }
+
+    override fun lift(value: Long): OneDriveTokenAdapter {
+        if ((value and 1.toLong()) == 0.toLong()) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return OneDriveTokenAdapterImpl(UniffiWithHandle, value)
+        } else {
+            // Kotlin-generated handle, get the object from the handle map
+            return handleMap.remove(value)
+        }
+    }
+
+    override fun read(buf: ByteBuffer): OneDriveTokenAdapter {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: OneDriveTokenAdapter) = 8UL
+
+    override fun write(value: OneDriveTokenAdapter, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+/**
  * Platform-owned protected storage and user-presence operations for one
  * unlock blob per vault.  Implementations live in Swift/Kotlin; the Rust core
  * continues to consume its existing biometric and secure-storage traits.
@@ -1571,9 +2111,9 @@ public interface UnlockBlobAdapter {
 
     fun `authorizeStoreUserPresence`()
 
-    fun `storeBlob`(`key`: kotlin.String, `value`: kotlin.ByteArray)
+    fun `storeBlob`(`key`: kotlin.String, `value`: SensitiveBytes)
 
-    fun `loadBlob`(`key`: kotlin.String): kotlin.ByteArray?
+    fun `loadBlob`(`key`: kotlin.String): SensitiveBytes?
 
     fun `containsBlob`(`key`: kotlin.String): kotlin.Boolean
 
@@ -1752,21 +2292,21 @@ open class UnlockBlobAdapterImpl: Disposable, AutoCloseable, UnlockBlobAdapter
 
 
 
-    @Throws(PlatformAdapterException::class)override fun `storeBlob`(`key`: kotlin.String, `value`: kotlin.ByteArray)
+    @Throws(PlatformAdapterException::class)override fun `storeBlob`(`key`: kotlin.String, `value`: SensitiveBytes)
         =
     callWithHandle {
     uniffiRustCallWithError(PlatformAdapterException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_store_blob(
         it,
-        FfiConverterString.lower(`key`),FfiConverterByteArray.lower(`value`),_status)
+        FfiConverterString.lower(`key`),FfiConverterTypeSensitiveBytes.lower(`value`),_status)
 }
     }
 
 
 
 
-    @Throws(PlatformAdapterException::class)override fun `loadBlob`(`key`: kotlin.String): kotlin.ByteArray? {
-            return FfiConverterOptionalByteArray.lift(
+    @Throws(PlatformAdapterException::class)override fun `loadBlob`(`key`: kotlin.String): SensitiveBytes? {
+            return FfiConverterOptionalTypeSensitiveBytes.lift(
     callWithHandle {
     uniffiRustCallWithError(PlatformAdapterException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_load_blob(
@@ -1910,7 +2450,7 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
             val makeCall = { ->
                 uniffiObj.`storeBlob`(
                     FfiConverterString.lift(`key`),
-                    FfiConverterByteArray.lift(`value`),
+                    FfiConverterTypeSensitiveBytes.lift(`value`),
                 )
             }
             val writeReturn = { _: Unit -> Unit }
@@ -1930,7 +2470,7 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
                     FfiConverterString.lift(`key`),
                 )
             }
-            val writeReturn = { value: kotlin.ByteArray? -> uniffiOutReturn.setValue(FfiConverterOptionalByteArray.lower(value)) }
+            val writeReturn = { value: SensitiveBytes? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value)) }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -2141,33 +2681,360 @@ public object FfiConverterTypeUnlockBlobAdapter: FfiConverter<UnlockBlobAdapter,
 //
 
 
+public interface VaultPasskeyOperationInterface {
+
+    fun `assertPasskey`(`input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput
+
+    fun `commitRegistration`()
+
+    fun `credentials`(): List<PlatformPasskeyCredential>
+
+    fun `finish`()
+
+    fun `freshUserVerification`(): kotlin.Boolean
+
+    fun `registerPasskey`(`input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput
+
+    companion object
+}
+
+open class VaultPasskeyOperation: Disposable, AutoCloseable, VaultPasskeyOperationInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_vaultkern_uniffi_fn_free_vaultpasskeyoperation(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_vaultkern_uniffi_fn_clone_vaultpasskeyoperation(handle, status)
+        }
+    }
+
+
+    @Throws(VaultKernException::class)override fun `assertPasskey`(`input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput {
+            return FfiConverterTypePlatformPasskeyAssertionOutput.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_assert_passkey(
+        it,
+        FfiConverterTypePlatformPasskeyAssertionInput.lower(`input`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `commitRegistration`()
+        =
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_commit_registration(
+        it,
+        _status)
+}
+    }
+
+
+
+
+    @Throws(VaultKernException::class)override fun `credentials`(): List<PlatformPasskeyCredential> {
+            return FfiConverterSequenceTypePlatformPasskeyCredential.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_credentials(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `finish`()
+        =
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_finish(
+        it,
+        _status)
+}
+    }
+
+
+
+
+    @Throws(VaultKernException::class)override fun `freshUserVerification`(): kotlin.Boolean {
+            return FfiConverterBoolean.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_fresh_user_verification(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `registerPasskey`(`input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput {
+            return FfiConverterTypePlatformPasskeyRegistrationOutput.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_register_passkey(
+        it,
+        FfiConverterTypePlatformPasskeyRegistrationInput.lower(`input`),_status)
+}
+    }
+    )
+    }
+
+
+
+
+
+
+
+
+
+    /**
+     * @suppress
+     */
+    companion object
+
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVaultPasskeyOperation: FfiConverter<VaultPasskeyOperation, Long> {
+    override fun lower(value: VaultPasskeyOperation): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): VaultPasskeyOperation {
+        return VaultPasskeyOperation(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): VaultPasskeyOperation {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: VaultPasskeyOperation) = 8UL
+
+    override fun write(value: VaultPasskeyOperation, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
 public interface VaultSessionInterface {
 
-    fun `assertPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput
+    fun `beginPasskeyOperation`(`operationId`: kotlin.ByteArray): VaultPasskeyOperation
 
-    fun `closeVault`(): SessionStateDto
+    fun `capabilities`(): PlatformCapabilitiesDto
 
-    fun `commitPasskeyRegistration`(`operationId`: kotlin.ByteArray)
+    fun `closeVault`(`vaultId`: kotlin.String): SessionStateDto
 
     fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryDetailDto
-
-    fun `endPasskeyOperation`(`operationId`: kotlin.ByteArray)
 
     fun `listEntries`(`vaultId`: kotlin.String): List<EntrySummaryDto>
 
     fun `listPasskeyCredentials`(): List<PlatformPasskeyCredential>
 
+    fun `lockSession`(): SessionStateDto
+
     fun `openVault`(`path`: kotlin.String): VaultHandleDto
 
-    fun `preparePasskeyOperation`(`operationId`: kotlin.ByteArray): PlatformPasskeyOperation
-
     fun `readEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String): EntryDetailDto
-
-    fun `registerPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput
 
     fun `save`(`vaultId`: kotlin.String): SaveVaultResultDto
 
     fun `sessionState`(): SessionStateDto
+
+    fun `sources`(): VaultSources
 
     fun `sync`(): VaultSync
 
@@ -2200,12 +3067,12 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
         this.handle = 0
         this.cleanable = null
     }
-    constructor(`unlockBlobAdapter`: UnlockBlobAdapter) :
+    constructor(`config`: VaultSessionConfig, `unlockBlobAdapter`: UnlockBlobAdapter, `oneDriveTokenAdapter`: OneDriveTokenAdapter) :
         this(UniffiWithHandle,
-    uniffiRustCall() { _status ->
+    uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_constructor_vaultsession_new(
 
-        FfiConverterTypeUnlockBlobAdapter.lower(`unlockBlobAdapter`),_status)
+        FfiConverterTypeVaultSessionConfig.lower(`config`),FfiConverterTypeUnlockBlobAdapter.lower(`unlockBlobAdapter`),FfiConverterTypeOneDriveTokenAdapter.lower(`oneDriveTokenAdapter`),_status)
 }
     )
 
@@ -2281,25 +3148,24 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     }
 
 
-    @Throws(VaultKernException::class)override fun `assertPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput {
-            return FfiConverterTypePlatformPasskeyAssertionOutput.lift(
+    @Throws(VaultKernException::class)override fun `beginPasskeyOperation`(`operationId`: kotlin.ByteArray): VaultPasskeyOperation {
+            return FfiConverterTypeVaultPasskeyOperation.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_begin_passkey_operation(
         it,
-        FfiConverterByteArray.lower(`operationId`),FfiConverterTypePlatformPasskeyAssertionInput.lower(`input`),_status)
+        FfiConverterByteArray.lower(`operationId`),_status)
 }
     }
     )
     }
 
 
-
-    @Throws(VaultKernException::class)override fun `closeVault`(): SessionStateDto {
-            return FfiConverterTypeSessionStateDto.lift(
+    override fun `capabilities`(): PlatformCapabilitiesDto {
+            return FfiConverterTypePlatformCapabilitiesDto.lift(
     callWithHandle {
-    uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_capabilities(
         it,
         _status)
 }
@@ -2309,16 +3175,17 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
-    @Throws(VaultKernException::class)override fun `commitPasskeyRegistration`(`operationId`: kotlin.ByteArray)
-        =
+    @Throws(VaultKernException::class)override fun `closeVault`(`vaultId`: kotlin.String): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_commit_passkey_registration(
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(
         it,
-        FfiConverterByteArray.lower(`operationId`),_status)
+        FfiConverterString.lower(`vaultId`),_status)
 }
     }
-
+    )
+    }
 
 
 
@@ -2333,19 +3200,6 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     }
     )
     }
-
-
-
-    @Throws(VaultKernException::class)override fun `endPasskeyOperation`(`operationId`: kotlin.ByteArray)
-        =
-    callWithHandle {
-    uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_end_passkey_operation(
-        it,
-        FfiConverterByteArray.lower(`operationId`),_status)
-}
-    }
-
 
 
 
@@ -2377,6 +3231,20 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
+    @Throws(VaultKernException::class)override fun `lockSession`(): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_lock_session(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(VaultKernException::class)override fun `openVault`(`path`: kotlin.String): VaultHandleDto {
             return FfiConverterTypeVaultHandleDto.lift(
     callWithHandle {
@@ -2391,20 +3259,6 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
-    @Throws(VaultKernException::class)override fun `preparePasskeyOperation`(`operationId`: kotlin.ByteArray): PlatformPasskeyOperation {
-            return FfiConverterTypePlatformPasskeyOperation.lift(
-    callWithHandle {
-    uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_prepare_passkey_operation(
-        it,
-        FfiConverterByteArray.lower(`operationId`),_status)
-}
-    }
-    )
-    }
-
-
-
     @Throws(VaultKernException::class)override fun `readEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String): EntryDetailDto {
             return FfiConverterTypeEntryDetailDto.lift(
     callWithHandle {
@@ -2412,20 +3266,6 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_read_entry(
         it,
         FfiConverterString.lower(`vaultId`),FfiConverterString.lower(`entryId`),_status)
-}
-    }
-    )
-    }
-
-
-
-    @Throws(VaultKernException::class)override fun `registerPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput {
-            return FfiConverterTypePlatformPasskeyRegistrationOutput.lift(
-    callWithHandle {
-    uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(
-        it,
-        FfiConverterByteArray.lower(`operationId`),FfiConverterTypePlatformPasskeyRegistrationInput.lower(`input`),_status)
 }
     }
     )
@@ -2452,6 +3292,19 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_session_state(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+    override fun `sources`(): VaultSources {
+            return FfiConverterTypeVaultSources.lift(
+    callWithHandle {
+    uniffiRustCall() { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_sources(
         it,
         _status)
 }
@@ -2520,6 +3373,337 @@ public object FfiConverterTypeVaultSession: FfiConverter<VaultSession, Long> {
     override fun allocationSize(value: VaultSession) = 8UL
 
     override fun write(value: VaultSession, buf: ByteBuffer) {
+        buf.putLong(lower(value))
+    }
+}
+
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+
+public interface VaultSourcesInterface {
+
+    fun `addOneDriveVault`(`driveId`: kotlin.String, `itemId`: kotlin.String): VaultReferenceDto
+
+    fun `beginOneDriveLogin`(): OneDriveAuthSessionDto
+
+    fun `completePendingOneDriveLogin`(): OneDriveAuthStatusDto
+
+    fun `listOneDriveChildren`(`parentItemId`: kotlin.String?): OneDriveItemListDto
+
+    fun `listRecent`(): VaultReferenceListDto
+
+    fun `setCurrentVault`(`vaultRefId`: kotlin.String): SessionStateDto
+
+    companion object
+}
+
+open class VaultSources: Disposable, AutoCloseable, VaultSourcesInterface
+{
+
+    @Suppress("UNUSED_PARAMETER")
+    /**
+     * @suppress
+     */
+    constructor(withHandle: UniffiWithHandle, handle: Long) {
+        this.handle = handle
+        this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+    }
+
+    /**
+     * @suppress
+     *
+     * This constructor can be used to instantiate a fake object. Only used for tests. Any
+     * attempt to actually use an object constructed this way will fail as there is no
+     * connected Rust object.
+     */
+    @Suppress("UNUSED_PARAMETER")
+    constructor(noHandle: NoHandle) {
+        this.handle = 0
+        this.cleanable = null
+    }
+
+    protected val handle: Long
+    protected val cleanable: UniffiCleaner.Cleanable?
+
+    private val wasDestroyed = AtomicBoolean(false)
+    private val callCounter = AtomicLong(1)
+
+    override fun destroy() {
+        // Only allow a single call to this method.
+        // TODO: maybe we should log a warning if called more than once?
+        if (this.wasDestroyed.compareAndSet(false, true)) {
+            // This decrement always matches the initial count of 1 given at creation time.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    @Synchronized
+    override fun close() {
+        this.destroy()
+    }
+
+    internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+        // Check and increment the call counter, to keep the object alive.
+        // This needs a compare-and-set retry loop in case of concurrent updates.
+        do {
+            val c = this.callCounter.get()
+            if (c == 0L) {
+                throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+            }
+            if (c == Long.MAX_VALUE) {
+                throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+            }
+        } while (! this.callCounter.compareAndSet(c, c + 1L))
+        // Now we can safely do the method call without the handle being freed concurrently.
+        try {
+            return block(this.uniffiCloneHandle())
+        } finally {
+            // This decrement always matches the increment we performed above.
+            if (this.callCounter.decrementAndGet() == 0L) {
+                cleanable?.clean()
+            }
+        }
+    }
+
+    // Use a static inner class instead of a closure so as not to accidentally
+    // capture `this` as part of the cleanable's action.
+    private class UniffiCleanAction(private val handle: Long) : Runnable {
+        override fun run() {
+            if (handle == 0.toLong()) {
+                // Fake object created with `NoHandle`, don't try to free.
+                return;
+            }
+            uniffiRustCall { status ->
+                UniffiLib.uniffi_vaultkern_uniffi_fn_free_vaultsources(handle, status)
+            }
+        }
+    }
+
+    /**
+     * @suppress
+     */
+    fun uniffiCloneHandle(): Long {
+        if (handle == 0.toLong()) {
+            throw InternalException("uniffiCloneHandle() called on NoHandle object");
+        }
+        return uniffiRustCall() { status ->
+            UniffiLib.uniffi_vaultkern_uniffi_fn_clone_vaultsources(handle, status)
+        }
+    }
+
+
+    @Throws(VaultKernException::class)override fun `addOneDriveVault`(`driveId`: kotlin.String, `itemId`: kotlin.String): VaultReferenceDto {
+            return FfiConverterTypeVaultReferenceDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(
+        it,
+        FfiConverterString.lower(`driveId`),FfiConverterString.lower(`itemId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `beginOneDriveLogin`(): OneDriveAuthSessionDto {
+            return FfiConverterTypeOneDriveAuthSessionDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_begin_one_drive_login(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `completePendingOneDriveLogin`(): OneDriveAuthStatusDto {
+            return FfiConverterTypeOneDriveAuthStatusDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `listOneDriveChildren`(`parentItemId`: kotlin.String?): OneDriveItemListDto {
+            return FfiConverterTypeOneDriveItemListDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_list_one_drive_children(
+        it,
+        FfiConverterOptionalString.lower(`parentItemId`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `listRecent`(): VaultReferenceListDto {
+            return FfiConverterTypeVaultReferenceListDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_list_recent(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `setCurrentVault`(`vaultRefId`: kotlin.String): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_set_current_vault(
+        it,
+        FfiConverterString.lower(`vaultRefId`),_status)
+}
+    }
+    )
+    }
+
+
+
+
+
+
+
+
+
+    /**
+     * @suppress
+     */
+    companion object
+
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVaultSources: FfiConverter<VaultSources, Long> {
+    override fun lower(value: VaultSources): Long {
+        return value.uniffiCloneHandle()
+    }
+
+    override fun lift(value: Long): VaultSources {
+        return VaultSources(UniffiWithHandle, value)
+    }
+
+    override fun read(buf: ByteBuffer): VaultSources {
+        return lift(buf.getLong())
+    }
+
+    override fun allocationSize(value: VaultSources) = 8UL
+
+    override fun write(value: VaultSources, buf: ByteBuffer) {
         buf.putLong(lower(value))
     }
 }
@@ -2889,13 +4073,15 @@ public object FfiConverterTypeVaultSync: FfiConverter<VaultSync, Long> {
 
 public interface VaultUnlockInterface {
 
-    fun `enroll`(`password`: kotlin.String?, `keyFilePath`: kotlin.String?): SessionStateDto
+    fun `enroll`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
     fun `revoke`(): SessionStateDto
 
-    fun `unlockVault`(`vaultId`: kotlin.String, `password`: kotlin.String?, `keyFilePath`: kotlin.String?): SessionStateDto
+    fun `unlockCurrent`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
-    fun `unlockWithBlob`(): SessionStateDto
+    fun `unlockVault`(`vaultId`: kotlin.String, `password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
+
+    fun `unlockWithBlob`(`kdfConfirmed`: kotlin.Boolean): UnlockBlobResultDto
 
     companion object
 }
@@ -2997,13 +4183,13 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
     }
 
 
-    @Throws(VaultKernException::class)override fun `enroll`(`password`: kotlin.String?, `keyFilePath`: kotlin.String?): SessionStateDto {
+    @Throws(VaultKernException::class)override fun `enroll`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
             return FfiConverterTypeSessionStateDto.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(
         it,
-        FfiConverterOptionalString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),_status)
+        FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
 }
     }
     )
@@ -3025,13 +4211,13 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
 
 
 
-    @Throws(VaultKernException::class)override fun `unlockVault`(`vaultId`: kotlin.String, `password`: kotlin.String?, `keyFilePath`: kotlin.String?): SessionStateDto {
+    @Throws(VaultKernException::class)override fun `unlockCurrent`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
             return FfiConverterTypeSessionStateDto.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(
         it,
-        FfiConverterString.lower(`vaultId`),FfiConverterOptionalString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),_status)
+        FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
 }
     }
     )
@@ -3039,13 +4225,27 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
 
 
 
-    @Throws(VaultKernException::class)override fun `unlockWithBlob`(): SessionStateDto {
+    @Throws(VaultKernException::class)override fun `unlockVault`(`vaultId`: kotlin.String, `password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
             return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(
+        it,
+        FfiConverterString.lower(`vaultId`),FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `unlockWithBlob`(`kdfConfirmed`: kotlin.Boolean): UnlockBlobResultDto {
+            return FfiConverterTypeUnlockBlobResultDto.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_with_blob(
         it,
-        _status)
+        FfiConverterBoolean.lower(`kdfConfirmed`),_status)
 }
     }
     )
@@ -3556,6 +4756,216 @@ public object FfiConverterTypeMergeSummaryDto: FfiConverterRustBuffer<MergeSumma
 
 
 
+data class OneDriveAuthSessionDto (
+    var `authUrl`: kotlin.String
+    ,
+    var `redirectUri`: kotlin.String
+    ,
+    var `expiresInSeconds`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOneDriveAuthSessionDto: FfiConverterRustBuffer<OneDriveAuthSessionDto> {
+    override fun read(buf: ByteBuffer): OneDriveAuthSessionDto {
+        return OneDriveAuthSessionDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OneDriveAuthSessionDto) = (
+            FfiConverterString.allocationSize(value.`authUrl`) +
+            FfiConverterString.allocationSize(value.`redirectUri`) +
+            FfiConverterUInt.allocationSize(value.`expiresInSeconds`)
+    )
+
+    override fun write(value: OneDriveAuthSessionDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`authUrl`, buf)
+            FfiConverterString.write(value.`redirectUri`, buf)
+            FfiConverterUInt.write(value.`expiresInSeconds`, buf)
+    }
+}
+
+
+
+data class OneDriveAuthStatusDto (
+    var `status`: kotlin.String
+    ,
+    var `accountLabel`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOneDriveAuthStatusDto: FfiConverterRustBuffer<OneDriveAuthStatusDto> {
+    override fun read(buf: ByteBuffer): OneDriveAuthStatusDto {
+        return OneDriveAuthStatusDto(
+            FfiConverterString.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OneDriveAuthStatusDto) = (
+            FfiConverterString.allocationSize(value.`status`) +
+            FfiConverterOptionalString.allocationSize(value.`accountLabel`)
+    )
+
+    override fun write(value: OneDriveAuthStatusDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`status`, buf)
+            FfiConverterOptionalString.write(value.`accountLabel`, buf)
+    }
+}
+
+
+
+data class OneDriveItemDto (
+    var `driveId`: kotlin.String
+    ,
+    var `itemId`: kotlin.String
+    ,
+    var `name`: kotlin.String
+    ,
+    var `folder`: kotlin.Boolean
+    ,
+    var `size`: kotlin.ULong?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOneDriveItemDto: FfiConverterRustBuffer<OneDriveItemDto> {
+    override fun read(buf: ByteBuffer): OneDriveItemDto {
+        return OneDriveItemDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterOptionalULong.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OneDriveItemDto) = (
+            FfiConverterString.allocationSize(value.`driveId`) +
+            FfiConverterString.allocationSize(value.`itemId`) +
+            FfiConverterString.allocationSize(value.`name`) +
+            FfiConverterBoolean.allocationSize(value.`folder`) +
+            FfiConverterOptionalULong.allocationSize(value.`size`)
+    )
+
+    override fun write(value: OneDriveItemDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`driveId`, buf)
+            FfiConverterString.write(value.`itemId`, buf)
+            FfiConverterString.write(value.`name`, buf)
+            FfiConverterBoolean.write(value.`folder`, buf)
+            FfiConverterOptionalULong.write(value.`size`, buf)
+    }
+}
+
+
+
+data class OneDriveItemListDto (
+    var `items`: List<OneDriveItemDto>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeOneDriveItemListDto: FfiConverterRustBuffer<OneDriveItemListDto> {
+    override fun read(buf: ByteBuffer): OneDriveItemListDto {
+        return OneDriveItemListDto(
+            FfiConverterSequenceTypeOneDriveItemDto.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: OneDriveItemListDto) = (
+            FfiConverterSequenceTypeOneDriveItemDto.allocationSize(value.`items`)
+    )
+
+    override fun write(value: OneDriveItemListDto, buf: ByteBuffer) {
+            FfiConverterSequenceTypeOneDriveItemDto.write(value.`items`, buf)
+    }
+}
+
+
+
+data class PlatformCapabilitiesDto (
+    var `directPasskeyPersistence`: kotlin.Boolean
+    ,
+    var `applePasskeyOutbox`: kotlin.Boolean
+    ,
+    var `oneDriveAccountSetup`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlatformCapabilitiesDto: FfiConverterRustBuffer<PlatformCapabilitiesDto> {
+    override fun read(buf: ByteBuffer): PlatformCapabilitiesDto {
+        return PlatformCapabilitiesDto(
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PlatformCapabilitiesDto) = (
+            FfiConverterBoolean.allocationSize(value.`directPasskeyPersistence`) +
+            FfiConverterBoolean.allocationSize(value.`applePasskeyOutbox`) +
+            FfiConverterBoolean.allocationSize(value.`oneDriveAccountSetup`)
+    )
+
+    override fun write(value: PlatformCapabilitiesDto, buf: ByteBuffer) {
+            FfiConverterBoolean.write(value.`directPasskeyPersistence`, buf)
+            FfiConverterBoolean.write(value.`applePasskeyOutbox`, buf)
+            FfiConverterBoolean.write(value.`oneDriveAccountSetup`, buf)
+    }
+}
+
+
+
 data class PlatformPasskeyAssertionInput (
     var `relyingParty`: kotlin.String
     ,
@@ -3705,44 +5115,6 @@ public object FfiConverterTypePlatformPasskeyCredential: FfiConverterRustBuffer<
             FfiConverterByteArray.write(value.`userHandle`, buf)
             FfiConverterString.write(value.`userName`, buf)
             FfiConverterString.write(value.`userDisplayName`, buf)
-    }
-}
-
-
-
-data class PlatformPasskeyOperation (
-    var `credentials`: List<PlatformPasskeyCredential>
-    ,
-    var `freshUserVerification`: kotlin.Boolean
-
-){
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypePlatformPasskeyOperation: FfiConverterRustBuffer<PlatformPasskeyOperation> {
-    override fun read(buf: ByteBuffer): PlatformPasskeyOperation {
-        return PlatformPasskeyOperation(
-            FfiConverterSequenceTypePlatformPasskeyCredential.read(buf),
-            FfiConverterBoolean.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: PlatformPasskeyOperation) = (
-            FfiConverterSequenceTypePlatformPasskeyCredential.allocationSize(value.`credentials`) +
-            FfiConverterBoolean.allocationSize(value.`freshUserVerification`)
-    )
-
-    override fun write(value: PlatformPasskeyOperation, buf: ByteBuffer) {
-            FfiConverterSequenceTypePlatformPasskeyCredential.write(value.`credentials`, buf)
-            FfiConverterBoolean.write(value.`freshUserVerification`, buf)
     }
 }
 
@@ -3950,6 +5322,44 @@ public object FfiConverterTypeSessionStateDto: FfiConverterRustBuffer<SessionSta
 
 
 
+data class UnlockBlobResultDto (
+    var `status`: UnlockBlobStatusDto
+    ,
+    var `state`: SessionStateDto
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUnlockBlobResultDto: FfiConverterRustBuffer<UnlockBlobResultDto> {
+    override fun read(buf: ByteBuffer): UnlockBlobResultDto {
+        return UnlockBlobResultDto(
+            FfiConverterTypeUnlockBlobStatusDto.read(buf),
+            FfiConverterTypeSessionStateDto.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: UnlockBlobResultDto) = (
+            FfiConverterTypeUnlockBlobStatusDto.allocationSize(value.`status`) +
+            FfiConverterTypeSessionStateDto.allocationSize(value.`state`)
+    )
+
+    override fun write(value: UnlockBlobResultDto, buf: ByteBuffer) {
+            FfiConverterTypeUnlockBlobStatusDto.write(value.`status`, buf)
+            FfiConverterTypeSessionStateDto.write(value.`state`, buf)
+    }
+}
+
+
+
 data class VaultHandleDto (
     var `vaultId`: kotlin.String
     ,
@@ -3988,6 +5398,150 @@ public object FfiConverterTypeVaultHandleDto: FfiConverterRustBuffer<VaultHandle
             FfiConverterString.write(value.`vaultId`, buf)
             FfiConverterString.write(value.`name`, buf)
             FfiConverterString.write(value.`path`, buf)
+    }
+}
+
+
+
+data class VaultReferenceDto (
+    var `vaultRefId`: kotlin.String
+    ,
+    var `displayName`: kotlin.String
+    ,
+    var `sourceKind`: kotlin.String
+    ,
+    var `sourceSummary`: kotlin.String
+    ,
+    var `lastUsedAt`: kotlin.Long
+    ,
+    var `availability`: kotlin.String
+    ,
+    var `supportsQuickUnlock`: kotlin.Boolean
+    ,
+    var `isCurrent`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVaultReferenceDto: FfiConverterRustBuffer<VaultReferenceDto> {
+    override fun read(buf: ByteBuffer): VaultReferenceDto {
+        return VaultReferenceDto(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterLong.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: VaultReferenceDto) = (
+            FfiConverterString.allocationSize(value.`vaultRefId`) +
+            FfiConverterString.allocationSize(value.`displayName`) +
+            FfiConverterString.allocationSize(value.`sourceKind`) +
+            FfiConverterString.allocationSize(value.`sourceSummary`) +
+            FfiConverterLong.allocationSize(value.`lastUsedAt`) +
+            FfiConverterString.allocationSize(value.`availability`) +
+            FfiConverterBoolean.allocationSize(value.`supportsQuickUnlock`) +
+            FfiConverterBoolean.allocationSize(value.`isCurrent`)
+    )
+
+    override fun write(value: VaultReferenceDto, buf: ByteBuffer) {
+            FfiConverterString.write(value.`vaultRefId`, buf)
+            FfiConverterString.write(value.`displayName`, buf)
+            FfiConverterString.write(value.`sourceKind`, buf)
+            FfiConverterString.write(value.`sourceSummary`, buf)
+            FfiConverterLong.write(value.`lastUsedAt`, buf)
+            FfiConverterString.write(value.`availability`, buf)
+            FfiConverterBoolean.write(value.`supportsQuickUnlock`, buf)
+            FfiConverterBoolean.write(value.`isCurrent`, buf)
+    }
+}
+
+
+
+data class VaultReferenceListDto (
+    var `vaults`: List<VaultReferenceDto>
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVaultReferenceListDto: FfiConverterRustBuffer<VaultReferenceListDto> {
+    override fun read(buf: ByteBuffer): VaultReferenceListDto {
+        return VaultReferenceListDto(
+            FfiConverterSequenceTypeVaultReferenceDto.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: VaultReferenceListDto) = (
+            FfiConverterSequenceTypeVaultReferenceDto.allocationSize(value.`vaults`)
+    )
+
+    override fun write(value: VaultReferenceListDto, buf: ByteBuffer) {
+            FfiConverterSequenceTypeVaultReferenceDto.write(value.`vaults`, buf)
+    }
+}
+
+
+
+data class VaultSessionConfig (
+    var `platform`: ResidentPlatform
+    ,
+    var `stateDirectory`: kotlin.String
+    ,
+    var `temporaryDirectory`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeVaultSessionConfig: FfiConverterRustBuffer<VaultSessionConfig> {
+    override fun read(buf: ByteBuffer): VaultSessionConfig {
+        return VaultSessionConfig(
+            FfiConverterTypeResidentPlatform.read(buf),
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: VaultSessionConfig) = (
+            FfiConverterTypeResidentPlatform.allocationSize(value.`platform`) +
+            FfiConverterString.allocationSize(value.`stateDirectory`) +
+            FfiConverterString.allocationSize(value.`temporaryDirectory`)
+    )
+
+    override fun write(value: VaultSessionConfig, buf: ByteBuffer) {
+            FfiConverterTypeResidentPlatform.write(value.`platform`, buf)
+            FfiConverterString.write(value.`stateDirectory`, buf)
+            FfiConverterString.write(value.`temporaryDirectory`, buf)
     }
 }
 
@@ -4154,6 +5708,40 @@ public object FfiConverterTypePlatformAdapterError : FfiConverterRustBuffer<Plat
 
 
 
+enum class ResidentPlatform {
+
+    MACOS,
+    ANDROID;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeResidentPlatform: FfiConverterRustBuffer<ResidentPlatform> {
+    override fun read(buf: ByteBuffer) = try {
+        ResidentPlatform.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: ResidentPlatform) = 4UL
+
+    override fun write(value: ResidentPlatform, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 enum class SaveVaultStatusDto {
 
     SAVED,
@@ -4190,6 +5778,44 @@ public object FfiConverterTypeSaveVaultStatusDto: FfiConverterRustBuffer<SaveVau
 
 
 
+enum class UnlockBlobStatusDto {
+
+    UNLOCKED,
+    NOT_ENROLLED,
+    CANCELLED,
+    OPEN_APP_REQUIRED,
+    CREDENTIAL_REQUIRED,
+    UNSUPPORTED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeUnlockBlobStatusDto: FfiConverterRustBuffer<UnlockBlobStatusDto> {
+    override fun read(buf: ByteBuffer) = try {
+        UnlockBlobStatusDto.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: UnlockBlobStatusDto) = 4UL
+
+    override fun write(value: UnlockBlobStatusDto, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 
 sealed class VaultKernException: kotlin.Exception() {
 
@@ -4205,6 +5831,68 @@ sealed class VaultKernException: kotlin.Exception() {
         ) : VaultKernException() {
         override val message
             get() = ""
+    }
+
+    class ReentrantCall(
+        ) : VaultKernException() {
+        override val message
+            get() = ""
+    }
+
+    class AdapterCallbackActive(
+        ) : VaultKernException() {
+        override val message
+            get() = ""
+    }
+
+    class UnsupportedCapability(
+
+        val `capability`: kotlin.String,
+
+        val `details`: kotlin.String
+        ) : VaultKernException() {
+        override val message
+            get() = "capability=${ `capability` }, details=${ `details` }"
+    }
+
+    class KdfConfirmationRequired(
+
+        val `algorithm`: kotlin.String,
+
+        val `resource`: kotlin.String,
+
+        val `observed`: kotlin.ULong,
+
+        val `limit`: kotlin.ULong
+        ) : VaultKernException() {
+        override val message
+            get() = "algorithm=${ `algorithm` }, resource=${ `resource` }, observed=${ `observed` }, limit=${ `limit` }"
+    }
+
+    class KdfRefused(
+
+        val `algorithm`: kotlin.String,
+
+        val `resource`: kotlin.String,
+
+        val `observed`: kotlin.ULong,
+
+        val `limit`: kotlin.ULong
+        ) : VaultKernException() {
+        override val message
+            get() = "algorithm=${ `algorithm` }, resource=${ `resource` }, observed=${ `observed` }, limit=${ `limit` }"
+    }
+
+    class KdfForbidden(
+
+        val `algorithm`: kotlin.String,
+
+        val `resource`: kotlin.String,
+
+        val `observed`: kotlin.ULong
+        ) : VaultKernException() {
+        override val message
+            get() = "algorithm=${ `algorithm` }, resource=${ `resource` }, observed=${ `observed` }"
     }
 
 
@@ -4230,6 +5918,29 @@ public object FfiConverterTypeVaultKernError : FfiConverterRustBuffer<VaultKernE
                 FfiConverterString.read(buf),
                 )
             2 -> VaultKernException.StateUnavailable()
+            3 -> VaultKernException.ReentrantCall()
+            4 -> VaultKernException.AdapterCallbackActive()
+            5 -> VaultKernException.UnsupportedCapability(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            6 -> VaultKernException.KdfConfirmationRequired(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            7 -> VaultKernException.KdfRefused(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                FfiConverterULong.read(buf),
+                )
+            8 -> VaultKernException.KdfForbidden(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterULong.read(buf),
+                )
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
@@ -4245,6 +5956,43 @@ public object FfiConverterTypeVaultKernError : FfiConverterRustBuffer<VaultKernE
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
             )
+            is VaultKernException.ReentrantCall -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is VaultKernException.AdapterCallbackActive -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is VaultKernException.UnsupportedCapability -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`capability`)
+                + FfiConverterString.allocationSize(value.`details`)
+            )
+            is VaultKernException.KdfConfirmationRequired -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`algorithm`)
+                + FfiConverterString.allocationSize(value.`resource`)
+                + FfiConverterULong.allocationSize(value.`observed`)
+                + FfiConverterULong.allocationSize(value.`limit`)
+            )
+            is VaultKernException.KdfRefused -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`algorithm`)
+                + FfiConverterString.allocationSize(value.`resource`)
+                + FfiConverterULong.allocationSize(value.`observed`)
+                + FfiConverterULong.allocationSize(value.`limit`)
+            )
+            is VaultKernException.KdfForbidden -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+                + FfiConverterString.allocationSize(value.`algorithm`)
+                + FfiConverterString.allocationSize(value.`resource`)
+                + FfiConverterULong.allocationSize(value.`observed`)
+            )
         }
     }
 
@@ -4259,9 +6007,78 @@ public object FfiConverterTypeVaultKernError : FfiConverterRustBuffer<VaultKernE
                 buf.putInt(2)
                 Unit
             }
+            is VaultKernException.ReentrantCall -> {
+                buf.putInt(3)
+                Unit
+            }
+            is VaultKernException.AdapterCallbackActive -> {
+                buf.putInt(4)
+                Unit
+            }
+            is VaultKernException.UnsupportedCapability -> {
+                buf.putInt(5)
+                FfiConverterString.write(value.`capability`, buf)
+                FfiConverterString.write(value.`details`, buf)
+                Unit
+            }
+            is VaultKernException.KdfConfirmationRequired -> {
+                buf.putInt(6)
+                FfiConverterString.write(value.`algorithm`, buf)
+                FfiConverterString.write(value.`resource`, buf)
+                FfiConverterULong.write(value.`observed`, buf)
+                FfiConverterULong.write(value.`limit`, buf)
+                Unit
+            }
+            is VaultKernException.KdfRefused -> {
+                buf.putInt(7)
+                FfiConverterString.write(value.`algorithm`, buf)
+                FfiConverterString.write(value.`resource`, buf)
+                FfiConverterULong.write(value.`observed`, buf)
+                FfiConverterULong.write(value.`limit`, buf)
+                Unit
+            }
+            is VaultKernException.KdfForbidden -> {
+                buf.putInt(8)
+                FfiConverterString.write(value.`algorithm`, buf)
+                FfiConverterString.write(value.`resource`, buf)
+                FfiConverterULong.write(value.`observed`, buf)
+                Unit
+            }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalULong: FfiConverterRustBuffer<kotlin.ULong?> {
+    override fun read(buf: ByteBuffer): kotlin.ULong? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterULong.read(buf)
+    }
+
+    override fun allocationSize(value: kotlin.ULong?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterULong.allocationSize(value)
+        }
+    }
+
+    override fun write(value: kotlin.ULong?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterULong.write(value, buf)
+        }
+    }
 }
 
 
@@ -4324,38 +6141,6 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
         } else {
             buf.put(1)
             FfiConverterString.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalByteArray: FfiConverterRustBuffer<kotlin.ByteArray?> {
-    override fun read(buf: ByteBuffer): kotlin.ByteArray? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterByteArray.read(buf)
-    }
-
-    override fun allocationSize(value: kotlin.ByteArray?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterByteArray.allocationSize(value)
-        }
-    }
-
-    override fun write(value: kotlin.ByteArray?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterByteArray.write(value, buf)
         }
     }
 }
@@ -4452,6 +6237,38 @@ public object FfiConverterOptionalTypeVaultSourceStatusDto: FfiConverterRustBuff
         } else {
             buf.put(1)
             FfiConverterTypeVaultSourceStatusDto.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeSensitiveBytes: FfiConverterRustBuffer<SensitiveBytes?> {
+    override fun read(buf: ByteBuffer): SensitiveBytes? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeSensitiveBytes.read(buf)
+    }
+
+    override fun allocationSize(value: SensitiveBytes?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeSensitiveBytes.allocationSize(value)
+        }
+    }
+
+    override fun write(value: SensitiveBytes?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeSensitiveBytes.write(value, buf)
         }
     }
 }
@@ -4606,6 +6423,34 @@ public object FfiConverterSequenceTypeEntrySummaryDto: FfiConverterRustBuffer<Li
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeOneDriveItemDto: FfiConverterRustBuffer<List<OneDriveItemDto>> {
+    override fun read(buf: ByteBuffer): List<OneDriveItemDto> {
+        val len = buf.getInt()
+        return List<OneDriveItemDto>(len) {
+            FfiConverterTypeOneDriveItemDto.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<OneDriveItemDto>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeOneDriveItemDto.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<OneDriveItemDto>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeOneDriveItemDto.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypePlatformPasskeyCredential: FfiConverterRustBuffer<List<PlatformPasskeyCredential>> {
     override fun read(buf: ByteBuffer): List<PlatformPasskeyCredential> {
         val len = buf.getInt()
@@ -4630,10 +6475,110 @@ public object FfiConverterSequenceTypePlatformPasskeyCredential: FfiConverterRus
 
 
 
+
 /**
- * Typealias from the type name used in the UDL file to the builtin type.  This
+ * @suppress
+ */
+public object FfiConverterSequenceTypeVaultReferenceDto: FfiConverterRustBuffer<List<VaultReferenceDto>> {
+    override fun read(buf: ByteBuffer): List<VaultReferenceDto> {
+        val len = buf.getInt()
+        return List<VaultReferenceDto>(len) {
+            FfiConverterTypeVaultReferenceDto.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<VaultReferenceDto>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeVaultReferenceDto.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<VaultReferenceDto>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeVaultReferenceDto.write(it, buf)
+        }
+    }
+}
+
+
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the custom type.  This
  * is needed because the UDL type name is used in function/method signatures.
  * It's also what we have an external type that references a custom type.
  */
-public typealias SensitiveString = kotlin.String
-public typealias FfiConverterTypeSensitiveString = FfiConverterString
+public typealias SensitiveBytes = VaultKernSensitiveBytes
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSensitiveBytes: FfiConverter<SensitiveBytes, RustBuffer.ByValue> {
+    override fun lift(value: RustBuffer.ByValue): SensitiveBytes {
+        val builtinValue = FfiConverterByteArray.lift(value)
+        return VaultKernSensitiveBytes.fromByteArray(builtinValue)
+    }
+
+    override fun lower(value: SensitiveBytes): RustBuffer.ByValue {
+        val builtinValue = value.copyBytes()
+        return FfiConverterByteArray.lower(builtinValue)
+    }
+
+    override fun read(buf: ByteBuffer): SensitiveBytes {
+        val builtinValue = FfiConverterByteArray.read(buf)
+        return VaultKernSensitiveBytes.fromByteArray(builtinValue)
+    }
+
+    override fun allocationSize(value: SensitiveBytes): ULong {
+        val builtinValue = value.copyBytes()
+        return FfiConverterByteArray.allocationSize(builtinValue)
+    }
+
+    override fun write(value: SensitiveBytes, buf: ByteBuffer) {
+        val builtinValue = value.copyBytes()
+        FfiConverterByteArray.write(builtinValue, buf)
+    }
+}
+
+
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the custom type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ * It's also what we have an external type that references a custom type.
+ */
+public typealias SensitiveString = VaultKernSensitiveString
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeSensitiveString: FfiConverter<SensitiveString, RustBuffer.ByValue> {
+    override fun lift(value: RustBuffer.ByValue): SensitiveString {
+        val builtinValue = FfiConverterString.lift(value)
+        return VaultKernSensitiveString.fromString(builtinValue)
+    }
+
+    override fun lower(value: SensitiveString): RustBuffer.ByValue {
+        val builtinValue = value.reveal()
+        return FfiConverterString.lower(builtinValue)
+    }
+
+    override fun read(buf: ByteBuffer): SensitiveString {
+        val builtinValue = FfiConverterString.read(buf)
+        return VaultKernSensitiveString.fromString(builtinValue)
+    }
+
+    override fun allocationSize(value: SensitiveString): ULong {
+        val builtinValue = value.reveal()
+        return FfiConverterString.allocationSize(builtinValue)
+    }
+
+    override fun write(value: SensitiveString, buf: ByteBuffer) {
+        val builtinValue = value.reveal()
+        FfiConverterString.write(builtinValue, buf)
+    }
+}

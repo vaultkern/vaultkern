@@ -1,19 +1,33 @@
 # vaultkern-uniffi
 
 This crate is the mobile and macOS FFI boundary around the resident
-`vaultkern-runtime`. It exports the existing session, unlock, sync, and passkey
-operations without adding platform behavior. Native apps implement
-`UnlockBlobAdapter`; keychain and biometric UI remain on the platform side of
-that trait. Apps initiate passkey ceremonies through the exported register and
-assert entry points using the runtime's existing operation lease: prepare,
-register/assert, commit registration when applicable, then end the operation.
+`vaultkern-runtime`. It exports the existing session, unlock, source, sync, and
+passkey operations without adding platform behavior. Native apps provide an
+explicit `VaultSessionConfig` with their private state/cache directories and
+implement `UnlockBlobAdapter` plus `OneDriveTokenAdapter`; keychain, biometric,
+and OAuth presentation code remains on the platform side of those traits.
+Local files use `openVault` followed by `unlockVault`. A persisted source
+selected through `VaultSources` uses `unlockCurrent`, which lets the runtime
+load either its local or OneDrive snapshot before applying the same unlock
+policy.
+
+Android initiates passkey ceremonies through `beginPasskeyOperation`. The
+returned scoped object owns the runtime lease: register/assert, commit a
+registration when applicable, then `finish` (or release/close the language
+object, whose Rust destructor rolls back an unfinished operation). D3 requires
+Apple credential-provider extensions to use an encrypted outbox rather than
+write KDBX directly. Until that separate boundary exists, macOS reports
+`applePasskeyOutbox = false` and rejects Android-style direct persistence
+instead of pretending it is supported.
+While a passkey operation is active, ordinary session mutations are rejected;
+only the scoped register/assert/commit methods may change the vault. This keeps
+an uncommitted registration from escaping through an unrelated save or sync.
 
 The exported records retain the D5 runtime-protocol names and field vocabulary.
-Secret-bearing strings use the `SensitiveString` custom type so their resident
-Rust allocations are zeroized on drop and redacted from Rust debug output.
-Lowering creates a separate FFI transfer copy; the resulting Swift/Kotlin
-`String` is managed by the foreign runtime and is outside that zeroization
-guarantee.
+Secret-bearing strings and unlock-blob bytes use custom Swift/Kotlin owner
+types. They redact `description`/`toString`, keep owned bytes clearable, and
+must be closed after use. `reveal()` necessarily creates a short-lived native
+language `String`; that rendering copy is outside Rust's zeroization guarantee.
 
 ## Generate bindings
 
@@ -36,16 +50,17 @@ Swift and Kotlin outputs are checked by the UniFFI Bindings workflow.
 
 ## Tests
 
-The Rust contract test exercises every facade area and the fake unlock-blob
-adapter. The two language smoke tests additionally compile the generated code,
-open the external KeePassXC fixture, list entries, and complete enroll/unlock/
-revoke through an in-memory adapter:
+The Rust contract test exercises every facade area and fake platform adapters.
+The two language smoke tests additionally compile the generated code, open the
+external KeePassXC fixture, list entries, and complete enroll/unlock/revoke
+through an in-memory adapter:
 
 ```sh
-XDG_STATE_HOME=/tmp/vaultkern-uniffi-test-state \
-  cargo test --locked -p vaultkern-uniffi -- --test-threads=1
-gradle -p crates/vaultkern-uniffi/tests/kotlin run
+cargo test --locked -p vaultkern-uniffi -- --test-threads=1
+gradle -p crates/vaultkern-uniffi/tests/kotlin connectedDebugAndroidTest
 ```
 
-The workflow also links the Rust library for Android API 34 on arm64. The
-Swift compile and link commands are kept there as well and run on macOS.
+The workflow builds an arm64 Android artifact and runs the Kotlin test with the
+x86_64 artifact inside an Android 14/API 34 emulator. Swift is compiled and run
+on a macOS runner with deployment target 14.0; Linux is not treated as evidence
+for the macOS slice.

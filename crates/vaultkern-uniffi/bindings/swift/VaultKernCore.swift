@@ -573,6 +573,266 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 
 
 /**
+ * Platform-owned protected storage for the existing OneDrive refresh token.
+ * OAuth presentation remains a platform concern; the runtime owns token use.
+ */
+public protocol OneDriveTokenAdapter: AnyObject, Sendable {
+
+    func loadRefreshToken() throws  -> SensitiveString?
+
+    func storeRefreshToken(token: SensitiveString) throws
+
+    func deleteRefreshToken() throws
+
+}
+/**
+ * Platform-owned protected storage for the existing OneDrive refresh token.
+ * OAuth presentation remains a platform concern; the runtime owns token use.
+ */
+open class OneDriveTokenAdapterImpl: OneDriveTokenAdapter, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vaultkern_uniffi_fn_clone_onedrivetokenadapter(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_vaultkern_uniffi_fn_free_onedrivetokenadapter(handle, $0) }
+    }
+
+
+
+
+open func loadRefreshToken()throws  -> SensitiveString?  {
+    return try  FfiConverterOptionTypeSensitiveString.lift(try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_load_refresh_token(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func storeRefreshToken(token: SensitiveString)throws   {try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_store_refresh_token(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSensitiveString_lower(token),$0
+    )
+}
+}
+
+open func deleteRefreshToken()throws   {try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_onedrivetokenadapter_delete_refresh_token(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+
+
+
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceOneDriveTokenAdapter {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // This creates 1-element array, since this seems to be the only way to construct a const
+    // pointer that we can pass to the Rust code.
+    static let vtable: [UniffiVTableCallbackInterfaceOneDriveTokenAdapter] = [UniffiVTableCallbackInterfaceOneDriveTokenAdapter(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeOneDriveTokenAdapter.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface OneDriveTokenAdapter: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeOneDriveTokenAdapter.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface OneDriveTokenAdapter: handle missing in uniffiClone")
+            }
+        },
+        loadRefreshToken: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> SensitiveString? in
+                guard let uniffiObj = try? FfiConverterTypeOneDriveTokenAdapter.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.loadRefreshToken(
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeSensitiveString.lower($0) }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePlatformAdapterError_lower
+            )
+        },
+        storeRefreshToken: { (
+            uniffiHandle: UInt64,
+            token: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeOneDriveTokenAdapter.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.storeRefreshToken(
+                     token: try FfiConverterTypeSensitiveString_lift(token)
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePlatformAdapterError_lower
+            )
+        },
+        deleteRefreshToken: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeOneDriveTokenAdapter.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.deleteRefreshToken(
+                )
+            }
+
+
+            let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePlatformAdapterError_lower
+            )
+        }
+    )]
+}
+
+private func uniffiCallbackInitOneDriveTokenAdapter() {
+    uniffi_vaultkern_uniffi_fn_init_callback_vtable_onedrivetokenadapter(UniffiCallbackInterfaceOneDriveTokenAdapter.vtable)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOneDriveTokenAdapter: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<OneDriveTokenAdapter>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = OneDriveTokenAdapter
+
+    public static func lift(_ handle: UInt64) throws -> OneDriveTokenAdapter {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return OneDriveTokenAdapterImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: OneDriveTokenAdapter) -> UInt64 {
+         if let rustImpl = value as? OneDriveTokenAdapterImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OneDriveTokenAdapter {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: OneDriveTokenAdapter, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveTokenAdapter_lift(_ handle: UInt64) throws -> OneDriveTokenAdapter {
+    return try FfiConverterTypeOneDriveTokenAdapter.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveTokenAdapter_lower(_ value: OneDriveTokenAdapter) -> UInt64 {
+    return FfiConverterTypeOneDriveTokenAdapter.lower(value)
+}
+
+
+
+
+
+
+/**
  * Platform-owned protected storage and user-presence operations for one
  * unlock blob per vault.  Implementations live in Swift/Kotlin; the Rust core
  * continues to consume its existing biometric and secure-storage traits.
@@ -589,9 +849,9 @@ public protocol UnlockBlobAdapter: AnyObject, Sendable {
 
     func authorizeStoreUserPresence() throws
 
-    func storeBlob(key: String, value: Data) throws
+    func storeBlob(key: String, value: SensitiveBytes) throws
 
-    func loadBlob(key: String) throws  -> Data?
+    func loadBlob(key: String) throws  -> SensitiveBytes?
 
     func containsBlob(key: String) throws  -> Bool
 
@@ -695,17 +955,17 @@ open func authorizeStoreUserPresence()throws   {try rustCallWithError(FfiConvert
 }
 }
 
-open func storeBlob(key: String, value: Data)throws   {try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
+open func storeBlob(key: String, value: SensitiveBytes)throws   {try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
     uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_store_blob(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(key),
-        FfiConverterData.lower(value),$0
+        FfiConverterTypeSensitiveBytes_lower(value),$0
     )
 }
 }
 
-open func loadBlob(key: String)throws  -> Data?  {
-    return try  FfiConverterOptionData.lift(try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
+open func loadBlob(key: String)throws  -> SensitiveBytes?  {
+    return try  FfiConverterOptionTypeSensitiveBytes.lift(try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
     uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_load_blob(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(key),$0
@@ -890,7 +1150,7 @@ fileprivate struct UniffiCallbackInterfaceUnlockBlobAdapter {
                 }
                 return try uniffiObj.storeBlob(
                      key: try FfiConverterString.lift(key),
-                     value: try FfiConverterData.lift(value)
+                     value: try FfiConverterTypeSensitiveBytes_lift(value)
                 )
             }
 
@@ -910,7 +1170,7 @@ fileprivate struct UniffiCallbackInterfaceUnlockBlobAdapter {
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
             let makeCall = {
-                () throws -> Data? in
+                () throws -> SensitiveBytes? in
                 guard let uniffiObj = try? FfiConverterTypeUnlockBlobAdapter.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
@@ -920,7 +1180,7 @@ fileprivate struct UniffiCallbackInterfaceUnlockBlobAdapter {
             }
 
 
-            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionData.lower($0) }
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeSensitiveBytes.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -1045,33 +1305,197 @@ public func FfiConverterTypeUnlockBlobAdapter_lower(_ value: UnlockBlobAdapter) 
 
 
 
+public protocol VaultPasskeyOperationProtocol: AnyObject, Sendable {
+
+    func assertPasskey(input: PlatformPasskeyAssertionInput) throws  -> PlatformPasskeyAssertionOutput
+
+    func commitRegistration() throws
+
+    func credentials() throws  -> [PlatformPasskeyCredential]
+
+    func finish() throws
+
+    func freshUserVerification() throws  -> Bool
+
+    func registerPasskey(input: PlatformPasskeyRegistrationInput) throws  -> PlatformPasskeyRegistrationOutput
+
+}
+open class VaultPasskeyOperation: VaultPasskeyOperationProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vaultkern_uniffi_fn_clone_vaultpasskeyoperation(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_vaultkern_uniffi_fn_free_vaultpasskeyoperation(handle, $0) }
+    }
+
+
+
+
+open func assertPasskey(input: PlatformPasskeyAssertionInput)throws  -> PlatformPasskeyAssertionOutput  {
+    return try  FfiConverterTypePlatformPasskeyAssertionOutput_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_assert_passkey(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePlatformPasskeyAssertionInput_lower(input),$0
+    )
+})
+}
+
+open func commitRegistration()throws   {try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_commit_registration(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+
+open func credentials()throws  -> [PlatformPasskeyCredential]  {
+    return try  FfiConverterSequenceTypePlatformPasskeyCredential.lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_credentials(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func finish()throws   {try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_finish(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+
+open func freshUserVerification()throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_fresh_user_verification(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func registerPasskey(input: PlatformPasskeyRegistrationInput)throws  -> PlatformPasskeyRegistrationOutput  {
+    return try  FfiConverterTypePlatformPasskeyRegistrationOutput_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultpasskeyoperation_register_passkey(
+            self.uniffiCloneHandle(),
+        FfiConverterTypePlatformPasskeyRegistrationInput_lower(input),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultPasskeyOperation: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = VaultPasskeyOperation
+
+    public static func lift(_ handle: UInt64) throws -> VaultPasskeyOperation {
+        return VaultPasskeyOperation(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: VaultPasskeyOperation) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultPasskeyOperation {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: VaultPasskeyOperation, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultPasskeyOperation_lift(_ handle: UInt64) throws -> VaultPasskeyOperation {
+    return try FfiConverterTypeVaultPasskeyOperation.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultPasskeyOperation_lower(_ value: VaultPasskeyOperation) -> UInt64 {
+    return FfiConverterTypeVaultPasskeyOperation.lower(value)
+}
+
+
+
+
+
+
 public protocol VaultSessionProtocol: AnyObject, Sendable {
 
-    func assertPasskey(operationId: Data, input: PlatformPasskeyAssertionInput) throws  -> PlatformPasskeyAssertionOutput
+    func beginPasskeyOperation(operationId: Data) throws  -> VaultPasskeyOperation
 
-    func closeVault() throws  -> SessionStateDto
+    func capabilities()  -> PlatformCapabilitiesDto
 
-    func commitPasskeyRegistration(operationId: Data) throws
+    func closeVault(vaultId: String) throws  -> SessionStateDto
 
     func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto) throws  -> EntryDetailDto
-
-    func endPasskeyOperation(operationId: Data) throws
 
     func listEntries(vaultId: String) throws  -> [EntrySummaryDto]
 
     func listPasskeyCredentials() throws  -> [PlatformPasskeyCredential]
 
+    func lockSession() throws  -> SessionStateDto
+
     func openVault(path: String) throws  -> VaultHandleDto
 
-    func preparePasskeyOperation(operationId: Data) throws  -> PlatformPasskeyOperation
-
     func readEntry(vaultId: String, entryId: String) throws  -> EntryDetailDto
-
-    func registerPasskey(operationId: Data, input: PlatformPasskeyRegistrationInput) throws  -> PlatformPasskeyRegistrationOutput
 
     func save(vaultId: String) throws  -> SaveVaultResultDto
 
     func sessionState() throws  -> SessionStateDto
+
+    func sources()  -> VaultSources
 
     func sync()  -> VaultSync
 
@@ -1117,11 +1541,13 @@ open class VaultSession: VaultSessionProtocol, @unchecked Sendable {
     public func uniffiCloneHandle() -> UInt64 {
         return try! rustCall { uniffi_vaultkern_uniffi_fn_clone_vaultsession(self.handle, $0) }
     }
-public convenience init(unlockBlobAdapter: UnlockBlobAdapter) {
+public convenience init(config: VaultSessionConfig, unlockBlobAdapter: UnlockBlobAdapter, oneDriveTokenAdapter: OneDriveTokenAdapter)throws  {
     let handle =
-        try! rustCall() {
+        try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_constructor_vaultsession_new(
-        FfiConverterTypeUnlockBlobAdapter_lower(unlockBlobAdapter),$0
+        FfiConverterTypeVaultSessionConfig_lower(config),
+        FfiConverterTypeUnlockBlobAdapter_lower(unlockBlobAdapter),
+        FfiConverterTypeOneDriveTokenAdapter_lower(oneDriveTokenAdapter),$0
     )
 }
     self.init(unsafeFromHandle: handle)
@@ -1139,30 +1565,30 @@ public convenience init(unlockBlobAdapter: UnlockBlobAdapter) {
 
 
 
-open func assertPasskey(operationId: Data, input: PlatformPasskeyAssertionInput)throws  -> PlatformPasskeyAssertionOutput  {
-    return try  FfiConverterTypePlatformPasskeyAssertionOutput_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(
+open func beginPasskeyOperation(operationId: Data)throws  -> VaultPasskeyOperation  {
+    return try  FfiConverterTypeVaultPasskeyOperation_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_begin_passkey_operation(
             self.uniffiCloneHandle(),
-        FfiConverterData.lower(operationId),
-        FfiConverterTypePlatformPasskeyAssertionInput_lower(input),$0
+        FfiConverterData.lower(operationId),$0
     )
 })
 }
 
-open func closeVault()throws  -> SessionStateDto  {
-    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(
+open func capabilities() -> PlatformCapabilitiesDto  {
+    return try!  FfiConverterTypePlatformCapabilitiesDto_lift(try! rustCall() {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_capabilities(
             self.uniffiCloneHandle(),$0
     )
 })
 }
 
-open func commitPasskeyRegistration(operationId: Data)throws   {try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_commit_passkey_registration(
+open func closeVault(vaultId: String)throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(
             self.uniffiCloneHandle(),
-        FfiConverterData.lower(operationId),$0
+        FfiConverterString.lower(vaultId),$0
     )
-}
+})
 }
 
 open func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto)throws  -> EntryDetailDto  {
@@ -1174,14 +1600,6 @@ open func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto)thr
         FfiConverterTypeEntryFieldsDto_lower(fields),$0
     )
 })
-}
-
-open func endPasskeyOperation(operationId: Data)throws   {try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_end_passkey_operation(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(operationId),$0
-    )
-}
 }
 
 open func listEntries(vaultId: String)throws  -> [EntrySummaryDto]  {
@@ -1201,20 +1619,19 @@ open func listPasskeyCredentials()throws  -> [PlatformPasskeyCredential]  {
 })
 }
 
+open func lockSession()throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_lock_session(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
 open func openVault(path: String)throws  -> VaultHandleDto  {
     return try  FfiConverterTypeVaultHandleDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_open_vault(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),$0
-    )
-})
-}
-
-open func preparePasskeyOperation(operationId: Data)throws  -> PlatformPasskeyOperation  {
-    return try  FfiConverterTypePlatformPasskeyOperation_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_prepare_passkey_operation(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(operationId),$0
     )
 })
 }
@@ -1225,16 +1642,6 @@ open func readEntry(vaultId: String, entryId: String)throws  -> EntryDetailDto  
             self.uniffiCloneHandle(),
         FfiConverterString.lower(vaultId),
         FfiConverterString.lower(entryId),$0
-    )
-})
-}
-
-open func registerPasskey(operationId: Data, input: PlatformPasskeyRegistrationInput)throws  -> PlatformPasskeyRegistrationOutput  {
-    return try  FfiConverterTypePlatformPasskeyRegistrationOutput_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(
-            self.uniffiCloneHandle(),
-        FfiConverterData.lower(operationId),
-        FfiConverterTypePlatformPasskeyRegistrationInput_lower(input),$0
     )
 })
 }
@@ -1251,6 +1658,14 @@ open func save(vaultId: String)throws  -> SaveVaultResultDto  {
 open func sessionState()throws  -> SessionStateDto  {
     return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_session_state(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func sources() -> VaultSources  {
+    return try!  FfiConverterTypeVaultSources_lift(try! rustCall() {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_sources(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -1315,6 +1730,176 @@ public func FfiConverterTypeVaultSession_lift(_ handle: UInt64) throws -> VaultS
 #endif
 public func FfiConverterTypeVaultSession_lower(_ value: VaultSession) -> UInt64 {
     return FfiConverterTypeVaultSession.lower(value)
+}
+
+
+
+
+
+
+public protocol VaultSourcesProtocol: AnyObject, Sendable {
+
+    func addOneDriveVault(driveId: String, itemId: String) throws  -> VaultReferenceDto
+
+    func beginOneDriveLogin() throws  -> OneDriveAuthSessionDto
+
+    func completePendingOneDriveLogin() throws  -> OneDriveAuthStatusDto
+
+    func listOneDriveChildren(parentItemId: String?) throws  -> OneDriveItemListDto
+
+    func listRecent() throws  -> VaultReferenceListDto
+
+    func setCurrentVault(vaultRefId: String) throws  -> SessionStateDto
+
+}
+open class VaultSources: VaultSourcesProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vaultkern_uniffi_fn_clone_vaultsources(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_vaultkern_uniffi_fn_free_vaultsources(handle, $0) }
+    }
+
+
+
+
+open func addOneDriveVault(driveId: String, itemId: String)throws  -> VaultReferenceDto  {
+    return try  FfiConverterTypeVaultReferenceDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(driveId),
+        FfiConverterString.lower(itemId),$0
+    )
+})
+}
+
+open func beginOneDriveLogin()throws  -> OneDriveAuthSessionDto  {
+    return try  FfiConverterTypeOneDriveAuthSessionDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_begin_one_drive_login(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func completePendingOneDriveLogin()throws  -> OneDriveAuthStatusDto  {
+    return try  FfiConverterTypeOneDriveAuthStatusDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func listOneDriveChildren(parentItemId: String?)throws  -> OneDriveItemListDto  {
+    return try  FfiConverterTypeOneDriveItemListDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_list_one_drive_children(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(parentItemId),$0
+    )
+})
+}
+
+open func listRecent()throws  -> VaultReferenceListDto  {
+    return try  FfiConverterTypeVaultReferenceListDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_list_recent(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func setCurrentVault(vaultRefId: String)throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_set_current_vault(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(vaultRefId),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultSources: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = VaultSources
+
+    public static func lift(_ handle: UInt64) throws -> VaultSources {
+        return VaultSources(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: VaultSources) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultSources {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: VaultSources, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultSources_lift(_ handle: UInt64) throws -> VaultSources {
+    return try FfiConverterTypeVaultSources.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultSources_lower(_ value: VaultSources) -> UInt64 {
+    return FfiConverterTypeVaultSources.lower(value)
 }
 
 
@@ -1451,13 +2036,15 @@ public func FfiConverterTypeVaultSync_lower(_ value: VaultSync) -> UInt64 {
 
 public protocol VaultUnlockProtocol: AnyObject, Sendable {
 
-    func enroll(password: String?, keyFilePath: String?) throws  -> SessionStateDto
+    func enroll(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
 
     func revoke() throws  -> SessionStateDto
 
-    func unlockVault(vaultId: String, password: String?, keyFilePath: String?) throws  -> SessionStateDto
+    func unlockCurrent(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
 
-    func unlockWithBlob() throws  -> SessionStateDto
+    func unlockVault(vaultId: String, password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
+
+    func unlockWithBlob(kdfConfirmed: Bool) throws  -> UnlockBlobResultDto
 
 }
 open class VaultUnlock: VaultUnlockProtocol, @unchecked Sendable {
@@ -1513,12 +2100,13 @@ open class VaultUnlock: VaultUnlockProtocol, @unchecked Sendable {
 
 
 
-open func enroll(password: String?, keyFilePath: String?)throws  -> SessionStateDto  {
+open func enroll(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool)throws  -> SessionStateDto  {
     return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(
             self.uniffiCloneHandle(),
-        FfiConverterOptionString.lower(password),
-        FfiConverterOptionString.lower(keyFilePath),$0
+        FfiConverterOptionTypeSensitiveString.lower(password),
+        FfiConverterOptionString.lower(keyFilePath),
+        FfiConverterBool.lower(kdfConfirmed),$0
     )
 })
 }
@@ -1531,21 +2119,34 @@ open func revoke()throws  -> SessionStateDto  {
 })
 }
 
-open func unlockVault(vaultId: String, password: String?, keyFilePath: String?)throws  -> SessionStateDto  {
+open func unlockCurrent(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool)throws  -> SessionStateDto  {
     return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(
+    uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(
             self.uniffiCloneHandle(),
-        FfiConverterString.lower(vaultId),
-        FfiConverterOptionString.lower(password),
-        FfiConverterOptionString.lower(keyFilePath),$0
+        FfiConverterOptionTypeSensitiveString.lower(password),
+        FfiConverterOptionString.lower(keyFilePath),
+        FfiConverterBool.lower(kdfConfirmed),$0
     )
 })
 }
 
-open func unlockWithBlob()throws  -> SessionStateDto  {
+open func unlockVault(vaultId: String, password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool)throws  -> SessionStateDto  {
     return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(vaultId),
+        FfiConverterOptionTypeSensitiveString.lower(password),
+        FfiConverterOptionString.lower(keyFilePath),
+        FfiConverterBool.lower(kdfConfirmed),$0
+    )
+})
+}
+
+open func unlockWithBlob(kdfConfirmed: Bool)throws  -> UnlockBlobResultDto  {
+    return try  FfiConverterTypeUnlockBlobResultDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_with_blob(
-            self.uniffiCloneHandle(),$0
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(kdfConfirmed),$0
     )
 })
 }
@@ -2158,6 +2759,292 @@ public func FfiConverterTypeMergeSummaryDto_lower(_ value: MergeSummaryDto) -> R
 }
 
 
+public struct OneDriveAuthSessionDto: Equatable, Hashable {
+    public var authUrl: String
+    public var redirectUri: String
+    public var expiresInSeconds: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(authUrl: String, redirectUri: String, expiresInSeconds: UInt32) {
+        self.authUrl = authUrl
+        self.redirectUri = redirectUri
+        self.expiresInSeconds = expiresInSeconds
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension OneDriveAuthSessionDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOneDriveAuthSessionDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OneDriveAuthSessionDto {
+        return
+            try OneDriveAuthSessionDto(
+                authUrl: FfiConverterString.read(from: &buf),
+                redirectUri: FfiConverterString.read(from: &buf),
+                expiresInSeconds: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OneDriveAuthSessionDto, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.authUrl, into: &buf)
+        FfiConverterString.write(value.redirectUri, into: &buf)
+        FfiConverterUInt32.write(value.expiresInSeconds, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveAuthSessionDto_lift(_ buf: RustBuffer) throws -> OneDriveAuthSessionDto {
+    return try FfiConverterTypeOneDriveAuthSessionDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveAuthSessionDto_lower(_ value: OneDriveAuthSessionDto) -> RustBuffer {
+    return FfiConverterTypeOneDriveAuthSessionDto.lower(value)
+}
+
+
+public struct OneDriveAuthStatusDto: Equatable, Hashable {
+    public var status: String
+    public var accountLabel: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(status: String, accountLabel: String?) {
+        self.status = status
+        self.accountLabel = accountLabel
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension OneDriveAuthStatusDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOneDriveAuthStatusDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OneDriveAuthStatusDto {
+        return
+            try OneDriveAuthStatusDto(
+                status: FfiConverterString.read(from: &buf),
+                accountLabel: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OneDriveAuthStatusDto, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.status, into: &buf)
+        FfiConverterOptionString.write(value.accountLabel, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveAuthStatusDto_lift(_ buf: RustBuffer) throws -> OneDriveAuthStatusDto {
+    return try FfiConverterTypeOneDriveAuthStatusDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveAuthStatusDto_lower(_ value: OneDriveAuthStatusDto) -> RustBuffer {
+    return FfiConverterTypeOneDriveAuthStatusDto.lower(value)
+}
+
+
+public struct OneDriveItemDto: Equatable, Hashable {
+    public var driveId: String
+    public var itemId: String
+    public var name: String
+    public var folder: Bool
+    public var size: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(driveId: String, itemId: String, name: String, folder: Bool, size: UInt64?) {
+        self.driveId = driveId
+        self.itemId = itemId
+        self.name = name
+        self.folder = folder
+        self.size = size
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension OneDriveItemDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOneDriveItemDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OneDriveItemDto {
+        return
+            try OneDriveItemDto(
+                driveId: FfiConverterString.read(from: &buf),
+                itemId: FfiConverterString.read(from: &buf),
+                name: FfiConverterString.read(from: &buf),
+                folder: FfiConverterBool.read(from: &buf),
+                size: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OneDriveItemDto, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.driveId, into: &buf)
+        FfiConverterString.write(value.itemId, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterBool.write(value.folder, into: &buf)
+        FfiConverterOptionUInt64.write(value.size, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveItemDto_lift(_ buf: RustBuffer) throws -> OneDriveItemDto {
+    return try FfiConverterTypeOneDriveItemDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveItemDto_lower(_ value: OneDriveItemDto) -> RustBuffer {
+    return FfiConverterTypeOneDriveItemDto.lower(value)
+}
+
+
+public struct OneDriveItemListDto: Equatable, Hashable {
+    public var items: [OneDriveItemDto]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(items: [OneDriveItemDto]) {
+        self.items = items
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension OneDriveItemListDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeOneDriveItemListDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> OneDriveItemListDto {
+        return
+            try OneDriveItemListDto(
+                items: FfiConverterSequenceTypeOneDriveItemDto.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: OneDriveItemListDto, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeOneDriveItemDto.write(value.items, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveItemListDto_lift(_ buf: RustBuffer) throws -> OneDriveItemListDto {
+    return try FfiConverterTypeOneDriveItemListDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeOneDriveItemListDto_lower(_ value: OneDriveItemListDto) -> RustBuffer {
+    return FfiConverterTypeOneDriveItemListDto.lower(value)
+}
+
+
+public struct PlatformCapabilitiesDto: Equatable, Hashable {
+    public var directPasskeyPersistence: Bool
+    public var applePasskeyOutbox: Bool
+    public var oneDriveAccountSetup: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(directPasskeyPersistence: Bool, applePasskeyOutbox: Bool, oneDriveAccountSetup: Bool) {
+        self.directPasskeyPersistence = directPasskeyPersistence
+        self.applePasskeyOutbox = applePasskeyOutbox
+        self.oneDriveAccountSetup = oneDriveAccountSetup
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PlatformCapabilitiesDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformCapabilitiesDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformCapabilitiesDto {
+        return
+            try PlatformCapabilitiesDto(
+                directPasskeyPersistence: FfiConverterBool.read(from: &buf),
+                applePasskeyOutbox: FfiConverterBool.read(from: &buf),
+                oneDriveAccountSetup: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PlatformCapabilitiesDto, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.directPasskeyPersistence, into: &buf)
+        FfiConverterBool.write(value.applePasskeyOutbox, into: &buf)
+        FfiConverterBool.write(value.oneDriveAccountSetup, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformCapabilitiesDto_lift(_ buf: RustBuffer) throws -> PlatformCapabilitiesDto {
+    return try FfiConverterTypePlatformCapabilitiesDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformCapabilitiesDto_lower(_ value: PlatformCapabilitiesDto) -> RustBuffer {
+    return FfiConverterTypePlatformCapabilitiesDto.lower(value)
+}
+
+
 public struct PlatformPasskeyAssertionInput: Equatable, Hashable {
     public var relyingParty: String
     public var allowedCredentialIds: [Data]
@@ -2349,60 +3236,6 @@ public func FfiConverterTypePlatformPasskeyCredential_lift(_ buf: RustBuffer) th
 #endif
 public func FfiConverterTypePlatformPasskeyCredential_lower(_ value: PlatformPasskeyCredential) -> RustBuffer {
     return FfiConverterTypePlatformPasskeyCredential.lower(value)
-}
-
-
-public struct PlatformPasskeyOperation: Equatable, Hashable {
-    public var credentials: [PlatformPasskeyCredential]
-    public var freshUserVerification: Bool
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(credentials: [PlatformPasskeyCredential], freshUserVerification: Bool) {
-        self.credentials = credentials
-        self.freshUserVerification = freshUserVerification
-    }
-
-
-
-
-}
-
-#if compiler(>=6)
-extension PlatformPasskeyOperation: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypePlatformPasskeyOperation: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformPasskeyOperation {
-        return
-            try PlatformPasskeyOperation(
-                credentials: FfiConverterSequenceTypePlatformPasskeyCredential.read(from: &buf),
-                freshUserVerification: FfiConverterBool.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: PlatformPasskeyOperation, into buf: inout [UInt8]) {
-        FfiConverterSequenceTypePlatformPasskeyCredential.write(value.credentials, into: &buf)
-        FfiConverterBool.write(value.freshUserVerification, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePlatformPasskeyOperation_lift(_ buf: RustBuffer) throws -> PlatformPasskeyOperation {
-    return try FfiConverterTypePlatformPasskeyOperation.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypePlatformPasskeyOperation_lower(_ value: PlatformPasskeyOperation) -> RustBuffer {
-    return FfiConverterTypePlatformPasskeyOperation.lower(value)
 }
 
 
@@ -2662,6 +3495,60 @@ public func FfiConverterTypeSessionStateDto_lower(_ value: SessionStateDto) -> R
 }
 
 
+public struct UnlockBlobResultDto: Equatable, Hashable {
+    public var status: UnlockBlobStatusDto
+    public var state: SessionStateDto
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(status: UnlockBlobStatusDto, state: SessionStateDto) {
+        self.status = status
+        self.state = state
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension UnlockBlobResultDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUnlockBlobResultDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnlockBlobResultDto {
+        return
+            try UnlockBlobResultDto(
+                status: FfiConverterTypeUnlockBlobStatusDto.read(from: &buf),
+                state: FfiConverterTypeSessionStateDto.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: UnlockBlobResultDto, into buf: inout [UInt8]) {
+        FfiConverterTypeUnlockBlobStatusDto.write(value.status, into: &buf)
+        FfiConverterTypeSessionStateDto.write(value.state, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnlockBlobResultDto_lift(_ buf: RustBuffer) throws -> UnlockBlobResultDto {
+    return try FfiConverterTypeUnlockBlobResultDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnlockBlobResultDto_lower(_ value: UnlockBlobResultDto) -> RustBuffer {
+    return FfiConverterTypeUnlockBlobResultDto.lower(value)
+}
+
+
 public struct VaultHandleDto: Equatable, Hashable {
     public var vaultId: String
     public var name: String
@@ -2717,6 +3604,192 @@ public func FfiConverterTypeVaultHandleDto_lift(_ buf: RustBuffer) throws -> Vau
 #endif
 public func FfiConverterTypeVaultHandleDto_lower(_ value: VaultHandleDto) -> RustBuffer {
     return FfiConverterTypeVaultHandleDto.lower(value)
+}
+
+
+public struct VaultReferenceDto: Equatable, Hashable {
+    public var vaultRefId: String
+    public var displayName: String
+    public var sourceKind: String
+    public var sourceSummary: String
+    public var lastUsedAt: Int64
+    public var availability: String
+    public var supportsQuickUnlock: Bool
+    public var isCurrent: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(vaultRefId: String, displayName: String, sourceKind: String, sourceSummary: String, lastUsedAt: Int64, availability: String, supportsQuickUnlock: Bool, isCurrent: Bool) {
+        self.vaultRefId = vaultRefId
+        self.displayName = displayName
+        self.sourceKind = sourceKind
+        self.sourceSummary = sourceSummary
+        self.lastUsedAt = lastUsedAt
+        self.availability = availability
+        self.supportsQuickUnlock = supportsQuickUnlock
+        self.isCurrent = isCurrent
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VaultReferenceDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultReferenceDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultReferenceDto {
+        return
+            try VaultReferenceDto(
+                vaultRefId: FfiConverterString.read(from: &buf),
+                displayName: FfiConverterString.read(from: &buf),
+                sourceKind: FfiConverterString.read(from: &buf),
+                sourceSummary: FfiConverterString.read(from: &buf),
+                lastUsedAt: FfiConverterInt64.read(from: &buf),
+                availability: FfiConverterString.read(from: &buf),
+                supportsQuickUnlock: FfiConverterBool.read(from: &buf),
+                isCurrent: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VaultReferenceDto, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.vaultRefId, into: &buf)
+        FfiConverterString.write(value.displayName, into: &buf)
+        FfiConverterString.write(value.sourceKind, into: &buf)
+        FfiConverterString.write(value.sourceSummary, into: &buf)
+        FfiConverterInt64.write(value.lastUsedAt, into: &buf)
+        FfiConverterString.write(value.availability, into: &buf)
+        FfiConverterBool.write(value.supportsQuickUnlock, into: &buf)
+        FfiConverterBool.write(value.isCurrent, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultReferenceDto_lift(_ buf: RustBuffer) throws -> VaultReferenceDto {
+    return try FfiConverterTypeVaultReferenceDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultReferenceDto_lower(_ value: VaultReferenceDto) -> RustBuffer {
+    return FfiConverterTypeVaultReferenceDto.lower(value)
+}
+
+
+public struct VaultReferenceListDto: Equatable, Hashable {
+    public var vaults: [VaultReferenceDto]
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(vaults: [VaultReferenceDto]) {
+        self.vaults = vaults
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VaultReferenceListDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultReferenceListDto: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultReferenceListDto {
+        return
+            try VaultReferenceListDto(
+                vaults: FfiConverterSequenceTypeVaultReferenceDto.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VaultReferenceListDto, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeVaultReferenceDto.write(value.vaults, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultReferenceListDto_lift(_ buf: RustBuffer) throws -> VaultReferenceListDto {
+    return try FfiConverterTypeVaultReferenceListDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultReferenceListDto_lower(_ value: VaultReferenceListDto) -> RustBuffer {
+    return FfiConverterTypeVaultReferenceListDto.lower(value)
+}
+
+
+public struct VaultSessionConfig: Equatable, Hashable {
+    public var platform: ResidentPlatform
+    public var stateDirectory: String
+    public var temporaryDirectory: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(platform: ResidentPlatform, stateDirectory: String, temporaryDirectory: String) {
+        self.platform = platform
+        self.stateDirectory = stateDirectory
+        self.temporaryDirectory = temporaryDirectory
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension VaultSessionConfig: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultSessionConfig: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultSessionConfig {
+        return
+            try VaultSessionConfig(
+                platform: FfiConverterTypeResidentPlatform.read(from: &buf),
+                stateDirectory: FfiConverterString.read(from: &buf),
+                temporaryDirectory: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: VaultSessionConfig, into buf: inout [UInt8]) {
+        FfiConverterTypeResidentPlatform.write(value.platform, into: &buf)
+        FfiConverterString.write(value.stateDirectory, into: &buf)
+        FfiConverterString.write(value.temporaryDirectory, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultSessionConfig_lift(_ buf: RustBuffer) throws -> VaultSessionConfig {
+    return try FfiConverterTypeVaultSessionConfig.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultSessionConfig_lower(_ value: VaultSessionConfig) -> RustBuffer {
+    return FfiConverterTypeVaultSessionConfig.lower(value)
 }
 
 
@@ -2880,6 +3953,73 @@ public func FfiConverterTypePlatformAdapterError_lower(_ value: PlatformAdapterE
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
+public enum ResidentPlatform: Equatable, Hashable {
+
+    case macos
+    case android
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension ResidentPlatform: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeResidentPlatform: FfiConverterRustBuffer {
+    typealias SwiftType = ResidentPlatform
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> ResidentPlatform {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .macos
+
+        case 2: return .android
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: ResidentPlatform, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .macos:
+            writeInt(&buf, Int32(1))
+
+
+        case .android:
+            writeInt(&buf, Int32(2))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeResidentPlatform_lift(_ buf: RustBuffer) throws -> ResidentPlatform {
+    return try FfiConverterTypeResidentPlatform.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeResidentPlatform_lower(_ value: ResidentPlatform) -> RustBuffer {
+    return FfiConverterTypeResidentPlatform.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
 public enum SaveVaultStatusDto: Equatable, Hashable {
 
     case saved
@@ -2958,6 +4098,101 @@ public func FfiConverterTypeSaveVaultStatusDto_lower(_ value: SaveVaultStatusDto
 }
 
 
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+
+public enum UnlockBlobStatusDto: Equatable, Hashable {
+
+    case unlocked
+    case notEnrolled
+    case cancelled
+    case openAppRequired
+    case credentialRequired
+    case unsupported
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension UnlockBlobStatusDto: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeUnlockBlobStatusDto: FfiConverterRustBuffer {
+    typealias SwiftType = UnlockBlobStatusDto
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UnlockBlobStatusDto {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .unlocked
+
+        case 2: return .notEnrolled
+
+        case 3: return .cancelled
+
+        case 4: return .openAppRequired
+
+        case 5: return .credentialRequired
+
+        case 6: return .unsupported
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: UnlockBlobStatusDto, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .unlocked:
+            writeInt(&buf, Int32(1))
+
+
+        case .notEnrolled:
+            writeInt(&buf, Int32(2))
+
+
+        case .cancelled:
+            writeInt(&buf, Int32(3))
+
+
+        case .openAppRequired:
+            writeInt(&buf, Int32(4))
+
+
+        case .credentialRequired:
+            writeInt(&buf, Int32(5))
+
+
+        case .unsupported:
+            writeInt(&buf, Int32(6))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnlockBlobStatusDto_lift(_ buf: RustBuffer) throws -> UnlockBlobStatusDto {
+    return try FfiConverterTypeUnlockBlobStatusDto.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeUnlockBlobStatusDto_lower(_ value: UnlockBlobStatusDto) -> RustBuffer {
+    return FfiConverterTypeUnlockBlobStatusDto.lower(value)
+}
+
+
 
 public enum VaultKernError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
 
@@ -2966,6 +4201,16 @@ public enum VaultKernError: Swift.Error, Equatable, Hashable, Foundation.Localiz
     case Core(details: String
     )
     case StateUnavailable
+    case ReentrantCall
+    case AdapterCallbackActive
+    case UnsupportedCapability(capability: String, details: String
+    )
+    case KdfConfirmationRequired(algorithm: String, resource: String, observed: UInt64, limit: UInt64
+    )
+    case KdfRefused(algorithm: String, resource: String, observed: UInt64, limit: UInt64
+    )
+    case KdfForbidden(algorithm: String, resource: String, observed: UInt64
+    )
 
 
 
@@ -2999,6 +4244,29 @@ public struct FfiConverterTypeVaultKernError: FfiConverterRustBuffer {
             details: try FfiConverterString.read(from: &buf)
             )
         case 2: return .StateUnavailable
+        case 3: return .ReentrantCall
+        case 4: return .AdapterCallbackActive
+        case 5: return .UnsupportedCapability(
+            capability: try FfiConverterString.read(from: &buf),
+            details: try FfiConverterString.read(from: &buf)
+            )
+        case 6: return .KdfConfirmationRequired(
+            algorithm: try FfiConverterString.read(from: &buf),
+            resource: try FfiConverterString.read(from: &buf),
+            observed: try FfiConverterUInt64.read(from: &buf),
+            limit: try FfiConverterUInt64.read(from: &buf)
+            )
+        case 7: return .KdfRefused(
+            algorithm: try FfiConverterString.read(from: &buf),
+            resource: try FfiConverterString.read(from: &buf),
+            observed: try FfiConverterUInt64.read(from: &buf),
+            limit: try FfiConverterUInt64.read(from: &buf)
+            )
+        case 8: return .KdfForbidden(
+            algorithm: try FfiConverterString.read(from: &buf),
+            resource: try FfiConverterString.read(from: &buf),
+            observed: try FfiConverterUInt64.read(from: &buf)
+            )
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3019,6 +4287,43 @@ public struct FfiConverterTypeVaultKernError: FfiConverterRustBuffer {
         case .StateUnavailable:
             writeInt(&buf, Int32(2))
 
+
+        case .ReentrantCall:
+            writeInt(&buf, Int32(3))
+
+
+        case .AdapterCallbackActive:
+            writeInt(&buf, Int32(4))
+
+
+        case let .UnsupportedCapability(capability,details):
+            writeInt(&buf, Int32(5))
+            FfiConverterString.write(capability, into: &buf)
+            FfiConverterString.write(details, into: &buf)
+
+
+        case let .KdfConfirmationRequired(algorithm,resource,observed,limit):
+            writeInt(&buf, Int32(6))
+            FfiConverterString.write(algorithm, into: &buf)
+            FfiConverterString.write(resource, into: &buf)
+            FfiConverterUInt64.write(observed, into: &buf)
+            FfiConverterUInt64.write(limit, into: &buf)
+
+
+        case let .KdfRefused(algorithm,resource,observed,limit):
+            writeInt(&buf, Int32(7))
+            FfiConverterString.write(algorithm, into: &buf)
+            FfiConverterString.write(resource, into: &buf)
+            FfiConverterUInt64.write(observed, into: &buf)
+            FfiConverterUInt64.write(limit, into: &buf)
+
+
+        case let .KdfForbidden(algorithm,resource,observed):
+            writeInt(&buf, Int32(8))
+            FfiConverterString.write(algorithm, into: &buf)
+            FfiConverterString.write(resource, into: &buf)
+            FfiConverterUInt64.write(observed, into: &buf)
+
         }
     }
 }
@@ -3036,6 +4341,30 @@ public func FfiConverterTypeVaultKernError_lift(_ buf: RustBuffer) throws -> Vau
 #endif
 public func FfiConverterTypeVaultKernError_lower(_ value: VaultKernError) -> RustBuffer {
     return FfiConverterTypeVaultKernError.lower(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
 }
 
 #if swift(>=5.8)
@@ -3081,30 +4410,6 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
-    typealias SwiftType = Data?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterData.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3177,6 +4482,30 @@ fileprivate struct FfiConverterOptionTypeVaultSourceStatusDto: FfiConverterRustB
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeVaultSourceStatusDto.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeSensitiveBytes: FfiConverterRustBuffer {
+    typealias SwiftType = SensitiveBytes?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeSensitiveBytes.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeSensitiveBytes.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -3309,6 +4638,31 @@ fileprivate struct FfiConverterSequenceTypeEntrySummaryDto: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeOneDriveItemDto: FfiConverterRustBuffer {
+    typealias SwiftType = [OneDriveItemDto]
+
+    public static func write(_ value: [OneDriveItemDto], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeOneDriveItemDto.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [OneDriveItemDto] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [OneDriveItemDto]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeOneDriveItemDto.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypePlatformPasskeyCredential: FfiConverterRustBuffer {
     typealias SwiftType = [PlatformPasskeyCredential]
 
@@ -3331,31 +4685,114 @@ fileprivate struct FfiConverterSequenceTypePlatformPasskeyCredential: FfiConvert
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeVaultReferenceDto: FfiConverterRustBuffer {
+    typealias SwiftType = [VaultReferenceDto]
+
+    public static func write(_ value: [VaultReferenceDto], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeVaultReferenceDto.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [VaultReferenceDto] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [VaultReferenceDto]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeVaultReferenceDto.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+
+
 
 /**
- * Typealias from the type name used in the UDL file to the builtin type.  This
+ * Typealias from the type name used in the UDL file to the custom type.  This
  * is needed because the UDL type name is used in function/method signatures.
  */
-public typealias SensitiveString = String
+public typealias SensitiveBytes = VaultKernSensitiveBytes
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeSensitiveBytes: FfiConverter {
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SensitiveBytes {
+        let builtinValue = try FfiConverterData.read(from: &buf)
+        return VaultKernSensitiveBytes(builtinValue)
+    }
+
+    public static func write(_ value: SensitiveBytes, into buf: inout [UInt8]) {
+        let builtinValue = value.copyData()
+        return FfiConverterData.write(builtinValue, into: &buf)
+    }
+
+    public static func lift(_ value: RustBuffer) throws -> SensitiveBytes {
+        let builtinValue = try FfiConverterData.lift(value)
+        return VaultKernSensitiveBytes(builtinValue)
+    }
+
+    public static func lower(_ value: SensitiveBytes) -> RustBuffer {
+        let builtinValue = value.copyData()
+        return FfiConverterData.lower(builtinValue)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSensitiveBytes_lift(_ value: RustBuffer) throws -> SensitiveBytes {
+    return try FfiConverterTypeSensitiveBytes.lift(value)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeSensitiveBytes_lower(_ value: SensitiveBytes) -> RustBuffer {
+    return FfiConverterTypeSensitiveBytes.lower(value)
+}
+
+
+
+
+
+/**
+ * Typealias from the type name used in the UDL file to the custom type.  This
+ * is needed because the UDL type name is used in function/method signatures.
+ */
+public typealias SensitiveString = VaultKernSensitiveString
 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
 public struct FfiConverterTypeSensitiveString: FfiConverter {
+
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SensitiveString {
-        return try FfiConverterString.read(from: &buf)
+        let builtinValue = try FfiConverterString.read(from: &buf)
+        return VaultKernSensitiveString(builtinValue)
     }
 
     public static func write(_ value: SensitiveString, into buf: inout [UInt8]) {
-        return FfiConverterString.write(value, into: &buf)
+        let builtinValue = value.reveal()
+        return FfiConverterString.write(builtinValue, into: &buf)
     }
 
     public static func lift(_ value: RustBuffer) throws -> SensitiveString {
-        return try FfiConverterString.lift(value)
+        let builtinValue = try FfiConverterString.lift(value)
+        return VaultKernSensitiveString(builtinValue)
     }
 
     public static func lower(_ value: SensitiveString) -> RustBuffer {
-        return FfiConverterString.lower(value)
+        let builtinValue = value.reveal()
+        return FfiConverterString.lower(builtinValue)
     }
 }
 
@@ -3390,6 +4827,15 @@ private let initializationResult: InitializationResult = {
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_load_refresh_token() != 40331) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_store_refresh_token() != 22343) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_onedrivetokenadapter_delete_refresh_token() != 25563) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_supports_unlock_blob() != 33090) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -3405,10 +4851,10 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_authorize_store_user_presence() != 37169) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_store_blob() != 5135) {
+    if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_store_blob() != 5825) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_load_blob() != 27970) {
+    if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_load_blob() != 65183) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_contains_blob() != 3540) {
@@ -3417,19 +4863,34 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob() != 21760) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey() != 4142) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey() != 55408) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 50807) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_commit_registration() != 64419) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_commit_passkey_registration() != 63552) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_credentials() != 39607) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_finish() != 21697) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_fresh_user_verification() != 45948) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_register_passkey() != 64246) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_begin_passkey_operation() != 62156) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_capabilities() != 14783) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 52312) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_end_passkey_operation() != 10527) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708) {
@@ -3438,16 +4899,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_passkey_credentials() != 52070) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_lock_session() != 62296) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault() != 65313) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_prepare_passkey_operation() != 8343) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey() != 32599) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_save() != 19815) {
@@ -3456,10 +4914,31 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_session_state() != 59333) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_sources() != 1502) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_sync() != 40588) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock() != 47569) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault() != 18786) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_begin_one_drive_login() != 11177) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login() != 5690) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children() != 2771) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent() != 25381) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_set_current_vault() != 19482) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsync_status() != 21985) {
@@ -3468,22 +4947,26 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsync_trigger() != 9777) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 49862) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 1793) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current() != 40935) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_with_blob() != 33761) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 44285) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_constructor_vaultsession_new() != 42979) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_with_blob() != 42173) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_constructor_vaultsession_new() != 46493) {
         return InitializationResult.apiChecksumMismatch
     }
 
+    uniffiCallbackInitOneDriveTokenAdapter()
     uniffiCallbackInitUnlockBlobAdapter()
     return InitializationResult.ok
 }()

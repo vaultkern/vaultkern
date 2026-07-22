@@ -90,6 +90,12 @@ impl From<String> for SensitiveString {
     }
 }
 
+impl From<Zeroizing<String>> for SensitiveString {
+    fn from(value: Zeroizing<String>) -> Self {
+        Self(value)
+    }
+}
+
 impl From<&str> for SensitiveString {
     fn from(value: &str) -> Self {
         value.to_owned().into()

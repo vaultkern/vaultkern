@@ -26,5 +26,6 @@ dist/
 
 /crates/vaultkern-uniffi/tests/kotlin/.gradle/
 /crates/vaultkern-uniffi/tests/kotlin/build/
+/crates/vaultkern-uniffi/tests/kotlin/src/main/jniLibs/
 
 .idea/

@@ -1,8 +1,29 @@
 [bindings.kotlin]
 package_name = "org.vaultkern.core"
 cdylib_name = "vaultkern_uniffi"
+android = true
+
+[bindings.kotlin.custom_types.SensitiveString]
+type_name = "VaultKernSensitiveString"
+lift = "VaultKernSensitiveString.fromString({})"
+lower = "{}.reveal()"
+
+[bindings.kotlin.custom_types.SensitiveBytes]
+type_name = "VaultKernSensitiveBytes"
+lift = "VaultKernSensitiveBytes.fromByteArray({})"
+lower = "{}.copyBytes()"
 
 [bindings.swift]
 module_name = "VaultKernCore"
 ffi_module_name = "VaultKernCoreFFI"
 cdylib_name = "vaultkern_uniffi"
+
+[bindings.swift.custom_types.SensitiveString]
+type_name = "VaultKernSensitiveString"
+lift = "VaultKernSensitiveString({})"
+lower = "{}.reveal()"
+
+[bindings.swift.custom_types.SensitiveBytes]
+type_name = "VaultKernSensitiveBytes"
+lift = "VaultKernSensitiveBytes({})"
+lower = "{}.copyData()"

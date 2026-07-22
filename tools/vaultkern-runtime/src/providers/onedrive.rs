@@ -286,18 +286,26 @@ struct GraphParentReference {
 
 impl OneDriveVaultSourceProvider {
     pub fn new_from_env() -> Self {
-        Self::new_from_env_with_refresh_token_store(production_default())
+        Self::new_from_env_with_refresh_token_store(production_default(), true)
     }
 
     pub fn new_from_env_for_extension_id(extension_id: &str) -> Self {
-        Self::new_from_env_with_refresh_token_store(production_for_extension_id(extension_id))
+        Self::new_from_env_with_refresh_token_store(production_for_extension_id(extension_id), true)
+    }
+
+    pub(crate) fn new_with_platform_refresh_token_store(
+        refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
+    ) -> Self {
+        Self::new_from_env_with_refresh_token_store(refresh_token_store, false)
     }
 
     fn new_from_env_with_refresh_token_store(
         refresh_token_store: Box<dyn OneDriveRefreshTokenStore>,
+        allow_environment_refresh_token: bool,
     ) -> Self {
-        let environment_refresh_token = std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN")
-            .ok()
+        let environment_refresh_token = allow_environment_refresh_token
+            .then(|| std::env::var("VAULTKERN_ONEDRIVE_REFRESH_TOKEN").ok())
+            .flatten()
             .map(Zeroizing::new);
         let (token_state, refresh_token_load_error) = match environment_refresh_token {
             Some(refresh_token) => (
@@ -1573,9 +1581,10 @@ mod tests {
 
     #[test]
     fn provider_uses_compile_time_public_client_id_for_pkce_login_when_configured() {
-        let result = OneDriveVaultSourceProvider::new_from_env_with_refresh_token_store(Box::new(
-            MemoryOneDriveRefreshTokenStore::default(),
-        ))
+        let result = OneDriveVaultSourceProvider::new_from_env_with_refresh_token_store(
+            Box::new(MemoryOneDriveRefreshTokenStore::default()),
+            true,
+        )
         .begin_login();
 
         match option_env!("VAULTKERN_ONEDRIVE_CLIENT_ID") {

@@ -4,16 +4,21 @@
 //! field vocabulary.  This crate only converts ownership and integer widths at
 //! the FFI edge; business behavior remains in `vaultkern-runtime`.
 
+use std::cell::RefCell;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use vaultkern_runtime::{
-    BiometricProvider, PlatformPasskeyAssertionInput as RuntimePlatformPasskeyAssertionInput,
+    BiometricProvider, ExternalKdfConfirmation, ExternalKdfDisposition, OneDriveRefreshTokenStore,
+    PlatformPasskeyAssertionInput as RuntimePlatformPasskeyAssertionInput,
     PlatformPasskeyAssertionOutput as RuntimePlatformPasskeyAssertionOutput,
     PlatformPasskeyCredential as RuntimePlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput as RuntimePlatformPasskeyRegistrationInput,
-    PlatformPasskeyRegistrationOutput as RuntimePlatformPasskeyRegistrationOutput, Runtime,
-    SecureStorageError, SecureStorageProvider,
+    PlatformPasskeyRegistrationOutput as RuntimePlatformPasskeyRegistrationOutput,
+    QuickUnlockOutcome, ResidentKdfPolicy, ResidentRuntimeConfig, Runtime, SecureStorageError,
+    SecureStorageProvider, classify_external_kdf_error,
 };
 use vaultkern_runtime_protocol as protocol;
 use zeroize::{Zeroize, Zeroizing};
@@ -25,6 +30,10 @@ pub struct SensitiveString(Zeroizing<String>);
 impl SensitiveString {
     pub fn as_str(&self) -> &str {
         self.0.as_str()
+    }
+
+    pub fn into_zeroizing(self) -> Zeroizing<String> {
+        self.0
     }
 }
 
@@ -74,16 +83,105 @@ impl From<SensitiveString> for String {
 
 uniffi::custom_type!(SensitiveString, String);
 
+/// Rust-owned secret bytes used for platform protected-storage transfers.
+/// The language bindings map this to explicit, redacted, clearable wrappers.
+pub struct SensitiveBytes(Zeroizing<Vec<u8>>);
+
+impl SensitiveBytes {
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+
+    pub fn into_zeroizing(self) -> Zeroizing<Vec<u8>> {
+        self.0
+    }
+}
+
+impl fmt::Debug for SensitiveBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SensitiveBytes([REDACTED])")
+    }
+}
+
+impl From<Vec<u8>> for SensitiveBytes {
+    fn from(value: Vec<u8>) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
+impl From<SensitiveBytes> for Vec<u8> {
+    fn from(value: SensitiveBytes) -> Self {
+        value.as_slice().to_vec()
+    }
+}
+
+uniffi::custom_type!(SensitiveBytes, Vec<u8>);
+
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum VaultKernError {
     #[error("{details}")]
     Core { details: String },
     #[error("vaultkern runtime state is unavailable")]
     StateUnavailable,
+    #[error("a platform adapter callback cannot re-enter the same vault session")]
+    ReentrantCall,
+    #[error("a platform adapter callback is active for this vault session")]
+    AdapterCallbackActive,
+    #[error("platform capability is unavailable: {capability} ({details})")]
+    UnsupportedCapability { capability: String, details: String },
+    #[error("external KDF requires confirmation: {algorithm} {resource}={observed}, limit={limit}")]
+    KdfConfirmationRequired {
+        algorithm: String,
+        resource: String,
+        observed: u64,
+        limit: u64,
+    },
+    #[error("external KDF was refused: {algorithm} {resource}={observed}, limit={limit}")]
+    KdfRefused {
+        algorithm: String,
+        resource: String,
+        observed: u64,
+        limit: u64,
+    },
+    #[error("external KDF is forbidden in this process: {algorithm} {resource}={observed}")]
+    KdfForbidden {
+        algorithm: String,
+        resource: String,
+        observed: u64,
+    },
 }
 
 impl From<anyhow::Error> for VaultKernError {
     fn from(error: anyhow::Error) -> Self {
+        if let Some(failure) = classify_external_kdf_error(&error) {
+            let algorithm = failure.algorithm.to_owned();
+            let resource = failure.resource.to_owned();
+            return match (failure.disposition, failure.limit) {
+                (ExternalKdfDisposition::ConfirmationRequired, Some(limit)) => {
+                    Self::KdfConfirmationRequired {
+                        algorithm,
+                        resource,
+                        observed: failure.observed,
+                        limit,
+                    }
+                }
+                (ExternalKdfDisposition::Refused, Some(limit)) => Self::KdfRefused {
+                    algorithm,
+                    resource,
+                    observed: failure.observed,
+                    limit,
+                },
+                (ExternalKdfDisposition::Forbidden, _) => Self::KdfForbidden {
+                    algorithm,
+                    resource,
+                    observed: failure.observed,
+                },
+                _ => Self::Core {
+                    details: "external KDF policy classification was internally inconsistent"
+                        .into(),
+                },
+            };
+        }
         Self::Core {
             details: format!("{error:#}"),
         }
@@ -102,9 +200,99 @@ pub enum PlatformAdapterError {
     Unexpected,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum ResidentPlatform {
+    Macos,
+    Android,
+}
+
+impl ResidentPlatform {
+    fn compiled_platform() -> Option<Self> {
+        #[cfg(target_os = "android")]
+        {
+            return Some(Self::Android);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return Some(Self::Macos);
+        }
+        #[cfg(not(any(target_os = "android", target_os = "macos")))]
+        {
+            None
+        }
+    }
+
+    fn validate_for_compiled_platform(
+        self,
+        compiled_platform: Option<Self>,
+    ) -> Result<(), VaultKernError> {
+        if let Some(compiled_platform) = compiled_platform
+            && self != compiled_platform
+        {
+            return Err(VaultKernError::Core {
+                details: format!(
+                    "resident platform declaration {self:?} does not match compiled host {compiled_platform:?}"
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VaultSessionConfig {
+    pub platform: ResidentPlatform,
+    pub state_directory: String,
+    pub temporary_directory: String,
+}
+
+impl From<VaultSessionConfig> for ResidentRuntimeConfig {
+    fn from(value: VaultSessionConfig) -> Self {
+        Self {
+            state_directory: value.state_directory.into(),
+            temporary_directory: value.temporary_directory.into(),
+            kdf_policy: match value.platform {
+                ResidentPlatform::Macos => ResidentKdfPolicy::Desktop,
+                ResidentPlatform::Android => ResidentKdfPolicy::Mobile,
+            },
+        }
+    }
+}
+
 impl From<uniffi::UnexpectedUniFFICallbackError> for PlatformAdapterError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
         Self::Unexpected
+    }
+}
+
+#[derive(Debug, Default)]
+struct AdapterCallGate {
+    active: AtomicUsize,
+}
+
+impl AdapterCallGate {
+    fn enter(&self) -> AdapterCallPermit<'_> {
+        self.active.fetch_add(1, Ordering::AcqRel);
+        AdapterCallPermit { gate: self }
+    }
+
+    fn is_active(&self) -> bool {
+        self.active.load(Ordering::Acquire) != 0
+    }
+
+    fn call<T>(&self, callback: impl FnOnce() -> T) -> T {
+        let _permit = self.enter();
+        callback()
+    }
+}
+
+struct AdapterCallPermit<'a> {
+    gate: &'a AdapterCallGate,
+}
+
+impl Drop for AdapterCallPermit<'_> {
+    fn drop(&mut self) {
+        self.gate.active.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -130,71 +318,118 @@ pub trait UnlockBlobAdapter: Send + Sync + fmt::Debug {
     fn store_requires_user_presence(&self) -> Result<bool, PlatformAdapterError>;
     fn load_requires_user_presence(&self) -> Result<bool, PlatformAdapterError>;
     fn authorize_store_user_presence(&self) -> Result<(), PlatformAdapterError>;
-    fn store_blob(&self, key: String, value: Vec<u8>) -> Result<(), PlatformAdapterError>;
-    fn load_blob(&self, key: String) -> Result<Option<Vec<u8>>, PlatformAdapterError>;
+    fn store_blob(&self, key: String, value: SensitiveBytes) -> Result<(), PlatformAdapterError>;
+    fn load_blob(&self, key: String) -> Result<Option<SensitiveBytes>, PlatformAdapterError>;
     fn contains_blob(&self, key: String) -> Result<bool, PlatformAdapterError>;
     fn delete_blob(&self, key: String) -> Result<(), PlatformAdapterError>;
+}
+
+/// Platform-owned protected storage for the existing OneDrive refresh token.
+/// OAuth presentation remains a platform concern; the runtime owns token use.
+#[uniffi::export(with_foreign)]
+pub trait OneDriveTokenAdapter: Send + Sync + fmt::Debug {
+    fn load_refresh_token(&self) -> Result<Option<SensitiveString>, PlatformAdapterError>;
+    fn store_refresh_token(&self, token: SensitiveString) -> Result<(), PlatformAdapterError>;
+    fn delete_refresh_token(&self) -> Result<(), PlatformAdapterError>;
+}
+
+#[derive(Debug)]
+struct AdapterOneDriveRefreshTokenStore {
+    adapter: Arc<dyn OneDriveTokenAdapter>,
+    calls: Arc<AdapterCallGate>,
+}
+
+impl OneDriveRefreshTokenStore for AdapterOneDriveRefreshTokenStore {
+    fn load(&self) -> anyhow::Result<Option<Zeroizing<String>>> {
+        self.calls
+            .call(|| self.adapter.load_refresh_token())
+            .map(|token| token.map(SensitiveString::into_zeroizing))
+            .map_err(anyhow::Error::new)
+    }
+
+    fn store(&self, token: &str) -> anyhow::Result<()> {
+        self.calls
+            .call(|| self.adapter.store_refresh_token(token.into()))
+            .map_err(anyhow::Error::new)
+    }
+
+    fn delete(&self) -> anyhow::Result<()> {
+        self.calls
+            .call(|| self.adapter.delete_refresh_token())
+            .map_err(anyhow::Error::new)
+    }
 }
 
 #[derive(Debug)]
 struct AdapterBiometricProvider {
     adapter: Arc<dyn UnlockBlobAdapter>,
+    calls: Arc<AdapterCallGate>,
 }
 
 impl BiometricProvider for AdapterBiometricProvider {
     fn supports_quick_unlock(&self) -> bool {
-        self.adapter.supports_unlock_blob().unwrap_or(false)
+        self.calls
+            .call(|| self.adapter.supports_unlock_blob())
+            .unwrap_or(false)
     }
 
     fn authorize(&self, reason: &str) -> anyhow::Result<()> {
-        self.adapter
-            .authorize(reason.to_owned())
-            .map_err(anyhow::Error::new)
+        self.calls
+            .call(|| self.adapter.authorize(reason.to_owned()))
+            .map_err(secure_storage_adapter_error)
     }
 }
 
 #[derive(Debug)]
 struct AdapterSecureStorageProvider {
     adapter: Arc<dyn UnlockBlobAdapter>,
+    calls: Arc<AdapterCallGate>,
 }
 
 impl SecureStorageProvider for AdapterSecureStorageProvider {
     fn authorize_store_user_presence(&self) -> anyhow::Result<()> {
-        self.adapter
-            .authorize_store_user_presence()
+        self.calls
+            .call(|| self.adapter.authorize_store_user_presence())
             .map_err(secure_storage_adapter_error)
     }
 
     fn store(&self, key: &str, value: &[u8]) -> anyhow::Result<()> {
-        self.adapter
-            .store_blob(key.to_owned(), value.to_vec())
+        self.calls
+            .call(|| {
+                self.adapter
+                    .store_blob(key.to_owned(), value.to_vec().into())
+            })
             .map_err(secure_storage_adapter_error)
     }
 
     fn load(&self, key: &str) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
-        self.adapter
-            .load_blob(key.to_owned())
-            .map(|value| value.map(Zeroizing::new))
+        self.calls
+            .call(|| self.adapter.load_blob(key.to_owned()))
+            .map(|value| value.map(SensitiveBytes::into_zeroizing))
             .map_err(secure_storage_adapter_error)
     }
 
     fn contains(&self, key: &str) -> anyhow::Result<bool> {
-        self.adapter
-            .contains_blob(key.to_owned())
+        self.calls
+            .call(|| self.adapter.contains_blob(key.to_owned()))
             .map_err(secure_storage_adapter_error)
     }
 
     fn store_requires_user_presence(&self) -> bool {
-        self.adapter.store_requires_user_presence().unwrap_or(true)
+        self.calls
+            .call(|| self.adapter.store_requires_user_presence())
+            .unwrap_or(true)
     }
 
     fn load_requires_user_presence(&self) -> bool {
-        self.adapter.load_requires_user_presence().unwrap_or(false)
+        self.calls
+            .call(|| self.adapter.load_requires_user_presence())
+            .unwrap_or(false)
     }
 
     fn delete(&self, key: &str) -> anyhow::Result<()> {
-        self.adapter
-            .delete_blob(key.to_owned())
+        self.calls
+            .call(|| self.adapter.delete_blob(key.to_owned()))
             .map_err(secure_storage_adapter_error)
     }
 }
@@ -212,6 +447,112 @@ impl From<protocol::VaultHandleDto> for VaultHandleDto {
             vault_id: value.vault_id,
             name: value.name,
             path: value.path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VaultReferenceDto {
+    pub vault_ref_id: String,
+    pub display_name: String,
+    pub source_kind: String,
+    pub source_summary: String,
+    pub last_used_at: i64,
+    pub availability: String,
+    pub supports_quick_unlock: bool,
+    pub is_current: bool,
+}
+
+impl From<protocol::VaultReferenceDto> for VaultReferenceDto {
+    fn from(value: protocol::VaultReferenceDto) -> Self {
+        Self {
+            vault_ref_id: value.vault_ref_id,
+            display_name: value.display_name,
+            source_kind: value.source_kind,
+            source_summary: value.source_summary,
+            last_used_at: value.last_used_at,
+            availability: value.availability,
+            supports_quick_unlock: value.supports_quick_unlock,
+            is_current: value.is_current,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct VaultReferenceListDto {
+    pub vaults: Vec<VaultReferenceDto>,
+}
+
+impl From<protocol::VaultReferenceListDto> for VaultReferenceListDto {
+    fn from(value: protocol::VaultReferenceListDto) -> Self {
+        Self {
+            vaults: value.vaults.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OneDriveAuthSessionDto {
+    pub auth_url: String,
+    pub redirect_uri: String,
+    pub expires_in_seconds: u32,
+}
+
+impl From<protocol::OneDriveAuthSessionDto> for OneDriveAuthSessionDto {
+    fn from(value: protocol::OneDriveAuthSessionDto) -> Self {
+        Self {
+            auth_url: value.auth_url,
+            redirect_uri: value.redirect_uri,
+            expires_in_seconds: value.expires_in_seconds,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OneDriveAuthStatusDto {
+    pub status: String,
+    pub account_label: Option<String>,
+}
+
+impl From<protocol::OneDriveAuthStatusDto> for OneDriveAuthStatusDto {
+    fn from(value: protocol::OneDriveAuthStatusDto) -> Self {
+        Self {
+            status: value.status,
+            account_label: value.account_label,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OneDriveItemDto {
+    pub drive_id: String,
+    pub item_id: String,
+    pub name: String,
+    pub folder: bool,
+    pub size: Option<u64>,
+}
+
+impl From<protocol::OneDriveItemDto> for OneDriveItemDto {
+    fn from(value: protocol::OneDriveItemDto) -> Self {
+        Self {
+            drive_id: value.drive_id,
+            item_id: value.item_id,
+            name: value.name,
+            folder: value.folder,
+            size: value.size,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct OneDriveItemListDto {
+    pub items: Vec<OneDriveItemDto>,
+}
+
+impl From<protocol::OneDriveItemListDto> for OneDriveItemListDto {
+    fn from(value: protocol::OneDriveItemListDto) -> Self {
+        Self {
+            items: value.items.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -256,6 +597,35 @@ impl From<protocol::SessionStateDto> for SessionStateDto {
             source_status: value.source_status.map(Into::into),
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum UnlockBlobStatusDto {
+    Unlocked,
+    NotEnrolled,
+    Cancelled,
+    OpenAppRequired,
+    CredentialRequired,
+    Unsupported,
+}
+
+impl From<QuickUnlockOutcome> for UnlockBlobStatusDto {
+    fn from(value: QuickUnlockOutcome) -> Self {
+        match value {
+            QuickUnlockOutcome::Unlocked => Self::Unlocked,
+            QuickUnlockOutcome::NotEnrolled => Self::NotEnrolled,
+            QuickUnlockOutcome::Cancelled => Self::Cancelled,
+            QuickUnlockOutcome::OpenAppRequired => Self::OpenAppRequired,
+            QuickUnlockOutcome::CredentialRequired => Self::CredentialRequired,
+            QuickUnlockOutcome::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct UnlockBlobResultDto {
+    pub status: UnlockBlobStatusDto,
+    pub state: SessionStateDto,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -323,7 +693,7 @@ impl From<EntryCustomFieldDto> for protocol::EntryCustomFieldDto {
     fn from(value: EntryCustomFieldDto) -> Self {
         Self {
             key: String::from(value.key),
-            value: String::from(value.value).into(),
+            value: value.value.into_zeroizing().into(),
             protected: value.protected,
         }
     }
@@ -422,12 +792,15 @@ pub struct EntryFieldsDto {
 impl From<EntryFieldsDto> for protocol::EntryFieldsDto {
     fn from(value: EntryFieldsDto) -> Self {
         Self {
-            title: String::from(value.title).into(),
-            username: String::from(value.username).into(),
-            password: String::from(value.password).into(),
-            url: String::from(value.url).into(),
-            notes: String::from(value.notes).into(),
-            totp_uri: value.totp_uri.map(String::from).map(Into::into),
+            title: value.title.into_zeroizing().into(),
+            username: value.username.into_zeroizing().into(),
+            password: value.password.into_zeroizing().into(),
+            url: value.url.into_zeroizing().into(),
+            notes: value.notes.into_zeroizing().into(),
+            totp_uri: value
+                .totp_uri
+                .map(SensitiveString::into_zeroizing)
+                .map(Into::into),
             custom_fields: value.custom_fields.into_iter().map(Into::into).collect(),
         }
     }
@@ -554,9 +927,10 @@ impl From<RuntimePlatformPasskeyRegistrationOutput> for PlatformPasskeyRegistrat
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct PlatformPasskeyOperation {
-    pub credentials: Vec<PlatformPasskeyCredential>,
-    pub fresh_user_verification: bool,
+pub struct PlatformCapabilitiesDto {
+    pub direct_passkey_persistence: bool,
+    pub apple_passkey_outbox: bool,
+    pub one_drive_account_setup: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
@@ -599,13 +973,115 @@ impl From<RuntimePlatformPasskeyAssertionOutput> for PlatformPasskeyAssertionOut
 
 struct SharedRuntime {
     runtime: Mutex<Runtime>,
+    platform: ResidentPlatform,
+    adapter_calls: Arc<AdapterCallGate>,
+    deferred_passkey_finishes: Mutex<Vec<Vec<u8>>>,
+}
+
+thread_local! {
+    static ACTIVE_RUNTIME_CALLS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+}
+
+struct RuntimeCallPermit {
+    identity: usize,
+}
+
+impl RuntimeCallPermit {
+    fn enter(identity: usize) -> Result<Self, VaultKernError> {
+        ACTIVE_RUNTIME_CALLS.with(|active| {
+            let mut active = active.borrow_mut();
+            if active.contains(&identity) {
+                Err(VaultKernError::ReentrantCall)
+            } else {
+                active.push(identity);
+                Ok(Self { identity })
+            }
+        })
+    }
+}
+
+impl Drop for RuntimeCallPermit {
+    fn drop(&mut self) {
+        ACTIVE_RUNTIME_CALLS.with(|active| {
+            let mut active = active.borrow_mut();
+            let identity = active.pop();
+            debug_assert_eq!(identity, Some(self.identity));
+        });
+    }
+}
+
+struct SharedRuntimeGuard<'a> {
+    runtime: MutexGuard<'a, Runtime>,
+    _permit: RuntimeCallPermit,
+    deferred_passkey_finishes: &'a Mutex<Vec<Vec<u8>>>,
+}
+
+impl SharedRuntimeGuard<'_> {
+    fn drain_deferred_passkey_finishes(&mut self) {
+        let operation_ids = {
+            let mut deferred = self
+                .deferred_passkey_finishes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            std::mem::take(&mut *deferred)
+        };
+        for operation_id in operation_ids {
+            self.runtime.end_platform_passkey_operation(&operation_id);
+        }
+    }
+}
+
+impl Deref for SharedRuntimeGuard<'_> {
+    type Target = Runtime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl DerefMut for SharedRuntimeGuard<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.runtime
+    }
+}
+
+impl Drop for SharedRuntimeGuard<'_> {
+    fn drop(&mut self) {
+        self.drain_deferred_passkey_finishes();
+    }
 }
 
 impl SharedRuntime {
-    fn lock(&self) -> Result<MutexGuard<'_, Runtime>, VaultKernError> {
-        self.runtime
-            .try_lock()
-            .map_err(|_| VaultKernError::StateUnavailable)
+    fn lock(&self) -> Result<SharedRuntimeGuard<'_>, VaultKernError> {
+        let identity = self as *const Self as usize;
+        let permit = RuntimeCallPermit::enter(identity)?;
+        if self.adapter_calls.is_active() {
+            return Err(VaultKernError::AdapterCallbackActive);
+        }
+        let runtime = self
+            .runtime
+            .lock()
+            .map_err(|_| VaultKernError::StateUnavailable)?;
+        let mut guard = SharedRuntimeGuard {
+            runtime,
+            _permit: permit,
+            deferred_passkey_finishes: &self.deferred_passkey_finishes,
+        };
+        guard.drain_deferred_passkey_finishes();
+        Ok(guard)
+    }
+
+    fn lock_for_session_mutation(&self) -> Result<SharedRuntimeGuard<'_>, VaultKernError> {
+        let guard = self.lock()?;
+        guard.ensure_no_active_platform_passkey_operation()?;
+        Ok(guard)
+    }
+
+    fn defer_passkey_finish(&self, operation_id: Vec<u8>) {
+        self.deferred_passkey_finishes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(operation_id);
     }
 }
 
@@ -617,21 +1093,40 @@ pub struct VaultSession {
 #[uniffi::export]
 impl VaultSession {
     #[uniffi::constructor]
-    pub fn new(unlock_blob_adapter: Arc<dyn UnlockBlobAdapter>) -> Arc<Self> {
+    pub fn new(
+        config: VaultSessionConfig,
+        unlock_blob_adapter: Arc<dyn UnlockBlobAdapter>,
+        one_drive_token_adapter: Arc<dyn OneDriveTokenAdapter>,
+    ) -> Result<Arc<Self>, VaultKernError> {
+        let platform = config.platform;
+        platform.validate_for_compiled_platform(ResidentPlatform::compiled_platform())?;
+        let adapter_calls = Arc::new(AdapterCallGate::default());
         let biometric = Box::new(AdapterBiometricProvider {
             adapter: Arc::clone(&unlock_blob_adapter),
+            calls: Arc::clone(&adapter_calls),
         });
         let secure_storage = Box::new(AdapterSecureStorageProvider {
             adapter: unlock_blob_adapter,
+            calls: Arc::clone(&adapter_calls),
         });
-        Arc::new(Self {
+        let one_drive_refresh_tokens = Box::new(AdapterOneDriveRefreshTokenStore {
+            adapter: one_drive_token_adapter,
+            calls: Arc::clone(&adapter_calls),
+        });
+        let runtime = Runtime::new_with_platform_adapters(
+            config.into(),
+            biometric,
+            secure_storage,
+            one_drive_refresh_tokens,
+        )?;
+        Ok(Arc::new(Self {
             shared: Arc::new(SharedRuntime {
-                runtime: Mutex::new(Runtime::new_with_platform_adapters(
-                    biometric,
-                    secure_storage,
-                )),
+                runtime: Mutex::new(runtime),
+                platform,
+                adapter_calls,
+                deferred_passkey_finishes: Mutex::new(Vec::new()),
             }),
-        })
+        }))
     }
 
     pub fn unlock(&self) -> Arc<VaultUnlock> {
@@ -646,17 +1141,29 @@ impl VaultSession {
         })
     }
 
+    pub fn sources(&self) -> Arc<VaultSources> {
+        Arc::new(VaultSources {
+            shared: Arc::clone(&self.shared),
+        })
+    }
+
     pub fn open_vault(&self, path: String) -> Result<VaultHandleDto, VaultKernError> {
         self.shared
-            .lock()?
+            .lock_for_session_mutation()?
             .open_local_vault(&path)
             .map(Into::into)
             .map_err(Into::into)
     }
 
-    pub fn close_vault(&self) -> Result<SessionStateDto, VaultKernError> {
+    pub fn lock_session(&self) -> Result<SessionStateDto, VaultKernError> {
         let mut runtime = self.shared.lock()?;
-        runtime.lock_session();
+        runtime.try_lock_session()?;
+        Ok(runtime.session_state().into())
+    }
+
+    pub fn close_vault(&self, vault_id: String) -> Result<SessionStateDto, VaultKernError> {
+        let mut runtime = self.shared.lock()?;
+        runtime.close_vault(&vault_id)?;
         Ok(runtime.session_state().into())
     }
 
@@ -692,7 +1199,7 @@ impl VaultSession {
     ) -> Result<EntryDetailDto, VaultKernError> {
         let fields: protocol::EntryFieldsDto = fields.into();
         self.shared
-            .lock()?
+            .lock_for_session_mutation()?
             .update_entry_fields(
                 &vault_id,
                 &entry_id,
@@ -709,7 +1216,11 @@ impl VaultSession {
     }
 
     pub fn save(&self, vault_id: String) -> Result<SaveVaultResultDto, VaultKernError> {
-        match self.shared.lock()?.save_vault(&vault_id)? {
+        match self
+            .shared
+            .lock_for_session_mutation()?
+            .save_vault(&vault_id)?
+        {
             protocol::RuntimeResponse::SaveVaultResult(result) => Ok(result.into()),
             _ => Err(VaultKernError::Core {
                 details: "vault save returned an unexpected runtime response".into(),
@@ -727,56 +1238,129 @@ impl VaultSession {
             .map_err(Into::into)
     }
 
-    pub fn prepare_passkey_operation(
-        &self,
-        operation_id: Vec<u8>,
-    ) -> Result<PlatformPasskeyOperation, VaultKernError> {
-        let (credentials, fresh_user_verification) = self
-            .shared
-            .lock()?
-            .prepare_platform_passkey_operation(operation_id, None)?;
-        Ok(PlatformPasskeyOperation {
-            credentials: credentials.into_iter().map(Into::into).collect(),
-            fresh_user_verification,
-        })
+    pub fn capabilities(&self) -> PlatformCapabilitiesDto {
+        PlatformCapabilitiesDto {
+            direct_passkey_persistence: self.shared.platform == ResidentPlatform::Android,
+            apple_passkey_outbox: false,
+            one_drive_account_setup: true,
+        }
     }
 
-    pub fn end_passkey_operation(&self, operation_id: Vec<u8>) -> Result<(), VaultKernError> {
-        self.shared
-            .lock()?
-            .end_platform_passkey_operation(&operation_id);
-        Ok(())
+    pub fn begin_passkey_operation(
+        &self,
+        operation_id: Vec<u8>,
+    ) -> Result<Arc<VaultPasskeyOperation>, VaultKernError> {
+        if self.shared.platform != ResidentPlatform::Android {
+            return Err(VaultKernError::UnsupportedCapability {
+                capability: "apple_passkey_outbox".into(),
+                details: "macOS credential extensions require the D3 outbox boundary; resident direct persistence is Android-only".into(),
+            });
+        }
+        let (credentials, fresh_user_verification) = self
+            .shared
+            .lock_for_session_mutation()?
+            .prepare_platform_passkey_operation(operation_id.clone(), None)?;
+        Ok(Arc::new(VaultPasskeyOperation {
+            shared: Arc::clone(&self.shared),
+            operation_id,
+            credentials: credentials.into_iter().map(Into::into).collect(),
+            fresh_user_verification,
+            closed: AtomicBool::new(false),
+        }))
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct VaultPasskeyOperation {
+    shared: Arc<SharedRuntime>,
+    operation_id: Vec<u8>,
+    credentials: Vec<PlatformPasskeyCredential>,
+    fresh_user_verification: bool,
+    closed: AtomicBool,
+}
+
+impl VaultPasskeyOperation {
+    fn ensure_open(&self) -> Result<(), VaultKernError> {
+        if self.closed.load(Ordering::Acquire) {
+            Err(VaultKernError::Core {
+                details: "platform passkey operation is closed".into(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn close_once(&self) -> Result<(), VaultKernError> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let result = self.shared.lock().map(|mut runtime| {
+            runtime.end_platform_passkey_operation(&self.operation_id);
+        });
+        if result.is_err() {
+            self.closed.store(false, Ordering::Release);
+        }
+        result
+    }
+}
+
+impl Drop for VaultPasskeyOperation {
+    fn drop(&mut self) {
+        if let Err(VaultKernError::ReentrantCall | VaultKernError::AdapterCallbackActive) =
+            self.close_once()
+        {
+            self.closed.store(true, Ordering::Release);
+            self.shared.defer_passkey_finish(self.operation_id.clone());
+        }
+    }
+}
+
+#[uniffi::export]
+impl VaultPasskeyOperation {
+    pub fn credentials(&self) -> Result<Vec<PlatformPasskeyCredential>, VaultKernError> {
+        self.ensure_open()?;
+        Ok(self.credentials.clone())
+    }
+
+    pub fn fresh_user_verification(&self) -> Result<bool, VaultKernError> {
+        self.ensure_open()?;
+        Ok(self.fresh_user_verification)
     }
 
     pub fn register_passkey(
         &self,
-        operation_id: Vec<u8>,
         input: PlatformPasskeyRegistrationInput,
     ) -> Result<PlatformPasskeyRegistrationOutput, VaultKernError> {
+        self.ensure_open()?;
         self.shared
             .lock()?
-            .register_platform_passkey_for_operation(&operation_id, input.into())
+            .register_platform_passkey_for_operation(&self.operation_id, input.into())
             .map(Into::into)
             .map_err(Into::into)
     }
 
-    pub fn commit_passkey_registration(&self, operation_id: Vec<u8>) -> Result<(), VaultKernError> {
+    pub fn commit_registration(&self) -> Result<(), VaultKernError> {
+        self.ensure_open()?;
         self.shared
             .lock()?
-            .commit_platform_passkey_registration_operation(&operation_id)
+            .commit_platform_passkey_registration_operation(&self.operation_id)
             .map_err(Into::into)
     }
 
     pub fn assert_passkey(
         &self,
-        operation_id: Vec<u8>,
         input: PlatformPasskeyAssertionInput,
     ) -> Result<PlatformPasskeyAssertionOutput, VaultKernError> {
+        self.ensure_open()?;
         self.shared
             .lock()?
-            .create_platform_passkey_assertion_for_operation(&operation_id, input.into())
+            .create_platform_passkey_assertion_for_operation(&self.operation_id, input.into())
             .map(Into::into)
             .map_err(Into::into)
+    }
+
+    pub fn finish(&self) -> Result<(), VaultKernError> {
+        self.close_once()
     }
 }
 
@@ -787,49 +1371,182 @@ pub struct VaultUnlock {
 
 #[uniffi::export]
 impl VaultUnlock {
+    pub fn unlock_current(
+        &self,
+        password: Option<SensitiveString>,
+        mut key_file_path: Option<String>,
+        kdf_confirmed: bool,
+    ) -> Result<SessionStateDto, VaultKernError> {
+        let result = (|| {
+            let mut runtime = self.shared.lock_for_session_mutation()?;
+            runtime.unlock_current_vault_with_kdf_confirmation(
+                password.as_ref().map(SensitiveString::as_str),
+                key_file_path.as_deref(),
+                if kdf_confirmed {
+                    ExternalKdfConfirmation::Confirmed
+                } else {
+                    ExternalKdfConfirmation::Unconfirmed
+                },
+            )?;
+            Ok(runtime.session_state().into())
+        })();
+        key_file_path.zeroize();
+        result
+    }
+
     pub fn unlock_vault(
         &self,
         vault_id: String,
-        mut password: Option<String>,
+        password: Option<SensitiveString>,
         mut key_file_path: Option<String>,
+        kdf_confirmed: bool,
     ) -> Result<SessionStateDto, VaultKernError> {
         let result = (|| {
-            let mut runtime = self.shared.lock()?;
-            runtime.unlock_vault(&vault_id, password.as_deref(), key_file_path.as_deref())?;
+            let mut runtime = self.shared.lock_for_session_mutation()?;
+            runtime.unlock_vault_with_kdf_confirmation(
+                &vault_id,
+                password.as_ref().map(SensitiveString::as_str),
+                key_file_path.as_deref(),
+                if kdf_confirmed {
+                    ExternalKdfConfirmation::Confirmed
+                } else {
+                    ExternalKdfConfirmation::Unconfirmed
+                },
+            )?;
             Ok(runtime.session_state().into())
         })();
-        password.zeroize();
         key_file_path.zeroize();
         result
     }
 
     pub fn enroll(
         &self,
-        mut password: Option<String>,
+        password: Option<SensitiveString>,
         mut key_file_path: Option<String>,
+        kdf_confirmed: bool,
     ) -> Result<SessionStateDto, VaultKernError> {
         let result = (|| {
             let mut runtime = self.shared.lock()?;
-            runtime.enroll_quick_unlock_for_current_vault(
-                password.as_deref(),
+            runtime.enroll_quick_unlock_for_current_vault_with_kdf_confirmation(
+                password.as_ref().map(SensitiveString::as_str),
                 key_file_path.as_deref(),
+                if kdf_confirmed {
+                    ExternalKdfConfirmation::Confirmed
+                } else {
+                    ExternalKdfConfirmation::Unconfirmed
+                },
             )?;
             Ok(runtime.session_state().into())
         })();
-        password.zeroize();
         key_file_path.zeroize();
         result
     }
 
-    pub fn unlock_with_blob(&self) -> Result<SessionStateDto, VaultKernError> {
-        let mut runtime = self.shared.lock()?;
-        runtime.unlock_current_vault_with_quick_unlock()?;
-        Ok(runtime.session_state().into())
+    pub fn unlock_with_blob(
+        &self,
+        kdf_confirmed: bool,
+    ) -> Result<UnlockBlobResultDto, VaultKernError> {
+        let mut runtime = self.shared.lock_for_session_mutation()?;
+        let status = runtime.try_unlock_current_vault_with_quick_unlock(if kdf_confirmed {
+            ExternalKdfConfirmation::Confirmed
+        } else {
+            ExternalKdfConfirmation::Unconfirmed
+        })?;
+        Ok(UnlockBlobResultDto {
+            status: status.into(),
+            state: runtime.session_state().into(),
+        })
     }
 
     pub fn revoke(&self) -> Result<SessionStateDto, VaultKernError> {
         let mut runtime = self.shared.lock()?;
         runtime.disable_quick_unlock_for_current_vault()?;
+        Ok(runtime.session_state().into())
+    }
+}
+
+#[derive(uniffi::Object)]
+pub struct VaultSources {
+    shared: Arc<SharedRuntime>,
+}
+
+#[uniffi::export]
+impl VaultSources {
+    pub fn list_recent(&self) -> Result<VaultReferenceListDto, VaultKernError> {
+        self.shared
+            .lock()?
+            .list_recent_vaults()
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub fn begin_one_drive_login(&self) -> Result<OneDriveAuthSessionDto, VaultKernError> {
+        match self
+            .shared
+            .lock()?
+            .handle(protocol::RuntimeCommand::BeginOneDriveLogin)?
+        {
+            protocol::RuntimeResponse::OneDriveAuthSession(session) => Ok(session.into()),
+            _ => Err(VaultKernError::Core {
+                details: "OneDrive login returned an unexpected runtime response".into(),
+            }),
+        }
+    }
+
+    pub fn complete_pending_one_drive_login(
+        &self,
+    ) -> Result<OneDriveAuthStatusDto, VaultKernError> {
+        match self
+            .shared
+            .lock()?
+            .handle(protocol::RuntimeCommand::CompletePendingOneDriveLogin)?
+        {
+            protocol::RuntimeResponse::OneDriveAuthStatus(status) => Ok(status.into()),
+            _ => Err(VaultKernError::Core {
+                details: "OneDrive login completion returned an unexpected runtime response".into(),
+            }),
+        }
+    }
+
+    pub fn list_one_drive_children(
+        &self,
+        parent_item_id: Option<String>,
+    ) -> Result<OneDriveItemListDto, VaultKernError> {
+        match self
+            .shared
+            .lock()?
+            .handle(protocol::RuntimeCommand::ListOneDriveChildren { parent_item_id })?
+        {
+            protocol::RuntimeResponse::OneDriveItemList(items) => Ok(items.into()),
+            _ => Err(VaultKernError::Core {
+                details: "OneDrive listing returned an unexpected runtime response".into(),
+            }),
+        }
+    }
+
+    pub fn add_one_drive_vault(
+        &self,
+        drive_id: String,
+        item_id: String,
+    ) -> Result<VaultReferenceDto, VaultKernError> {
+        match self
+            .shared
+            .lock_for_session_mutation()?
+            .handle(protocol::RuntimeCommand::AddOneDriveVaultReference { drive_id, item_id })?
+        {
+            protocol::RuntimeResponse::VaultReference(reference) => Ok(reference.into()),
+            _ => Err(VaultKernError::Core {
+                details: "OneDrive vault selection returned an unexpected runtime response".into(),
+            }),
+        }
+    }
+
+    pub fn set_current_vault(
+        &self,
+        vault_ref_id: String,
+    ) -> Result<SessionStateDto, VaultKernError> {
+        let mut runtime = self.shared.lock_for_session_mutation()?;
+        runtime.set_current_vault(&vault_ref_id)?;
         Ok(runtime.session_state().into())
     }
 }
@@ -843,7 +1560,7 @@ pub struct VaultSync {
 impl VaultSync {
     pub fn trigger(&self, vault_id: String) -> Result<VaultSourceStatusDto, VaultKernError> {
         self.shared
-            .lock()?
+            .lock_for_session_mutation()?
             .retry_vault_source_sync(&vault_id)
             .map(Into::into)
             .map_err(Into::into)
@@ -866,7 +1583,9 @@ fn take_sensitive_string(value: protocol::SensitiveString) -> SensitiveString {
 
 #[cfg(test)]
 mod tests {
-    use super::SensitiveString;
+    use super::{
+        AdapterCallGate, ResidentPlatform, SensitiveString, SharedRuntime, VaultKernError,
+    };
 
     #[test]
     fn lowering_sensitive_text_does_not_reuse_the_zeroizing_allocation() {
@@ -877,6 +1596,89 @@ mod tests {
 
         assert_eq!(lowered, "ffi-transfer-secret");
         assert_ne!(lowered.as_ptr(), zeroizing_allocation);
+    }
+
+    #[test]
+    fn ffi_error_preserves_external_kdf_confirmation_details() {
+        let error = anyhow::Error::new(vaultkern_core::KdbxError::ExternalKdfPolicy {
+            algorithm: vaultkern_core::ExternalKdfAlgorithm::AesKdbx4,
+            observed: 700_000_000,
+            decision: vaultkern_core::ExternalKdfDecision::Confirm(600_000_000),
+        });
+
+        assert!(matches!(
+            VaultKernError::from(error),
+            VaultKernError::KdfConfirmationRequired {
+                algorithm,
+                resource,
+                observed: 700_000_000,
+                limit: 600_000_000,
+            } if algorithm == "aes_kdbx4" && resource == "rounds"
+        ));
+    }
+
+    #[test]
+    fn resident_platform_declaration_must_match_the_compiled_host() {
+        assert!(
+            ResidentPlatform::Android
+                .validate_for_compiled_platform(Some(ResidentPlatform::Android))
+                .is_ok()
+        );
+        assert!(
+            ResidentPlatform::Macos
+                .validate_for_compiled_platform(Some(ResidentPlatform::Macos))
+                .is_ok()
+        );
+        assert!(
+            ResidentPlatform::Android
+                .validate_for_compiled_platform(Some(ResidentPlatform::Macos))
+                .is_err()
+        );
+        assert!(
+            ResidentPlatform::Macos
+                .validate_for_compiled_platform(Some(ResidentPlatform::Android))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ordinary_runtime_contention_serializes_between_threads() {
+        let shared = std::sync::Arc::new(SharedRuntime {
+            runtime: std::sync::Mutex::new(vaultkern_runtime::Runtime::for_tests()),
+            platform: ResidentPlatform::Android,
+            adapter_calls: std::sync::Arc::new(AdapterCallGate::default()),
+            deferred_passkey_finishes: std::sync::Mutex::new(Vec::new()),
+        });
+        let entered = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let release = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let first_shared = std::sync::Arc::clone(&shared);
+        let first_entered = std::sync::Arc::clone(&entered);
+        let first_release = std::sync::Arc::clone(&release);
+        let first = std::thread::spawn(move || {
+            let _guard = first_shared.lock().unwrap();
+            first_entered.wait();
+            first_release.wait();
+        });
+        entered.wait();
+
+        let second_shared = std::sync::Arc::clone(&shared);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            sender.send(second_shared.lock().is_ok()).unwrap();
+        });
+
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        release.wait();
+        first.join().unwrap();
+        assert!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
     }
 }
 
