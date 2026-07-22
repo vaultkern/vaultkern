@@ -15,8 +15,11 @@ import org.vaultkern.android.credentials.PasskeyCeremony
 import org.vaultkern.android.credentials.PasskeyClientContextResolver
 import org.vaultkern.android.credentials.WebAuthnCodec
 import org.vaultkern.android.credentials.signingCertificateFingerprints
+import org.vaultkern.android.security.AndroidKeystoreOneDriveTokenCipherBackend
 import org.vaultkern.android.security.AndroidKeystoreUnlockCipherBackend
+import org.vaultkern.android.security.AndroidOneDriveTokenAdapter
 import org.vaultkern.android.security.AndroidUnlockBlobAdapter
+import org.vaultkern.android.security.AtomicOneDriveTokenRecordStore
 import org.vaultkern.android.security.AtomicUnlockBlobRecordStore
 import org.vaultkern.android.security.ProcessBiometricGate
 import org.vaultkern.android.security.UnlockEnrollmentState
@@ -29,16 +32,15 @@ import org.vaultkern.android.storage.AndroidLocalDocumentAccess
 import org.vaultkern.android.storage.LocalDocumentSelectionService
 import org.vaultkern.android.storage.LocalDocumentWorkspace
 import org.vaultkern.android.storage.SelectedLocalDocument
+import org.vaultkern.android.sync.AndroidOneDriveAuthPresenter
+import org.vaultkern.android.sync.OneDriveWorkflow
 import org.vaultkern.android.unlock.CorePostUnlockReconciliation
 import org.vaultkern.android.unlock.UnlockCoordinator
 import org.vaultkern.android.unlock.reconcilePlatformStores
 import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
 import org.vaultkern.android.vault.VaultEditorWorkflow
 import org.vaultkern.android.vault.VaultKernResidentVaultPort
-import org.vaultkern.core.OneDriveTokenAdapter
-import org.vaultkern.core.PlatformAdapterException
 import org.vaultkern.core.ResidentPlatform
-import org.vaultkern.core.VaultKernSensitiveString
 import org.vaultkern.core.VaultSession
 import org.vaultkern.core.VaultSessionConfig
 
@@ -54,6 +56,10 @@ class VaultKernGraph(context: Context) {
             .bufferedReader(StandardCharsets.UTF_8)
             .use { it.readText() }
     }
+    val oneDriveTokenAdapter = AndroidOneDriveTokenAdapter(
+        AtomicOneDriveTokenRecordStore(applicationContext),
+        AndroidKeystoreOneDriveTokenCipherBackend(applicationContext),
+    )
 
     val unlockBlobAdapter = AndroidUnlockBlobAdapter(
         records = records,
@@ -89,7 +95,7 @@ class VaultKernGraph(context: Context) {
             File(applicationContext.noBackupFilesDir, "resident-temporary").absolutePath,
         ),
         unlockBlobAdapter,
-        UnconfiguredOneDriveTokenAdapter(),
+        oneDriveTokenAdapter,
     )
 
     private val residentUnlockPort = VaultKernResidentUnlockPort(session)
@@ -134,6 +140,10 @@ class VaultKernGraph(context: Context) {
     val vaultWorkflow = VaultEditorWorkflow(
         VaultKernResidentVaultPort(session, localDocumentSaves),
     )
+    val oneDriveWorkflow = OneDriveWorkflow(
+        session,
+        AndroidOneDriveAuthPresenter(applicationContext),
+    )
 
     @Volatile
     private var lastReconciliation: Future<*>? = null
@@ -164,6 +174,7 @@ class VaultKernGraph(context: Context) {
     private fun reconcilePlatformStorage() {
         reconcilePlatformStores(
             unlockBlobAdapter::reconcileStorage,
+            oneDriveTokenAdapter::reconcileStorage,
             ::reconcileLocalDocuments,
         )
     }
@@ -176,15 +187,5 @@ class VaultKernGraph(context: Context) {
             ).reconcile(null)
         }
     }
-}
 
-private class UnconfiguredOneDriveTokenAdapter : OneDriveTokenAdapter {
-    override fun loadRefreshToken(): VaultKernSensitiveString? = null
-
-    override fun storeRefreshToken(token: VaultKernSensitiveString) {
-        token.close()
-        throw PlatformAdapterException.Failure("OneDrive account is not configured")
-    }
-
-    override fun deleteRefreshToken() = Unit
 }

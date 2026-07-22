@@ -43,10 +43,12 @@ class MainActivity : FragmentActivity() {
                     busy = state.busy,
                     status = state.status,
                     conflictCopyPath = state.conflictCopyPath,
+                    syncStatus = state.syncStatus,
                     onEntrySelected = viewModel::selectEntry,
                     onDraftChanged = viewModel::updateDraft,
                     onSave = viewModel::saveEditor,
                     onCloseEditor = viewModel::closeEditor,
+                    onSync = viewModel::syncOneDrive,
                     onLock = viewModel::lockVault,
                 )
             } else {
@@ -65,6 +67,10 @@ class MainActivity : FragmentActivity() {
                             ),
                         )
                     },
+                    onBeginOneDriveLogin = viewModel::beginOneDriveLogin,
+                    onCompleteOneDriveLogin = viewModel::completeOneDriveLogin,
+                    onOneDriveItemSelected = viewModel::selectOneDriveItem,
+                    onOneDriveRoot = viewModel::browseOneDriveRoot,
                 )
             }
         }

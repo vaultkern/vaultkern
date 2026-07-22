@@ -13,6 +13,8 @@ import kotlinx.coroutines.launch
 import org.vaultkern.android.security.UnlockEnrollmentState
 import org.vaultkern.android.settings.QuickUnlockSettingsApplier
 import org.vaultkern.android.settings.QuickUnlockSettingsApplyOutcome
+import org.vaultkern.android.sync.AndroidSyncStatus
+import org.vaultkern.android.sync.OneDriveBrowserItem
 import org.vaultkern.android.ui.UnlockUiState
 import org.vaultkern.android.unlock.UnlockAttemptOutcome
 import org.vaultkern.android.vault.VaultEntryDraft
@@ -42,6 +44,8 @@ class UnlockViewModel(
                     security = graph.currentKeySecurityLevel(),
                     unlocked = unlocked,
                     entries = if (unlocked) graph.vaultWorkflow.browse() else emptyList(),
+                    syncStatus = graph.oneDriveWorkflow.status(),
+                    oneDriveConnected = graph.oneDriveTokenAdapter.hasStoredToken(),
                 )
             }
             mutableState.update { current ->
@@ -55,6 +59,10 @@ class UnlockViewModel(
                                 keySecurityLevel = snapshot.security,
                                 vaultUnlocked = snapshot.unlocked,
                                 entries = snapshot.entries,
+                                syncStatus = snapshot.syncStatus,
+                                oneDriveVaultSelected =
+                                    snapshot.syncStatus?.sourceKind == "onedrive",
+                                oneDriveConnected = snapshot.oneDriveConnected,
                             )
                         },
                         onFailure = {
@@ -102,8 +110,11 @@ class UnlockViewModel(
     @OptIn(ExperimentalCoroutinesApi::class)
     fun interactiveUnlock() {
         val snapshot = mutableState.value
-        if (snapshot.busy || snapshot.vaultPath.isBlank()) return
+        if (snapshot.busy ||
+            (snapshot.vaultPath.isBlank() && !snapshot.oneDriveVaultSelected)
+        ) return
         val path = snapshot.vaultPath
+        val unlockCurrent = snapshot.oneDriveVaultSelected
         val credential = snapshot.password.toCharArray()
         mutableState.update {
             it.copy(password = "", busy = true, status = "Unlocking vault")
@@ -111,7 +122,8 @@ class UnlockViewModel(
         viewModelScope.launch(Dispatchers.IO, start = CoroutineStart.ATOMIC) {
             val result = try {
                 runCatching {
-                    graph.unlockCoordinator.interactiveUnlock(path, credential)
+                    if (unlockCurrent) graph.unlockCoordinator.interactiveUnlockCurrent(credential)
+                    else graph.unlockCoordinator.interactiveUnlock(path, credential)
                 }
             } finally {
                 credential.fill('\u0000')
@@ -184,6 +196,7 @@ class UnlockViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching { graph.vaultWorkflow.save(draft) }
             val refreshed = result.mapCatching { graph.vaultWorkflow.browse() }
+            val syncStatus = runCatching { graph.oneDriveWorkflow.status() }.getOrNull()
             mutableState.update { current ->
                 result.fold(
                     onSuccess = { save ->
@@ -193,6 +206,7 @@ class UnlockViewModel(
                             entries = refreshed.getOrDefault(current.entries),
                             editor = null,
                             conflictCopyPath = save.conflictCopyPath,
+                            syncStatus = syncStatus,
                         )
                     },
                     onFailure = {
@@ -220,6 +234,7 @@ class UnlockViewModel(
                         entries = emptyList(),
                         editor = null,
                         conflictCopyPath = null,
+                        syncStatus = runCatching { graph.oneDriveWorkflow.status() }.getOrNull(),
                     )
                 } else {
                     current.copy(
@@ -269,6 +284,165 @@ class UnlockViewModel(
         }
     }
 
+    fun beginOneDriveLogin() {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, status = "Opening OneDrive sign-in") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { graph.oneDriveWorkflow.beginLogin() }
+            val connected = graph.oneDriveTokenAdapter.hasStoredToken()
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = {
+                        current.copy(
+                            busy = false,
+                            oneDriveAuthPending = true,
+                            status = "Finish OneDrive sign-in in the browser",
+                        )
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            oneDriveAuthPending = false,
+                            status = "OneDrive sign-in unavailable: ${it.javaClass.simpleName}",
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                )
+            }
+        }
+    }
+
+    fun completeOneDriveLogin() {
+        val snapshot = mutableState.value
+        if (snapshot.busy || !snapshot.oneDriveAuthPending) return
+        mutableState.update { it.copy(busy = true, status = "Completing OneDrive sign-in") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val account = graph.oneDriveWorkflow.completeLogin()
+                account to graph.oneDriveWorkflow.browse(null)
+            }
+            val connected = graph.oneDriveTokenAdapter.hasStoredToken()
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = { (account, items) ->
+                        current.copy(
+                            busy = false,
+                            oneDriveAuthPending = false,
+                            oneDriveAccountLabel = account.accountLabel,
+                            oneDriveItems = items,
+                            oneDriveFolderId = null,
+                            status = "OneDrive connected; choose a KDBX vault",
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            oneDriveAuthPending = false,
+                            status = "OneDrive sign-in failed: ${it.javaClass.simpleName}",
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                )
+            }
+        }
+    }
+
+    fun browseOneDriveRoot() = browseOneDrive(null)
+
+    fun selectOneDriveItem(item: OneDriveBrowserItem) {
+        if (mutableState.value.busy) return
+        if (item.folder) {
+            browseOneDrive(item.itemId)
+            return
+        }
+        mutableState.update { it.copy(busy = true, status = "Selecting OneDrive vault") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { graph.oneDriveWorkflow.select(item) }
+            val syncStatus = result.mapCatching { graph.oneDriveWorkflow.status() }.getOrNull()
+            val connected = graph.oneDriveTokenAdapter.hasStoredToken()
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = { selected ->
+                        current.copy(
+                            busy = false,
+                            status = "OneDrive vault selected; enter its master password",
+                            vaultPath = "",
+                            oneDriveVaultSelected = true,
+                            oneDriveSelectedName = selected.displayName,
+                            syncStatus = syncStatus,
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "OneDrive selection failed: ${it.javaClass.simpleName}",
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                )
+            }
+        }
+    }
+
+    fun syncOneDrive() {
+        val snapshot = mutableState.value
+        if (snapshot.busy || !snapshot.vaultUnlocked || snapshot.editor != null) return
+        mutableState.update { it.copy(busy = true, status = "Synchronizing OneDrive") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                val status = graph.oneDriveWorkflow.sync()
+                status to graph.vaultWorkflow.browse()
+            }
+            val connected = graph.oneDriveTokenAdapter.hasStoredToken()
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = { (status, entries) ->
+                        current.copy(
+                            busy = false,
+                            status = syncStatusLabel(status),
+                            syncStatus = status,
+                            entries = entries,
+                            conflictCopyPath = null,
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "OneDrive sync failed: ${it.javaClass.simpleName}",
+                            syncStatus = runCatching {
+                                graph.oneDriveWorkflow.status()
+                            }.getOrNull() ?: current.syncStatus,
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                )
+            }
+        }
+    }
+
+    private fun browseOneDrive(parentItemId: String?) {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, status = "Loading OneDrive files") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { graph.oneDriveWorkflow.browse(parentItemId) }
+            val connected = graph.oneDriveTokenAdapter.hasStoredToken()
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = { items ->
+                        current.copy(
+                            busy = false,
+                            status = "Choose a OneDrive KDBX vault",
+                            oneDriveItems = items,
+                            oneDriveFolderId = parentItemId,
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "OneDrive listing failed: ${it.javaClass.simpleName}",
+                        ).reconcileOneDriveTokenPresence(connected)
+                    },
+                )
+            }
+        }
+    }
+
     private fun publishStatus(status: String) {
         mutableState.update {
             it.copy(
@@ -296,6 +470,7 @@ class UnlockViewModel(
                 vaultUnlocked = true,
                 entries = entries.getOrDefault(emptyList()),
                 editor = null,
+                syncStatus = runCatching { graph.oneDriveWorkflow.status() }.getOrNull(),
             )
         }
     }
@@ -327,14 +502,34 @@ class UnlockViewModel(
         UnlockAttemptOutcome.UNSUPPORTED -> "Biometric quick unlock is unavailable"
     }
 
+    private fun syncStatusLabel(status: AndroidSyncStatus): String = when {
+        status.conflictCopyCreated -> "OneDrive sync completed with a recoverable conflict copy"
+        status.remoteState == "online" -> "OneDrive sync complete"
+        else -> "OneDrive sync pending; the durable local cache is retained"
+    }
+
     companion object {
         private const val INITIAL_STATUS = "Select a vault and unlock it"
     }
 }
+
+internal fun UnlockUiState.reconcileOneDriveTokenPresence(connected: Boolean): UnlockUiState =
+    if (connected) {
+        copy(oneDriveConnected = true)
+    } else {
+        copy(
+            oneDriveConnected = false,
+            oneDriveAccountLabel = null,
+            oneDriveItems = emptyList(),
+            oneDriveFolderId = null,
+        )
+    }
 
 private data class StartupSnapshot(
     val enrollment: UnlockEnrollmentState,
     val security: org.vaultkern.android.security.UnlockKeySecurityLevel?,
     val unlocked: Boolean,
     val entries: List<VaultEntryListItem>,
+    val syncStatus: AndroidSyncStatus?,
+    val oneDriveConnected: Boolean,
 )

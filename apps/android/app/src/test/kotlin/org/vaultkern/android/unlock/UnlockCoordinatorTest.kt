@@ -39,6 +39,19 @@ class UnlockCoordinatorTest {
     }
 
     @Test
+    fun currentRemoteVaultUnlockUsesTheSameReconciliationAndSecretCleanup() {
+        val port = RecordingUnlockPort()
+        val coordinator = coordinator(port, quickUnlockEnabled = true)
+        val credential = "remote-master-password".toCharArray()
+
+        val result = coordinator.interactiveUnlockCurrent(credential)
+
+        assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
+        assertEquals(listOf("unlock-current", "enroll"), port.events)
+        assertTrue(credential.all { it == '\u0000' })
+    }
+
+    @Test
     fun successfulBlobUnlockRunsTheSamePostUnlockReconciliationPoint() {
         val port = RecordingUnlockPort(
             initialEnrollment = UnlockEnrollmentState.ENROLLED,
@@ -165,6 +178,13 @@ private class RecordingUnlockPort(
     override fun interactiveUnlock(path: String, credential: CharArray) {
         events += "unlock"
         check(path == "/vaults/demo.kdbx")
+        check(credential.isNotEmpty())
+        if (failInteractiveUnlock) error("credential rejected")
+        unlocked = true
+    }
+
+    override fun interactiveUnlockCurrent(credential: CharArray) {
+        events += "unlock-current"
         check(credential.isNotEmpty())
         if (failInteractiveUnlock) error("credential rejected")
         unlocked = true

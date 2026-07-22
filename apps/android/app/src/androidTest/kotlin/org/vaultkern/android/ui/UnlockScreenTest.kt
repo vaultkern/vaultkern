@@ -6,6 +6,7 @@ import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Rule
@@ -89,5 +90,31 @@ class UnlockScreenTest {
         compose.onNodeWithTag("choose-local-vault").performClick()
 
         assertEquals(1, launches)
+    }
+
+    @Test
+    fun pendingOneDriveLoginAndRemoteVaultSelectionRemainActionable() {
+        var unlocks = 0
+        var completions = 0
+        compose.setContent {
+            VaultKernUnlockScreen(
+                state = UnlockUiState(
+                    oneDriveAuthPending = true,
+                    oneDriveVaultSelected = true,
+                    oneDriveSelectedName = "Cloud Vault.kdbx",
+                ),
+                onPasswordChanged = {},
+                onInteractiveUnlock = { unlocks += 1 },
+                onQuickUnlock = {},
+                onQuickUnlockDesiredChanged = {},
+                onCompleteOneDriveLogin = { completions += 1 },
+            )
+        }
+
+        compose.onNodeWithTag("interactive-unlock").performClick()
+        compose.onNodeWithTag("onedrive-complete-login").performScrollTo().performClick()
+
+        assertEquals(1, unlocks)
+        assertEquals(1, completions)
     }
 }

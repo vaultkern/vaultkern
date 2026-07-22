@@ -14,6 +14,7 @@ enum class UnlockAttemptOutcome {
 
 interface ResidentUnlockPort {
     fun interactiveUnlock(path: String, credential: CharArray)
+    fun interactiveUnlockCurrent(credential: CharArray)
     fun quickUnlock(): UnlockAttemptOutcome
     fun enrollQuickUnlock(credential: CharArray)
 }
@@ -65,9 +66,18 @@ class UnlockCoordinator(
 ) {
     private val reconciliationFailure = AtomicReference<String?>(null)
 
-    fun interactiveUnlock(path: String, credential: CharArray): UnlockAttemptOutcome = try {
+    fun interactiveUnlock(path: String, credential: CharArray): UnlockAttemptOutcome =
+        interactiveUnlock(credential) { port.interactiveUnlock(path, credential) }
+
+    fun interactiveUnlockCurrent(credential: CharArray): UnlockAttemptOutcome =
+        interactiveUnlock(credential) { port.interactiveUnlockCurrent(credential) }
+
+    private fun interactiveUnlock(
+        credential: CharArray,
+        unlock: () -> Unit,
+    ): UnlockAttemptOutcome = try {
         reconciliationFailure.set(null)
-        port.interactiveUnlock(path, credential)
+        unlock()
         try {
             reconciliation.reconcile {
                 port.enrollQuickUnlock(credential)

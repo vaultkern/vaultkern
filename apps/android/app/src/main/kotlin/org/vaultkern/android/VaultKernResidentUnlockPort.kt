@@ -20,6 +20,14 @@ class VaultKernResidentUnlockPort(
         }
     }
 
+    override fun interactiveUnlockCurrent(credential: CharArray) {
+        sensitiveCredential(credential).use { password ->
+            session.unlock().use { unlock ->
+                unlock.unlockCurrent(password, null, false)
+            }
+        }
+    }
+
     override fun quickUnlock(): UnlockAttemptOutcome = session.unlock().use { unlock ->
         when (unlock.unlockWithBlob(false).status) {
             UnlockBlobStatusDto.UNLOCKED -> UnlockAttemptOutcome.UNLOCKED

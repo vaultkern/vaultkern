@@ -23,6 +23,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.vaultkern.android.vault.VaultEntryDraft
 import org.vaultkern.android.vault.VaultEntryListItem
+import org.vaultkern.android.sync.AndroidSyncStatus
 
 @Composable
 fun VaultBrowserScreen(
@@ -31,10 +32,12 @@ fun VaultBrowserScreen(
     busy: Boolean,
     status: String,
     conflictCopyPath: String?,
+    syncStatus: AndroidSyncStatus? = null,
     onEntrySelected: (String) -> Unit,
     onDraftChanged: (VaultEntryDraft) -> Unit,
     onSave: () -> Unit,
     onCloseEditor: () -> Unit,
+    onSync: () -> Unit = {},
     onLock: () -> Unit,
 ) {
     MaterialTheme {
@@ -52,6 +55,28 @@ fun VaultBrowserScreen(
                 OutlinedButton(onClick = onLock, enabled = !busy) { Text("Lock") }
             }
             Text(status, modifier = Modifier.testTag("vault-status"))
+            if (syncStatus?.sourceKind == "onedrive") {
+                Text(
+                    "OneDrive: ${syncStatus.remoteState}",
+                    modifier = Modifier.testTag("sync-state"),
+                )
+                syncStatus.lastError?.let { error ->
+                    Text(error, modifier = Modifier.testTag("sync-error"))
+                }
+                if (syncStatus.conflictCopyCreated) {
+                    Text(
+                        "A recoverable OneDrive conflict copy was created.",
+                        modifier = Modifier.testTag("sync-conflict-copy"),
+                    )
+                }
+                OutlinedButton(
+                    onClick = onSync,
+                    enabled = !busy && editor == null,
+                    modifier = Modifier.fillMaxWidth().testTag("sync-now"),
+                ) {
+                    Text(if (syncStatus.retryRecommended) "Retry OneDrive sync" else "Sync OneDrive")
+                }
+            }
             conflictCopyPath?.let { path ->
                 Column(modifier = Modifier.testTag("conflict-copy")) {
                     Text("Foreign change detected. Your edit is in this conflict copy:")
