@@ -17,6 +17,8 @@ import org.vaultkern.android.settings.QuickUnlockSettingsController
 import org.vaultkern.android.settings.ReconciliationScheduler
 import org.vaultkern.android.unlock.CorePostUnlockReconciliation
 import org.vaultkern.android.unlock.UnlockCoordinator
+import org.vaultkern.android.vault.VaultEditorWorkflow
+import org.vaultkern.android.vault.VaultKernResidentVaultPort
 import org.vaultkern.core.OneDriveTokenAdapter
 import org.vaultkern.core.PlatformAdapterException
 import org.vaultkern.core.ResidentPlatform
@@ -71,6 +73,7 @@ class VaultKernGraph(context: Context) {
         desiredSettings,
         ReconciliationScheduler { scheduleReconciliation() },
     )
+    val vaultWorkflow = VaultEditorWorkflow(VaultKernResidentVaultPort(session))
 
     @Volatile
     private var lastReconciliation: Future<*>? = null

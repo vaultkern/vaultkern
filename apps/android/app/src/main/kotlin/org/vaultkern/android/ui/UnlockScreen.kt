@@ -23,6 +23,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.vaultkern.android.security.UnlockEnrollmentState
 import org.vaultkern.android.security.UnlockKeySecurityLevel
+import org.vaultkern.android.vault.VaultEntryDraft
+import org.vaultkern.android.vault.VaultEntryListItem
 
 data class UnlockUiState(
     val vaultPath: String = "",
@@ -32,6 +34,10 @@ data class UnlockUiState(
     val keySecurityLevel: UnlockKeySecurityLevel? = null,
     val busy: Boolean = false,
     val status: String = "Select a vault and unlock it",
+    val vaultUnlocked: Boolean = false,
+    val entries: List<VaultEntryListItem> = emptyList(),
+    val editor: VaultEntryDraft? = null,
+    val conflictCopyPath: String? = null,
 ) {
     override fun toString(): String =
         "UnlockUiState(" +
@@ -41,7 +47,11 @@ data class UnlockUiState(
             "enrollmentState=$enrollmentState, " +
             "keySecurityLevel=$keySecurityLevel, " +
             "busy=$busy, " +
-            "status=$status)"
+            "status=$status, " +
+            "vaultUnlocked=$vaultUnlocked, " +
+            "entryCount=${entries.size}, " +
+            "editor=${if (editor == null) "closed" else "[REDACTED]"}, " +
+            "conflictCopyPath=$conflictCopyPath)"
 }
 
 @Composable
