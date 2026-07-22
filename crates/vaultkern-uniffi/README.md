@@ -5,11 +5,15 @@ This crate is the mobile and macOS FFI boundary around the resident
 operations without adding platform behavior. Native apps implement
 `UnlockBlobAdapter`; keychain and biometric UI remain on the platform side of
 that trait. Apps initiate passkey ceremonies through the exported register and
-assert entry points.
+assert entry points using the runtime's existing operation lease: prepare,
+register/assert, commit registration when applicable, then end the operation.
 
 The exported records retain the D5 runtime-protocol names and field vocabulary.
 Secret-bearing strings use the `SensitiveString` custom type so their resident
 Rust allocations are zeroized on drop and redacted from Rust debug output.
+Lowering creates a separate FFI transfer copy; the resulting Swift/Kotlin
+`String` is managed by the foreign runtime and is outside that zeroization
+guarantee.
 
 ## Generate bindings
 

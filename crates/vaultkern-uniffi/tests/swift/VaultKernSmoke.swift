@@ -4,12 +4,19 @@ import VaultKernCore
 private final class FakeUnlockBlobAdapter: UnlockBlobAdapter, @unchecked Sendable {
     private let lock = NSLock()
     private var blobs: [String: Data] = [:]
+    private var cancelNextLoad = false
 
     func supportsUnlockBlob() throws -> Bool { true }
     func authorize(reason: String) throws {}
     func storeRequiresUserPresence() throws -> Bool { false }
     func loadRequiresUserPresence() throws -> Bool { false }
     func authorizeStoreUserPresence() throws {}
+
+    func cancelNextBlobLoad() {
+        lock.lock()
+        defer { lock.unlock() }
+        cancelNextLoad = true
+    }
 
     func storeBlob(key: String, value: Data) throws {
         lock.lock()
@@ -20,6 +27,10 @@ private final class FakeUnlockBlobAdapter: UnlockBlobAdapter, @unchecked Sendabl
     func loadBlob(key: String) throws -> Data? {
         lock.lock()
         defer { lock.unlock() }
+        if cancelNextLoad {
+            cancelNextLoad = false
+            throw PlatformAdapterError.Cancelled
+        }
         return blobs[key]
     }
 
@@ -47,7 +58,8 @@ let vault = FileManager.default.temporaryDirectory
 try FileManager.default.copyItem(at: fixture, to: vault)
 defer { try? FileManager.default.removeItem(at: vault) }
 
-let session = VaultSession(unlockBlobAdapter: FakeUnlockBlobAdapter())
+let adapter = FakeUnlockBlobAdapter()
+let session = VaultSession(unlockBlobAdapter: adapter)
 let unlock = session.unlock()
 let opened = try session.openVault(path: vault.path)
 _ = try unlock.unlockVault(vaultId: opened.vaultId, password: password, keyFilePath: nil)
@@ -61,6 +73,14 @@ let blobUnlocked = try unlock.unlockWithBlob()
 precondition(blobUnlocked.unlocked)
 let reopenedEntries = try session.listEntries(vaultId: opened.vaultId)
 precondition(!reopenedEntries.isEmpty)
+_ = try session.closeVault()
+adapter.cancelNextBlobLoad()
+do {
+    _ = try unlock.unlockWithBlob()
+    fatalError("cancelled unlock blob read unexpectedly unlocked the vault")
+} catch {}
+let unlockedAfterCancellation = try unlock.unlockWithBlob()
+precondition(unlockedAfterCancellation.unlocked)
 _ = try unlock.revoke()
 _ = try session.closeVault()
 do {

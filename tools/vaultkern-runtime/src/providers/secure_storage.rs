@@ -424,7 +424,7 @@ fn quick_unlock_target_expectation(path: &Path) -> Result<TargetExpectation> {
 }
 
 #[derive(Debug)]
-pub(crate) struct SecureStorageError {
+pub struct SecureStorageError {
     kind: SecureStorageErrorKind,
     message: String,
 }
@@ -434,13 +434,11 @@ enum SecureStorageErrorKind {
     Cancelled,
     #[cfg(any(windows, test))]
     HelloKeyInvalidated,
-    #[cfg(any(windows, test))]
     RecordInvalidated,
 }
 
 impl SecureStorageError {
-    #[cfg(any(windows, test))]
-    pub(crate) fn cancelled(message: impl Into<String>) -> Self {
+    pub fn cancelled(message: impl Into<String>) -> Self {
         Self {
             kind: SecureStorageErrorKind::Cancelled,
             message: message.into(),
@@ -457,6 +455,10 @@ impl SecureStorageError {
 
     #[cfg(any(windows, test))]
     pub(crate) fn record_invalidated(message: impl Into<String>) -> Self {
+        Self::invalidated(message)
+    }
+
+    pub fn invalidated(message: impl Into<String>) -> Self {
         Self {
             kind: SecureStorageErrorKind::RecordInvalidated,
             message: message.into(),
@@ -481,25 +483,16 @@ pub(crate) fn is_secure_storage_cancelled(error: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn is_secure_storage_invalidated(error: &anyhow::Error) -> bool {
-    #[cfg(any(windows, test))]
-    {
-        return error.chain().any(|cause| {
-            cause
-                .downcast_ref::<SecureStorageError>()
-                .is_some_and(|error| {
-                    matches!(
-                        error.kind,
-                        SecureStorageErrorKind::HelloKeyInvalidated
-                            | SecureStorageErrorKind::RecordInvalidated
-                    )
-                })
-        });
-    }
-    #[cfg(not(any(windows, test)))]
-    {
-        let _ = error;
-        false
-    }
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<SecureStorageError>()
+            .is_some_and(|error| match error.kind {
+                #[cfg(any(windows, test))]
+                SecureStorageErrorKind::HelloKeyInvalidated => true,
+                SecureStorageErrorKind::RecordInvalidated => true,
+                SecureStorageErrorKind::Cancelled => false,
+            })
+    })
 }
 
 #[cfg(any(windows, test))]

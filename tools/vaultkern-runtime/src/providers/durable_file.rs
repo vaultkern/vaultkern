@@ -908,7 +908,7 @@ fn validate_trusted_directory_component(metadata: &Metadata) -> io::Result<()> {
         ));
     }
     let mode = metadata.mode();
-    if mode & 0o022 != 0 && mode & libc::S_ISVTX == 0 {
+    if mode & 0o022 != 0 && u64::from(mode) & u64::from(libc::S_ISVTX) == 0 {
         return Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "private durable directory ancestry is writable without sticky protection",

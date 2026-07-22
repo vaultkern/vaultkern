@@ -728,13 +728,19 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_commit_passkey_registration(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_end_passkey_operation(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_passkey_credentials(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_prepare_passkey_operation(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry(
     ): Short
@@ -811,21 +817,27 @@ external fun uniffi_vaultkern_uniffi_fn_free_vaultsession(`handle`: Long,uniffi_
 ): Unit
 external fun uniffi_vaultkern_uniffi_fn_constructor_vaultsession_new(`unlockBlobAdapter`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(`ptr`: Long,`operationId`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_commit_passkey_registration(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_edit_entry(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`entryId`: RustBuffer.ByValue,`fields`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_end_passkey_operation(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_list_entries(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_list_passkey_credentials(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_open_vault(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_prepare_passkey_operation(`ptr`: Long,`operationId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_read_entry(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`entryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(`ptr`: Long,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(`ptr`: Long,`operationId`: RustBuffer.ByValue,`input`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_save(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1001,13 +1013,19 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob() != 21760.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey() != 45917.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey() != 4142.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 50807.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_commit_passkey_registration() != 63552.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_end_passkey_operation() != 10527.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708.toShort()) {
@@ -1019,10 +1037,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault() != 65313.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_prepare_passkey_operation() != 8343.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey() != 957.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey() != 32599.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_save() != 19815.toShort()) {
@@ -2122,11 +2143,15 @@ public object FfiConverterTypeUnlockBlobAdapter: FfiConverter<UnlockBlobAdapter,
 
 public interface VaultSessionInterface {
 
-    fun `assertPasskey`(`input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput
+    fun `assertPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput
 
     fun `closeVault`(): SessionStateDto
 
+    fun `commitPasskeyRegistration`(`operationId`: kotlin.ByteArray)
+
     fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryDetailDto
+
+    fun `endPasskeyOperation`(`operationId`: kotlin.ByteArray)
 
     fun `listEntries`(`vaultId`: kotlin.String): List<EntrySummaryDto>
 
@@ -2134,9 +2159,11 @@ public interface VaultSessionInterface {
 
     fun `openVault`(`path`: kotlin.String): VaultHandleDto
 
+    fun `preparePasskeyOperation`(`operationId`: kotlin.ByteArray): PlatformPasskeyOperation
+
     fun `readEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String): EntryDetailDto
 
-    fun `registerPasskey`(`input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput
+    fun `registerPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput
 
     fun `save`(`vaultId`: kotlin.String): SaveVaultResultDto
 
@@ -2254,13 +2281,13 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     }
 
 
-    @Throws(VaultKernException::class)override fun `assertPasskey`(`input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput {
+    @Throws(VaultKernException::class)override fun `assertPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyAssertionInput): PlatformPasskeyAssertionOutput {
             return FfiConverterTypePlatformPasskeyAssertionOutput.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(
         it,
-        FfiConverterTypePlatformPasskeyAssertionInput.lower(`input`),_status)
+        FfiConverterByteArray.lower(`operationId`),FfiConverterTypePlatformPasskeyAssertionInput.lower(`input`),_status)
 }
     }
     )
@@ -2282,6 +2309,19 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
+    @Throws(VaultKernException::class)override fun `commitPasskeyRegistration`(`operationId`: kotlin.ByteArray)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_commit_passkey_registration(
+        it,
+        FfiConverterByteArray.lower(`operationId`),_status)
+}
+    }
+
+
+
+
     @Throws(VaultKernException::class)override fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryDetailDto {
             return FfiConverterTypeEntryDetailDto.lift(
     callWithHandle {
@@ -2293,6 +2333,19 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     }
     )
     }
+
+
+
+    @Throws(VaultKernException::class)override fun `endPasskeyOperation`(`operationId`: kotlin.ByteArray)
+        =
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_end_passkey_operation(
+        it,
+        FfiConverterByteArray.lower(`operationId`),_status)
+}
+    }
+
 
 
 
@@ -2338,6 +2391,20 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
+    @Throws(VaultKernException::class)override fun `preparePasskeyOperation`(`operationId`: kotlin.ByteArray): PlatformPasskeyOperation {
+            return FfiConverterTypePlatformPasskeyOperation.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_prepare_passkey_operation(
+        it,
+        FfiConverterByteArray.lower(`operationId`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(VaultKernException::class)override fun `readEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String): EntryDetailDto {
             return FfiConverterTypeEntryDetailDto.lift(
     callWithHandle {
@@ -2352,13 +2419,13 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
-    @Throws(VaultKernException::class)override fun `registerPasskey`(`input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput {
+    @Throws(VaultKernException::class)override fun `registerPasskey`(`operationId`: kotlin.ByteArray, `input`: PlatformPasskeyRegistrationInput): PlatformPasskeyRegistrationOutput {
             return FfiConverterTypePlatformPasskeyRegistrationOutput.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(
         it,
-        FfiConverterTypePlatformPasskeyRegistrationInput.lower(`input`),_status)
+        FfiConverterByteArray.lower(`operationId`),FfiConverterTypePlatformPasskeyRegistrationInput.lower(`input`),_status)
 }
     }
     )
@@ -3643,6 +3710,44 @@ public object FfiConverterTypePlatformPasskeyCredential: FfiConverterRustBuffer<
 
 
 
+data class PlatformPasskeyOperation (
+    var `credentials`: List<PlatformPasskeyCredential>
+    ,
+    var `freshUserVerification`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePlatformPasskeyOperation: FfiConverterRustBuffer<PlatformPasskeyOperation> {
+    override fun read(buf: ByteBuffer): PlatformPasskeyOperation {
+        return PlatformPasskeyOperation(
+            FfiConverterSequenceTypePlatformPasskeyCredential.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PlatformPasskeyOperation) = (
+            FfiConverterSequenceTypePlatformPasskeyCredential.allocationSize(value.`credentials`) +
+            FfiConverterBoolean.allocationSize(value.`freshUserVerification`)
+    )
+
+    override fun write(value: PlatformPasskeyOperation, buf: ByteBuffer) {
+            FfiConverterSequenceTypePlatformPasskeyCredential.write(value.`credentials`, buf)
+            FfiConverterBoolean.write(value.`freshUserVerification`, buf)
+    }
+}
+
+
+
 data class PlatformPasskeyRegistrationInput (
     var `relyingParty`: kotlin.String
     ,
@@ -3945,6 +4050,18 @@ public object FfiConverterTypeVaultSourceStatusDto: FfiConverterRustBuffer<Vault
 
 sealed class PlatformAdapterException: kotlin.Exception() {
 
+    class Cancelled(
+        ) : PlatformAdapterException() {
+        override val message
+            get() = ""
+    }
+
+    class Invalidated(
+        ) : PlatformAdapterException() {
+        override val message
+            get() = ""
+    }
+
     class Failure(
 
         val `details`: kotlin.String
@@ -3978,16 +4095,26 @@ public object FfiConverterTypePlatformAdapterError : FfiConverterRustBuffer<Plat
 
 
         return when(buf.getInt()) {
-            1 -> PlatformAdapterException.Failure(
+            1 -> PlatformAdapterException.Cancelled()
+            2 -> PlatformAdapterException.Invalidated()
+            3 -> PlatformAdapterException.Failure(
                 FfiConverterString.read(buf),
                 )
-            2 -> PlatformAdapterException.Unexpected()
+            4 -> PlatformAdapterException.Unexpected()
             else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
         }
     }
 
     override fun allocationSize(value: PlatformAdapterException): ULong {
         return when(value) {
+            is PlatformAdapterException.Cancelled -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
+            is PlatformAdapterException.Invalidated -> (
+                // Add the size for the Int that specifies the variant plus the size needed for all fields
+                4UL
+            )
             is PlatformAdapterException.Failure -> (
                 // Add the size for the Int that specifies the variant plus the size needed for all fields
                 4UL
@@ -4002,13 +4129,21 @@ public object FfiConverterTypePlatformAdapterError : FfiConverterRustBuffer<Plat
 
     override fun write(value: PlatformAdapterException, buf: ByteBuffer) {
         when(value) {
-            is PlatformAdapterException.Failure -> {
+            is PlatformAdapterException.Cancelled -> {
                 buf.putInt(1)
+                Unit
+            }
+            is PlatformAdapterException.Invalidated -> {
+                buf.putInt(2)
+                Unit
+            }
+            is PlatformAdapterException.Failure -> {
+                buf.putInt(3)
                 FfiConverterString.write(value.`details`, buf)
                 Unit
             }
             is PlatformAdapterException.Unexpected -> {
-                buf.putInt(2)
+                buf.putInt(4)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }

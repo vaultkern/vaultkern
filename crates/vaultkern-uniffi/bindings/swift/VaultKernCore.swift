@@ -1047,11 +1047,15 @@ public func FfiConverterTypeUnlockBlobAdapter_lower(_ value: UnlockBlobAdapter) 
 
 public protocol VaultSessionProtocol: AnyObject, Sendable {
 
-    func assertPasskey(input: PlatformPasskeyAssertionInput) throws  -> PlatformPasskeyAssertionOutput
+    func assertPasskey(operationId: Data, input: PlatformPasskeyAssertionInput) throws  -> PlatformPasskeyAssertionOutput
 
     func closeVault() throws  -> SessionStateDto
 
+    func commitPasskeyRegistration(operationId: Data) throws
+
     func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto) throws  -> EntryDetailDto
+
+    func endPasskeyOperation(operationId: Data) throws
 
     func listEntries(vaultId: String) throws  -> [EntrySummaryDto]
 
@@ -1059,9 +1063,11 @@ public protocol VaultSessionProtocol: AnyObject, Sendable {
 
     func openVault(path: String) throws  -> VaultHandleDto
 
+    func preparePasskeyOperation(operationId: Data) throws  -> PlatformPasskeyOperation
+
     func readEntry(vaultId: String, entryId: String) throws  -> EntryDetailDto
 
-    func registerPasskey(input: PlatformPasskeyRegistrationInput) throws  -> PlatformPasskeyRegistrationOutput
+    func registerPasskey(operationId: Data, input: PlatformPasskeyRegistrationInput) throws  -> PlatformPasskeyRegistrationOutput
 
     func save(vaultId: String) throws  -> SaveVaultResultDto
 
@@ -1133,10 +1139,11 @@ public convenience init(unlockBlobAdapter: UnlockBlobAdapter) {
 
 
 
-open func assertPasskey(input: PlatformPasskeyAssertionInput)throws  -> PlatformPasskeyAssertionOutput  {
+open func assertPasskey(operationId: Data, input: PlatformPasskeyAssertionInput)throws  -> PlatformPasskeyAssertionOutput  {
     return try  FfiConverterTypePlatformPasskeyAssertionOutput_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_assert_passkey(
             self.uniffiCloneHandle(),
+        FfiConverterData.lower(operationId),
         FfiConverterTypePlatformPasskeyAssertionInput_lower(input),$0
     )
 })
@@ -1150,6 +1157,14 @@ open func closeVault()throws  -> SessionStateDto  {
 })
 }
 
+open func commitPasskeyRegistration(operationId: Data)throws   {try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_commit_passkey_registration(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(operationId),$0
+    )
+}
+}
+
 open func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto)throws  -> EntryDetailDto  {
     return try  FfiConverterTypeEntryDetailDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_edit_entry(
@@ -1159,6 +1174,14 @@ open func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto)thr
         FfiConverterTypeEntryFieldsDto_lower(fields),$0
     )
 })
+}
+
+open func endPasskeyOperation(operationId: Data)throws   {try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_end_passkey_operation(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(operationId),$0
+    )
+}
 }
 
 open func listEntries(vaultId: String)throws  -> [EntrySummaryDto]  {
@@ -1187,6 +1210,15 @@ open func openVault(path: String)throws  -> VaultHandleDto  {
 })
 }
 
+open func preparePasskeyOperation(operationId: Data)throws  -> PlatformPasskeyOperation  {
+    return try  FfiConverterTypePlatformPasskeyOperation_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_prepare_passkey_operation(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(operationId),$0
+    )
+})
+}
+
 open func readEntry(vaultId: String, entryId: String)throws  -> EntryDetailDto  {
     return try  FfiConverterTypeEntryDetailDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_read_entry(
@@ -1197,10 +1229,11 @@ open func readEntry(vaultId: String, entryId: String)throws  -> EntryDetailDto  
 })
 }
 
-open func registerPasskey(input: PlatformPasskeyRegistrationInput)throws  -> PlatformPasskeyRegistrationOutput  {
+open func registerPasskey(operationId: Data, input: PlatformPasskeyRegistrationInput)throws  -> PlatformPasskeyRegistrationOutput  {
     return try  FfiConverterTypePlatformPasskeyRegistrationOutput_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_register_passkey(
             self.uniffiCloneHandle(),
+        FfiConverterData.lower(operationId),
         FfiConverterTypePlatformPasskeyRegistrationInput_lower(input),$0
     )
 })
@@ -2319,6 +2352,60 @@ public func FfiConverterTypePlatformPasskeyCredential_lower(_ value: PlatformPas
 }
 
 
+public struct PlatformPasskeyOperation: Equatable, Hashable {
+    public var credentials: [PlatformPasskeyCredential]
+    public var freshUserVerification: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(credentials: [PlatformPasskeyCredential], freshUserVerification: Bool) {
+        self.credentials = credentials
+        self.freshUserVerification = freshUserVerification
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension PlatformPasskeyOperation: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypePlatformPasskeyOperation: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> PlatformPasskeyOperation {
+        return
+            try PlatformPasskeyOperation(
+                credentials: FfiConverterSequenceTypePlatformPasskeyCredential.read(from: &buf),
+                freshUserVerification: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: PlatformPasskeyOperation, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypePlatformPasskeyCredential.write(value.credentials, into: &buf)
+        FfiConverterBool.write(value.freshUserVerification, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformPasskeyOperation_lift(_ buf: RustBuffer) throws -> PlatformPasskeyOperation {
+    return try FfiConverterTypePlatformPasskeyOperation.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypePlatformPasskeyOperation_lower(_ value: PlatformPasskeyOperation) -> RustBuffer {
+    return FfiConverterTypePlatformPasskeyOperation.lower(value)
+}
+
+
 public struct PlatformPasskeyRegistrationInput: Equatable, Hashable {
     public var relyingParty: String
     public var relyingPartyName: String
@@ -2703,6 +2790,8 @@ public enum PlatformAdapterError: Swift.Error, Equatable, Hashable, Foundation.L
 
 
 
+    case Cancelled
+    case Invalidated
     case Failure(details: String
     )
     case Unexpected
@@ -2735,10 +2824,12 @@ public struct FfiConverterTypePlatformAdapterError: FfiConverterRustBuffer {
 
 
 
-        case 1: return .Failure(
+        case 1: return .Cancelled
+        case 2: return .Invalidated
+        case 3: return .Failure(
             details: try FfiConverterString.read(from: &buf)
             )
-        case 2: return .Unexpected
+        case 4: return .Unexpected
 
          default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -2751,13 +2842,21 @@ public struct FfiConverterTypePlatformAdapterError: FfiConverterRustBuffer {
 
 
 
-        case let .Failure(details):
+        case .Cancelled:
             writeInt(&buf, Int32(1))
+
+
+        case .Invalidated:
+            writeInt(&buf, Int32(2))
+
+
+        case let .Failure(details):
+            writeInt(&buf, Int32(3))
             FfiConverterString.write(details, into: &buf)
 
 
         case .Unexpected:
-            writeInt(&buf, Int32(2))
+            writeInt(&buf, Int32(4))
 
         }
     }
@@ -3318,13 +3417,19 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob() != 21760) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey() != 45917) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_assert_passkey() != 4142) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 50807) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_commit_passkey_registration() != 63552) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_end_passkey_operation() != 10527) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708) {
@@ -3336,10 +3441,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault() != 65313) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_prepare_passkey_operation() != 8343) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey() != 957) {
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_register_passkey() != 32599) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_save() != 19815) {

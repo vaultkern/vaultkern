@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use vaultkern_uniffi::{
     EntryFieldsDto, PlatformAdapterError, PlatformPasskeyAssertionInput,
@@ -8,14 +11,34 @@ use vaultkern_uniffi::{
 
 const FIXTURE_PASSWORD: &str = "vaultkern-external-fixture";
 
+#[derive(Debug, Clone, Copy)]
+enum FakeLoadFailure {
+    Cancelled,
+    Invalidated,
+}
+
 #[derive(Debug, Default)]
 struct FakeUnlockBlobAdapter {
     blobs: Mutex<BTreeMap<String, Vec<u8>>>,
     authorization_reasons: Mutex<Vec<String>>,
+    fail_load_presence_query: AtomicBool,
+    load_failure: Mutex<Option<FakeLoadFailure>>,
+    reentrant_session: Mutex<Option<Weak<VaultSession>>>,
+    reentrant_call_failed: AtomicBool,
 }
 
 impl UnlockBlobAdapter for FakeUnlockBlobAdapter {
     fn supports_unlock_blob(&self) -> Result<bool, PlatformAdapterError> {
+        let reentrant_session = self
+            .reentrant_session
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(Weak::upgrade);
+        if let Some(session) = reentrant_session {
+            self.reentrant_call_failed
+                .store(session.session_state().is_err(), Ordering::Release);
+        }
         Ok(true)
     }
 
@@ -29,6 +52,11 @@ impl UnlockBlobAdapter for FakeUnlockBlobAdapter {
     }
 
     fn load_requires_user_presence(&self) -> Result<bool, PlatformAdapterError> {
+        if self.fail_load_presence_query.load(Ordering::Acquire) {
+            return Err(PlatformAdapterError::Failure {
+                details: "injected load presence query failure".into(),
+            });
+        }
         Ok(false)
     }
 
@@ -42,6 +70,11 @@ impl UnlockBlobAdapter for FakeUnlockBlobAdapter {
     }
 
     fn load_blob(&self, key: String) -> Result<Option<Vec<u8>>, PlatformAdapterError> {
+        match *self.load_failure.lock().unwrap() {
+            Some(FakeLoadFailure::Cancelled) => return Err(PlatformAdapterError::Cancelled),
+            Some(FakeLoadFailure::Invalidated) => return Err(PlatformAdapterError::Invalidated),
+            None => {}
+        }
         Ok(self.blobs.lock().unwrap().get(&key).cloned())
     }
 
@@ -141,6 +174,58 @@ fn ffi_unlock_blob_roundtrip_uses_the_platform_adapter_and_revoke_removes_it() {
 }
 
 #[test]
+fn failed_load_presence_query_requires_explicit_authorization() {
+    let (_dir, session, adapter, _vault_id) = opened_session();
+    let unlock = session.unlock();
+
+    unlock.enroll(Some(FIXTURE_PASSWORD.into()), None).unwrap();
+    session.close_vault().unwrap();
+    let authorizations_before = adapter.authorization_reasons.lock().unwrap().len();
+    adapter
+        .fail_load_presence_query
+        .store(true, Ordering::Release);
+
+    assert!(unlock.unlock_with_blob().unwrap().unlocked);
+    assert_eq!(
+        adapter.authorization_reasons.lock().unwrap().len(),
+        authorizations_before + 1,
+        "an unavailable capability query must fail closed by requiring authorization"
+    );
+}
+
+#[test]
+fn cancelled_unlock_blob_load_preserves_the_enrollment() {
+    let (_dir, session, adapter, _vault_id) = opened_session();
+    let unlock = session.unlock();
+
+    unlock.enroll(Some(FIXTURE_PASSWORD.into()), None).unwrap();
+    session.close_vault().unwrap();
+    *adapter.load_failure.lock().unwrap() = Some(FakeLoadFailure::Cancelled);
+
+    let error = unlock.unlock_with_blob().unwrap_err();
+    assert!(error.to_string().contains("quick unlock was cancelled"));
+    assert_eq!(adapter.blobs.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn invalidated_unlock_blob_load_deletes_the_enrollment() {
+    let (_dir, session, adapter, _vault_id) = opened_session();
+    let unlock = session.unlock();
+
+    unlock.enroll(Some(FIXTURE_PASSWORD.into()), None).unwrap();
+    session.close_vault().unwrap();
+    *adapter.load_failure.lock().unwrap() = Some(FakeLoadFailure::Invalidated);
+
+    let error = unlock.unlock_with_blob().unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("quick unlock is not enabled for the current vault")
+    );
+    assert!(adapter.blobs.lock().unwrap().is_empty());
+}
+
+#[test]
 fn ffi_sync_and_platform_passkey_entry_points_delegate_to_the_runtime_modules() {
     let (_dir, session, _adapter, vault_id) = opened_session();
 
@@ -148,18 +233,32 @@ fn ffi_sync_and_platform_passkey_entry_points_delegate_to_the_runtime_modules() 
     assert_eq!(sync_status.source_kind, "local");
     assert_eq!(session.sync().status().unwrap(), None);
 
+    let registration_operation = vec![1; 16];
+    let prepared = session
+        .prepare_passkey_operation(registration_operation.clone())
+        .unwrap();
+    assert!(prepared.credentials.is_empty());
     let registration = session
-        .register_passkey(PlatformPasskeyRegistrationInput {
-            relying_party: "example.com".into(),
-            relying_party_name: "Example".into(),
-            user_name: "alice@example.com".into(),
-            user_display_name: "Alice".into(),
-            user_handle: b"alice-user-handle".to_vec(),
-            public_key_algorithm: -7,
-            user_verified: true,
-        })
+        .register_passkey(
+            registration_operation.clone(),
+            PlatformPasskeyRegistrationInput {
+                relying_party: "example.com".into(),
+                relying_party_name: "Example".into(),
+                user_name: "alice@example.com".into(),
+                user_display_name: "Alice".into(),
+                user_handle: b"alice-user-handle".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+        )
         .unwrap();
     assert!(!registration.credential.credential_id.is_empty());
+    session
+        .commit_passkey_registration(registration_operation.clone())
+        .unwrap();
+    session
+        .end_passkey_operation(registration_operation)
+        .unwrap();
     assert!(
         session
             .list_passkey_credentials()
@@ -168,15 +267,61 @@ fn ffi_sync_and_platform_passkey_entry_points_delegate_to_the_runtime_modules() 
             .any(|credential| credential.credential_id == registration.credential.credential_id)
     );
 
+    let assertion_operation = vec![2; 16];
+    session
+        .prepare_passkey_operation(assertion_operation.clone())
+        .unwrap();
+    let assertion_input = PlatformPasskeyAssertionInput {
+        relying_party: "example.com".into(),
+        allowed_credential_ids: vec![registration.credential.credential_id.clone()],
+        client_data_hash: vec![7; 32],
+        user_verified: true,
+    };
     let assertion = session
-        .assert_passkey(PlatformPasskeyAssertionInput {
-            relying_party: "example.com".into(),
-            allowed_credential_ids: vec![registration.credential.credential_id],
-            client_data_hash: vec![7; 32],
-            user_verified: true,
-        })
+        .assert_passkey(assertion_operation.clone(), assertion_input.clone())
         .unwrap();
     assert!(!assertion.signature_der.is_empty());
+    assert!(
+        session
+            .assert_passkey(assertion_operation.clone(), assertion_input)
+            .unwrap_err()
+            .to_string()
+            .contains("user verification was already consumed")
+    );
+    session.end_passkey_operation(assertion_operation).unwrap();
+}
+
+#[test]
+fn abandoned_passkey_registration_is_rolled_back() {
+    let (_dir, session, _adapter, _vault_id) = opened_session();
+    let operation_id = vec![3; 16];
+    session
+        .prepare_passkey_operation(operation_id.clone())
+        .unwrap();
+
+    let registration = session
+        .register_passkey(
+            operation_id.clone(),
+            PlatformPasskeyRegistrationInput {
+                relying_party: "rollback.example".into(),
+                relying_party_name: "Rollback Example".into(),
+                user_name: "alice@rollback.example".into(),
+                user_display_name: "Alice".into(),
+                user_handle: b"rollback-user-handle".to_vec(),
+                public_key_algorithm: -7,
+                user_verified: true,
+            },
+        )
+        .unwrap();
+    session.end_passkey_operation(operation_id).unwrap();
+
+    assert!(
+        !session
+            .list_passkey_credentials()
+            .unwrap()
+            .iter()
+            .any(|credential| credential.credential_id == registration.credential.credential_id)
+    );
 }
 
 #[test]
@@ -184,6 +329,24 @@ fn exported_session_handle_is_safe_to_share_between_platform_threads() {
     fn assert_send_sync<T: Send + Sync>() {}
 
     assert_send_sync::<VaultSession>();
+}
+
+#[test]
+fn foreign_callback_reentry_returns_without_deadlocking_the_runtime() {
+    let adapter = Arc::new(FakeUnlockBlobAdapter::default());
+    let session = VaultSession::new(adapter.clone());
+    *adapter.reentrant_session.lock().unwrap() = Some(Arc::downgrade(&session));
+    let (sender, receiver) = mpsc::channel();
+
+    std::thread::spawn(move || {
+        let _ = sender.send(session.session_state());
+    });
+
+    let outer_result = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("foreign callback reentry must not deadlock the runtime");
+    assert!(outer_result.is_ok());
+    assert!(adapter.reentrant_call_failed.load(Ordering::Acquire));
 }
 
 #[test]

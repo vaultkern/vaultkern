@@ -13,7 +13,7 @@ use vaultkern_runtime::{
     PlatformPasskeyCredential as RuntimePlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput as RuntimePlatformPasskeyRegistrationInput,
     PlatformPasskeyRegistrationOutput as RuntimePlatformPasskeyRegistrationOutput, Runtime,
-    SecureStorageProvider,
+    SecureStorageError, SecureStorageProvider,
 };
 use vaultkern_runtime_protocol as protocol;
 use zeroize::{Zeroize, Zeroizing};
@@ -67,8 +67,8 @@ impl From<&str> for SensitiveString {
 }
 
 impl From<SensitiveString> for String {
-    fn from(mut value: SensitiveString) -> Self {
-        std::mem::take(&mut *value.0)
+    fn from(value: SensitiveString) -> Self {
+        value.as_str().to_owned()
     }
 }
 
@@ -92,6 +92,10 @@ impl From<anyhow::Error> for VaultKernError {
 
 #[derive(Debug, thiserror::Error, uniffi::Error)]
 pub enum PlatformAdapterError {
+    #[error("platform operation was cancelled")]
+    Cancelled,
+    #[error("platform-protected data was invalidated")]
+    Invalidated,
     #[error("{details}")]
     Failure { details: String },
     #[error("unexpected platform adapter failure")]
@@ -101,6 +105,18 @@ pub enum PlatformAdapterError {
 impl From<uniffi::UnexpectedUniFFICallbackError> for PlatformAdapterError {
     fn from(_: uniffi::UnexpectedUniFFICallbackError) -> Self {
         Self::Unexpected
+    }
+}
+
+fn secure_storage_adapter_error(error: PlatformAdapterError) -> anyhow::Error {
+    match error {
+        PlatformAdapterError::Cancelled => {
+            SecureStorageError::cancelled("platform unlock blob access was cancelled").into()
+        }
+        PlatformAdapterError::Invalidated => {
+            SecureStorageError::invalidated("platform unlock blob was invalidated").into()
+        }
+        error => anyhow::Error::new(error),
     }
 }
 
@@ -146,26 +162,26 @@ impl SecureStorageProvider for AdapterSecureStorageProvider {
     fn authorize_store_user_presence(&self) -> anyhow::Result<()> {
         self.adapter
             .authorize_store_user_presence()
-            .map_err(anyhow::Error::new)
+            .map_err(secure_storage_adapter_error)
     }
 
     fn store(&self, key: &str, value: &[u8]) -> anyhow::Result<()> {
         self.adapter
             .store_blob(key.to_owned(), value.to_vec())
-            .map_err(anyhow::Error::new)
+            .map_err(secure_storage_adapter_error)
     }
 
     fn load(&self, key: &str) -> anyhow::Result<Option<Zeroizing<Vec<u8>>>> {
         self.adapter
             .load_blob(key.to_owned())
             .map(|value| value.map(Zeroizing::new))
-            .map_err(anyhow::Error::new)
+            .map_err(secure_storage_adapter_error)
     }
 
     fn contains(&self, key: &str) -> anyhow::Result<bool> {
         self.adapter
             .contains_blob(key.to_owned())
-            .map_err(anyhow::Error::new)
+            .map_err(secure_storage_adapter_error)
     }
 
     fn store_requires_user_presence(&self) -> bool {
@@ -173,13 +189,13 @@ impl SecureStorageProvider for AdapterSecureStorageProvider {
     }
 
     fn load_requires_user_presence(&self) -> bool {
-        self.adapter.load_requires_user_presence().unwrap_or(true)
+        self.adapter.load_requires_user_presence().unwrap_or(false)
     }
 
     fn delete(&self, key: &str) -> anyhow::Result<()> {
         self.adapter
             .delete_blob(key.to_owned())
-            .map_err(anyhow::Error::new)
+            .map_err(secure_storage_adapter_error)
     }
 }
 
@@ -538,6 +554,12 @@ impl From<RuntimePlatformPasskeyRegistrationOutput> for PlatformPasskeyRegistrat
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PlatformPasskeyOperation {
+    pub credentials: Vec<PlatformPasskeyCredential>,
+    pub fresh_user_verification: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PlatformPasskeyAssertionInput {
     pub relying_party: String,
     pub allowed_credential_ids: Vec<Vec<u8>>,
@@ -582,7 +604,7 @@ struct SharedRuntime {
 impl SharedRuntime {
     fn lock(&self) -> Result<MutexGuard<'_, Runtime>, VaultKernError> {
         self.runtime
-            .lock()
+            .try_lock()
             .map_err(|_| VaultKernError::StateUnavailable)
     }
 }
@@ -705,24 +727,54 @@ impl VaultSession {
             .map_err(Into::into)
     }
 
+    pub fn prepare_passkey_operation(
+        &self,
+        operation_id: Vec<u8>,
+    ) -> Result<PlatformPasskeyOperation, VaultKernError> {
+        let (credentials, fresh_user_verification) = self
+            .shared
+            .lock()?
+            .prepare_platform_passkey_operation(operation_id, None)?;
+        Ok(PlatformPasskeyOperation {
+            credentials: credentials.into_iter().map(Into::into).collect(),
+            fresh_user_verification,
+        })
+    }
+
+    pub fn end_passkey_operation(&self, operation_id: Vec<u8>) -> Result<(), VaultKernError> {
+        self.shared
+            .lock()?
+            .end_platform_passkey_operation(&operation_id);
+        Ok(())
+    }
+
     pub fn register_passkey(
         &self,
+        operation_id: Vec<u8>,
         input: PlatformPasskeyRegistrationInput,
     ) -> Result<PlatformPasskeyRegistrationOutput, VaultKernError> {
         self.shared
             .lock()?
-            .register_platform_passkey(input.into())
+            .register_platform_passkey_for_operation(&operation_id, input.into())
             .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub fn commit_passkey_registration(&self, operation_id: Vec<u8>) -> Result<(), VaultKernError> {
+        self.shared
+            .lock()?
+            .commit_platform_passkey_registration_operation(&operation_id)
             .map_err(Into::into)
     }
 
     pub fn assert_passkey(
         &self,
+        operation_id: Vec<u8>,
         input: PlatformPasskeyAssertionInput,
     ) -> Result<PlatformPasskeyAssertionOutput, VaultKernError> {
         self.shared
             .lock()?
-            .create_platform_passkey_assertion(input.into())
+            .create_platform_passkey_assertion_for_operation(&operation_id, input.into())
             .map(Into::into)
             .map_err(Into::into)
     }
@@ -810,6 +862,22 @@ impl VaultSync {
 fn take_sensitive_string(value: protocol::SensitiveString) -> SensitiveString {
     let mut value = value.into_zeroizing();
     std::mem::take(&mut *value).into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SensitiveString;
+
+    #[test]
+    fn lowering_sensitive_text_does_not_reuse_the_zeroizing_allocation() {
+        let sensitive = SensitiveString::from("ffi-transfer-secret".to_owned());
+        let zeroizing_allocation = sensitive.as_str().as_ptr();
+
+        let lowered = String::from(sensitive);
+
+        assert_eq!(lowered, "ffi-transfer-secret");
+        assert_ne!(lowered.as_ptr(), zeroizing_allocation);
+    }
 }
 
 uniffi::setup_scaffolding!();
