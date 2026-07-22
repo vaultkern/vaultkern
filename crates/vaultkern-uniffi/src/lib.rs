@@ -7,8 +7,8 @@
 use std::cell::RefCell;
 use std::fmt;
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use vaultkern_runtime::{
     BiometricProvider, ExternalKdfConfirmation, ExternalKdfDisposition, OneDriveRefreshTokenStore,
@@ -266,18 +266,48 @@ impl From<uniffi::UnexpectedUniFFICallbackError> for PlatformAdapterError {
 }
 
 #[derive(Debug, Default)]
+struct AdapterCallState {
+    active_callbacks: usize,
+    runtime_call_active: bool,
+}
+
+#[derive(Debug, Default)]
 struct AdapterCallGate {
-    active: AtomicUsize,
+    state: Mutex<AdapterCallState>,
+    changed: Condvar,
 }
 
 impl AdapterCallGate {
     fn enter(&self) -> AdapterCallPermit<'_> {
-        self.active.fetch_add(1, Ordering::AcqRel);
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.active_callbacks += 1;
+        }
+        self.changed.notify_all();
         AdapterCallPermit { gate: self }
     }
 
-    fn is_active(&self) -> bool {
-        self.active.load(Ordering::Acquire) != 0
+    fn reserve_runtime_call(&self) -> Result<RuntimeCallReservation<'_>, VaultKernError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        loop {
+            if state.active_callbacks != 0 {
+                return Err(VaultKernError::AdapterCallbackActive);
+            }
+            if !state.runtime_call_active {
+                state.runtime_call_active = true;
+                return Ok(RuntimeCallReservation { gate: self });
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
     }
 
     fn call<T>(&self, callback: impl FnOnce() -> T) -> T {
@@ -292,7 +322,35 @@ struct AdapterCallPermit<'a> {
 
 impl Drop for AdapterCallPermit<'_> {
     fn drop(&mut self) {
-        self.gate.active.fetch_sub(1, Ordering::AcqRel);
+        {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            debug_assert_ne!(state.active_callbacks, 0);
+            state.active_callbacks = state.active_callbacks.saturating_sub(1);
+        }
+        self.gate.changed.notify_all();
+    }
+}
+
+struct RuntimeCallReservation<'a> {
+    gate: &'a AdapterCallGate,
+}
+
+impl Drop for RuntimeCallReservation<'_> {
+    fn drop(&mut self) {
+        {
+            let mut state = self
+                .gate
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            debug_assert!(state.runtime_call_active);
+            state.runtime_call_active = false;
+        }
+        self.gate.changed.notify_all();
     }
 }
 
@@ -1012,6 +1070,7 @@ impl Drop for RuntimeCallPermit {
 
 struct SharedRuntimeGuard<'a> {
     runtime: MutexGuard<'a, Runtime>,
+    _runtime_call: RuntimeCallReservation<'a>,
     _permit: RuntimeCallPermit,
     deferred_passkey_finishes: &'a Mutex<Vec<Vec<u8>>>,
 }
@@ -1055,15 +1114,14 @@ impl SharedRuntime {
     fn lock(&self) -> Result<SharedRuntimeGuard<'_>, VaultKernError> {
         let identity = self as *const Self as usize;
         let permit = RuntimeCallPermit::enter(identity)?;
-        if self.adapter_calls.is_active() {
-            return Err(VaultKernError::AdapterCallbackActive);
-        }
+        let runtime_call = self.adapter_calls.reserve_runtime_call()?;
         let runtime = self
             .runtime
             .lock()
             .map_err(|_| VaultKernError::StateUnavailable)?;
         let mut guard = SharedRuntimeGuard {
             runtime,
+            _runtime_call: runtime_call,
             _permit: permit,
             deferred_passkey_finishes: &self.deferred_passkey_finishes,
         };
@@ -1679,6 +1737,38 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(2))
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn runtime_waiter_fails_fast_if_an_adapter_callback_starts_after_it_waits() {
+        let shared = std::sync::Arc::new(SharedRuntime {
+            runtime: std::sync::Mutex::new(vaultkern_runtime::Runtime::for_tests()),
+            platform: ResidentPlatform::Android,
+            adapter_calls: std::sync::Arc::new(AdapterCallGate::default()),
+            deferred_passkey_finishes: std::sync::Mutex::new(Vec::new()),
+        });
+        let held = shared.lock().unwrap();
+        let started = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let waiting_shared = std::sync::Arc::clone(&shared);
+        let waiting_started = std::sync::Arc::clone(&started);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            waiting_started.wait();
+            let result = waiting_shared.lock().map(|_| ());
+            sender.send(result).unwrap();
+        });
+        started.wait();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let callback = shared.adapter_calls.enter();
+        let result = receiver
+            .recv_timeout(std::time::Duration::from_millis(500))
+            .expect("a newly active callback must interrupt an existing runtime waiter");
+
+        assert!(matches!(result, Err(VaultKernError::AdapterCallbackActive)));
+        drop(callback);
+        drop(held);
+        waiter.join().unwrap();
     }
 }
 
