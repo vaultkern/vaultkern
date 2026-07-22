@@ -76,6 +76,30 @@ class SelectedLocalDocumentSaveCoordinatorTest {
         retried.abandon()
     }
 
+    @Test
+    fun providerPreflightReadFailureKeepsARecoverablePrivateSave() {
+        val uri = "content://documents/local/vault.kdbx"
+        val original = ByteArray(60) { 54 }
+        val candidate = ByteArray(92) { 55 }
+        val access = CoordinatorDocumentAccess(uri, original)
+        val root = temporary.newFolder("pending-preflight")
+        val workspace = LocalDocumentWorkspace(root, access)
+        val selected = workspace.select(uri, "vault.kdbx")
+        val transaction = assertNotNullTransaction(
+            SelectedLocalDocumentSaveCoordinator(workspace).prepare(selected.privatePath),
+        )
+        File(selected.privatePath).writeBytes(candidate)
+        access.failRead = true
+
+        val result = transaction.complete(VaultSaveResult(VaultSaveStatus.SAVED))
+
+        assertEquals(VaultSaveStatus.SAVED_TO_CACHE, result.status)
+        assertArrayEquals(original, access.bytes)
+        access.failRead = false
+        assertEquals(1, LocalDocumentWorkspace(root, access).reconcilePending().size)
+        assertArrayEquals(candidate, access.bytes)
+    }
+
     private fun assertNotNullTransaction(
         value: SelectedLocalDocumentSaveTransaction?,
     ): SelectedLocalDocumentSaveTransaction {
@@ -91,10 +115,12 @@ private class CoordinatorDocumentAccess(
     var bytes: ByteArray = initial.copyOf()
         private set
     var failReplace = false
+    var failRead = false
     private var modifiedAt = 1L
 
     override fun read(uri: String): LocalDocumentSnapshot {
         require(uri == expectedUri)
+        if (failRead) throw IllegalStateException("injected provider read failure")
         return LocalDocumentSnapshot(bytes.copyOf(), modifiedAt)
     }
 

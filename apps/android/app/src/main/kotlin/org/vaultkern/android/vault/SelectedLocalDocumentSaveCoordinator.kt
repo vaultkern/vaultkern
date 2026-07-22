@@ -25,7 +25,11 @@ class SelectedLocalDocumentSaveTransaction internal constructor(
         check(completed.compareAndSet(false, true)) {
             "selected local document save transaction already completed"
         }
-        val publication = workspace.publishAfterSave(vaultPath)
+        val publication = try {
+            workspace.publishAfterSave(vaultPath)
+        } catch (_: Exception) {
+            return VaultSaveResult(VaultSaveStatus.SAVED_TO_CACHE)
+        }
         return when (publication.status) {
             LocalDocumentPublishStatus.PUBLISHED,
             LocalDocumentPublishStatus.NO_CHANGE,

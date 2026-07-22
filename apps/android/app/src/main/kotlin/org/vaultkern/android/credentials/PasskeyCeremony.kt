@@ -2,6 +2,9 @@ package org.vaultkern.android.credentials
 
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
+import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
+import org.vaultkern.android.vault.VaultSaveResult
+import org.vaultkern.android.vault.VaultSaveStatus
 import org.vaultkern.core.PlatformPasskeyCredential
 import org.vaultkern.core.VaultPasskeyOperation
 import org.vaultkern.core.VaultSession
@@ -14,6 +17,7 @@ class PasskeyCeremony(
     private val session: VaultSession,
     private val verifier: FreshUserVerification,
     private val codec: WebAuthnCodec = WebAuthnCodec(),
+    private val selectedLocalDocuments: SelectedLocalDocumentSaveCoordinator? = null,
     private val operationId: () -> ByteArray = SecureOperationIdGenerator(),
     private val clock: MonotonicClock = MonotonicClock(System::nanoTime),
 ) {
@@ -31,7 +35,9 @@ class PasskeyCeremony(
             ) { "an excluded passkey credential already exists" }
             val output = operation.registerPasskey(options.registrationInput())
             val response = codec.registrationResponse(options, context, output)
+            val localSave = selectedLocalDocuments?.prepare(activeVaultId())
             operation.commitRegistration()
+            localSave?.complete(VaultSaveResult(VaultSaveStatus.SAVED))
             return response
         } catch (error: Throwable) {
             primaryFailure = error
@@ -86,6 +92,10 @@ class PasskeyCeremony(
         require(value.size == OPERATION_ID_BYTES) { "passkey operation id must be 16 bytes" }
     }
 
+    private fun activeVaultId(): String =
+        session.sessionState().activeVaultId
+            ?: error("no unlocked vault is active")
+
     private class SecureOperationIdGenerator : () -> ByteArray {
         private val random = SecureRandom()
         override fun invoke(): ByteArray = ByteArray(OPERATION_ID_BYTES).also(random::nextBytes)
@@ -109,20 +119,20 @@ class ActivePasskeyAssertion internal constructor(
     private val finished = AtomicBoolean(false)
 
     fun complete(selectedCredentialId: ByteArray?): String {
-        val selected = when {
-            selectedCredentialId != null -> selectedCredentialId.copyOf()
-            candidates.size == 1 -> candidates.single().credentialId.copyOf()
-            else -> throw IllegalArgumentException("a passkey credential selection is required")
-        }
-        require(candidates.any { it.credentialId.contentEquals(selected) }) {
-            "selected passkey credential is not a candidate"
-        }
         check(completionStarted.compareAndSet(false, true)) {
             "passkey assertion operation is already completing or closed"
         }
         check(!finished.get()) { "passkey assertion operation is already closed" }
         var primaryFailure: Throwable? = null
         try {
+            val selected = when {
+                selectedCredentialId != null -> selectedCredentialId.copyOf()
+                candidates.size == 1 -> candidates.single().credentialId.copyOf()
+                else -> throw IllegalArgumentException("a passkey credential selection is required")
+            }
+            require(candidates.any { it.credentialId.contentEquals(selected) }) {
+                "selected passkey credential is not a candidate"
+            }
             verificationLease.refreshIfStale("Verify passkey assertion")
             val prepared = codec.prepareAssertion(options, context, selected)
             val output = operation.assertPasskey(prepared.input)

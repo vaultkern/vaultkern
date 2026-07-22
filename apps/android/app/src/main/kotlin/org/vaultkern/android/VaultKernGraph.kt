@@ -102,6 +102,7 @@ class VaultKernGraph(context: Context) {
         session = session,
         verifier = freshCredentialVerification,
         codec = webAuthnCodec,
+        selectedLocalDocuments = localDocumentSaves,
     )
     val passkeyClientContext = PasskeyClientContextResolver(applicationContext)
     val autofillVault = AutofillVaultPort(session)

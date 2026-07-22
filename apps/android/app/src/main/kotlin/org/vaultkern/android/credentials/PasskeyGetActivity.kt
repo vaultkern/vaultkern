@@ -42,9 +42,14 @@ class PasskeyGetActivity : FragmentActivity() {
             finishWithError()
             return
         }
-        val selectedCredentialId = intent.getStringExtra(
-            VaultKernCredentialProviderService.EXTRA_CREDENTIAL_ID,
-        )?.let(::decodeCredentialId)
+        val selectedCredentialId = try {
+            intent.getStringExtra(
+                VaultKernCredentialProviderService.EXTRA_CREDENTIAL_ID,
+            )?.let(::decodeSelectedCredentialId)
+        } catch (_: IllegalArgumentException) {
+            finishWithError()
+            return
+        }
         val selectedOptionKey = intent.getStringExtra(
             VaultKernCredentialProviderService.EXTRA_OPTION_KEY,
         )
@@ -52,38 +57,45 @@ class PasskeyGetActivity : FragmentActivity() {
             .filterIsInstance<GetPublicKeyCredentialOption>()
         val graph = (application as VaultKernApplication).graph
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                val request = selectRequest(
-                    options,
-                    selectedCredentialId,
-                    selectedOptionKey,
-                    graph.webAuthnCodec,
-                )
-                val parsed = graph.webAuthnCodec.parseRequestOptions(request.requestJson)
-                val context = graph.passkeyClientContext.resolve(
-                    parsed.relyingParty,
-                    providerRequest.callingAppInfo,
-                    request.clientDataHash,
-                )
-                Triple(
-                    request,
-                    selectedCredentialId,
-                    graph.passkeyCeremony.beginAssertion(request.requestJson, context),
-                )
-            }
-            withContext(Dispatchers.Main) {
-                result.fold(
-                    onSuccess = { (_, selected, active) ->
-                        activeAssertion = active
-                        when {
-                            selected != null -> complete(selected)
-                            active.candidates.size == 1 ->
-                                complete(active.candidates.single().credentialId)
-                            else -> showCandidates(active.candidates)
-                        }
-                    },
-                    onFailure = { finishWithError() },
-                )
+            var producedAssertion: ActivePasskeyAssertion? = null
+            var claimedByActivity = false
+            try {
+                val result = runCatching {
+                    val request = selectRequest(
+                        options,
+                        selectedCredentialId,
+                        selectedOptionKey,
+                        graph.webAuthnCodec,
+                    )
+                    val parsed = graph.webAuthnCodec.parseRequestOptions(request.requestJson)
+                    val context = graph.passkeyClientContext.resolve(
+                        parsed.relyingParty,
+                        providerRequest.callingAppInfo,
+                        request.clientDataHash,
+                    )
+                    Triple(
+                        request,
+                        selectedCredentialId,
+                        graph.passkeyCeremony.beginAssertion(request.requestJson, context),
+                    ).also { producedAssertion = it.third }
+                }
+                withContext(Dispatchers.Main) {
+                    result.fold(
+                        onSuccess = { (_, selected, active) ->
+                            activeAssertion = active
+                            claimedByActivity = true
+                            when {
+                                selected != null -> complete(selected)
+                                active.candidates.size == 1 ->
+                                    complete(active.candidates.single().credentialId)
+                                else -> showCandidates(active.candidates)
+                            }
+                        },
+                        onFailure = { finishWithError() },
+                    )
+                }
+            } finally {
+                closeUnclaimedCredentialOperation(producedAssertion, claimedByActivity)
             }
         }
     }
@@ -107,9 +119,11 @@ class PasskeyGetActivity : FragmentActivity() {
         lifecycleScope.launch(Dispatchers.IO) {
             val result = runCatching { active.complete(credentialId) }
             withContext(Dispatchers.Main) {
-                activeAssertion = null
                 result.fold(
-                    onSuccess = ::finishWithResponse,
+                    onSuccess = { response ->
+                        activeAssertion = null
+                        finishWithResponse(response)
+                    },
                     onFailure = { finishWithError() },
                 )
             }
@@ -140,16 +154,7 @@ class PasskeyGetActivity : FragmentActivity() {
     }
 
     private fun closeAssertionBestEffort() {
-        val assertion = activeAssertion ?: return
-        if (runCatching { assertion.close() }.isFailure) {
-            runCatching { assertion.close() }
-        }
-    }
-
-    private fun decodeCredentialId(value: String): ByteArray = try {
-        Base64.getUrlDecoder().decode(value)
-    } catch (error: IllegalArgumentException) {
-        throw IllegalArgumentException("selected credential id is invalid", error)
+        closeUnclaimedCredentialOperation(activeAssertion, claimed = false)
     }
 
     private fun selectRequest(
@@ -171,6 +176,27 @@ class PasskeyGetActivity : FragmentActivity() {
                                 }
                         } == true)
         } ?: throw IllegalArgumentException("selected credential is not allowed by any request")
+    }
+}
+
+internal fun decodeSelectedCredentialId(value: String): ByteArray = try {
+    Base64.getUrlDecoder().decode(value)
+} catch (error: IllegalArgumentException) {
+    throw IllegalArgumentException("selected credential id is invalid", error)
+}
+
+internal fun closeUnclaimedCredentialOperation(
+    operation: AutoCloseable?,
+    claimed: Boolean,
+) {
+    if (operation == null || claimed) return
+    repeat(2) {
+        try {
+            operation.close()
+            return
+        } catch (_: Exception) {
+            // UniFFI operation close is idempotent; retry once before its Drop fallback takes over.
+        }
     }
 }
 

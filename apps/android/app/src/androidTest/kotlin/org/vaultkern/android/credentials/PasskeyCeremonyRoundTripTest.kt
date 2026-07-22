@@ -8,9 +8,14 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.json.JSONObject
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.vaultkern.android.storage.LocalDocumentAccess
+import org.vaultkern.android.storage.LocalDocumentSnapshot
+import org.vaultkern.android.storage.LocalDocumentWorkspace
+import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
 import org.vaultkern.core.OneDriveTokenAdapter
 import org.vaultkern.core.PlatformAdapterException
 import org.vaultkern.core.ResidentPlatform
@@ -79,6 +84,95 @@ class PasskeyCeremonyRoundTripTest {
 
         assertEquals(2, uvCount.get())
         root.deleteRecursively()
+    }
+
+    @Test
+    fun registrationPublishesThroughTheSelectedDocumentAuthority() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val root = File(
+            instrumentation.targetContext.noBackupFilesDir,
+            "m3-passkey-selected-document-${System.nanoTime()}",
+        )
+        val uri = "content://documents/local/passkeys.kdbx"
+        val sourceBytes = instrumentation.context.assets
+            .open("keepassxc-2.7.6-kdbx4.1.kdbx")
+            .use { it.readBytes() }
+        val documents = RoundTripLocalDocuments(uri, sourceBytes)
+        val workspace = LocalDocumentWorkspace(root.resolve("documents"), documents)
+        val selected = workspace.select(uri, "passkeys.kdbx")
+        val privateVault = File(selected.privatePath)
+        val beforeRegistration = documents.bytes()
+
+        try {
+            newSession(root.resolve("register")).use { session ->
+                unlock(session, privateVault)
+                PasskeyCeremony(
+                    session = session,
+                    verifier = FreshUserVerification { },
+                    selectedLocalDocuments = SelectedLocalDocumentSaveCoordinator(workspace),
+                ).register(
+                    CREATION_JSON,
+                    PasskeyClientContext(
+                        origin = "android:apk-key-hash:instrumentation",
+                        packageName = "org.vaultkern.android.test",
+                        suppliedClientDataHash = null,
+                    ),
+                )
+            }
+
+            val published = documents.bytes()
+            try {
+                assertTrue(!beforeRegistration.contentEquals(published))
+                assertArrayEquals(privateVault.readBytes(), published)
+            } finally {
+                published.fill(0)
+            }
+        } finally {
+            beforeRegistration.fill(0)
+            sourceBytes.fill(0)
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun invalidCandidateEndsTheAssertionOperation() {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val root = File(
+            instrumentation.targetContext.noBackupFilesDir,
+            "m3-passkey-invalid-candidate-${System.nanoTime()}",
+        )
+        val vault = root.resolve("vault.kdbx")
+        root.mkdirs()
+        instrumentation.context.assets.open("keepassxc-2.7.6-kdbx4.1.kdbx").use { input ->
+            vault.outputStream().use(input::copyTo)
+        }
+        val clientContext = PasskeyClientContext(
+            origin = "android:apk-key-hash:instrumentation",
+            packageName = "org.vaultkern.android.test",
+            suppliedClientDataHash = null,
+        )
+
+        try {
+            newSession(root.resolve("session")).use { session ->
+                unlock(session, vault)
+                val ceremony = PasskeyCeremony(
+                    session = session,
+                    verifier = FreshUserVerification { },
+                )
+                val registration = JSONObject(ceremony.register(CREATION_JSON, clientContext))
+                val credentialId = Base64.getUrlDecoder().decode(registration.getString("rawId"))
+                val active = ceremony.beginAssertion(ASSERTION_JSON, clientContext)
+
+                assertThrows(IllegalArgumentException::class.java) {
+                    active.complete(byteArrayOf(0x7f))
+                }
+                assertThrows(IllegalStateException::class.java) {
+                    active.complete(credentialId)
+                }
+            }
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     private fun ceremony(
@@ -153,4 +247,32 @@ private class RoundTripOneDriveAdapter : OneDriveTokenAdapter {
         throw PlatformAdapterException.Failure("OneDrive is not configured")
     }
     override fun deleteRefreshToken() = Unit
+}
+
+private class RoundTripLocalDocuments(
+    private val uri: String,
+    sourceBytes: ByteArray,
+) : LocalDocumentAccess {
+    private var stored = sourceBytes.copyOf()
+    private var modifiedAt = 1L
+
+    override fun read(uri: String): LocalDocumentSnapshot {
+        require(uri == this.uri)
+        return LocalDocumentSnapshot(stored.copyOf(), modifiedAt)
+    }
+
+    override fun replace(uri: String, bytes: ByteArray) {
+        require(uri == this.uri)
+        stored.fill(0)
+        stored = bytes.copyOf()
+        modifiedAt += 1
+    }
+
+    override fun createConflictCopy(
+        sourceUri: String,
+        displayName: String,
+        bytes: ByteArray,
+    ): String? = null
+
+    fun bytes(): ByteArray = stored.copyOf()
 }
