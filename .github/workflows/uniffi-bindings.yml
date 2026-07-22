@@ -1,0 +1,103 @@
+name: UniFFI Bindings
+
+on:
+  pull_request:
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/vaultkern-uniffi/**"
+      - "tools/vaultkern-runtime/**"
+      - ".github/workflows/uniffi-bindings.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/vaultkern-uniffi/**"
+      - "tools/vaultkern-runtime/**"
+      - ".github/workflows/uniffi-bindings.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  rust-contract:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test facade contract
+        env:
+          XDG_STATE_HOME: ${{ runner.temp }}/vaultkern-uniffi-rust-state
+        run: cargo test --locked -p vaultkern-uniffi -- --test-threads=1
+
+  kotlin-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.10.2"
+      - name: Build Android arm64 native library
+        shell: bash
+        run: |
+          set -euo pipefail
+          toolchain="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          linker="$toolchain/aarch64-linux-android34-clang"
+          CC_aarch64_linux_android="$linker" \
+          AR_aarch64_linux_android="$toolchain/llvm-ar" \
+          CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER="$linker" \
+            cargo build --locked --release -p vaultkern-uniffi \
+              --target aarch64-linux-android
+      - name: Build native library
+        run: cargo build --locked --release -p vaultkern-uniffi
+      - name: Compile bindings and run Kotlin smoke
+        run: gradle --no-daemon -p crates/vaultkern-uniffi/tests/kotlin run
+
+  swift-smoke:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build native library
+        run: cargo build --locked --release -p vaultkern-uniffi
+      - name: Compile bindings and run Swift smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          bindings="$GITHUB_WORKSPACE/crates/vaultkern-uniffi/bindings/swift"
+          output="$RUNNER_TEMP/vaultkern-swift-smoke"
+          native="$GITHUB_WORKSPACE/target/release"
+          fixture="$GITHUB_WORKSPACE/crates/vaultkern-kdbx/tests/fixtures/keepassxc-2.7.6-kdbx4.1.kdbx"
+          mkdir -p "$output"
+
+          swiftc -emit-library -emit-module -module-name VaultKernCore \
+            -Xcc "-fmodule-map-file=$bindings/VaultKernCoreFFI.modulemap" \
+            -Xcc "-I$bindings" \
+            -L "$native" -lvaultkern_uniffi \
+            "$bindings/VaultKernCore.swift" \
+            -emit-module-path "$output/VaultKernCore.swiftmodule" \
+            -o "$output/libVaultKernCore.dylib"
+
+          swiftc -I "$output" \
+            -Xcc "-fmodule-map-file=$bindings/VaultKernCoreFFI.modulemap" \
+            -Xcc "-I$bindings" \
+            -L "$output" -lVaultKernCore \
+            -L "$native" -lvaultkern_uniffi \
+            "$GITHUB_WORKSPACE/crates/vaultkern-uniffi/tests/swift/VaultKernSmoke.swift" \
+            -o "$output/VaultKernSmoke"
+
+          XDG_STATE_HOME="$output/state" \
+          DYLD_LIBRARY_PATH="$output:$native" \
+            "$output/VaultKernSmoke" "$fixture" vaultkern-external-fixture

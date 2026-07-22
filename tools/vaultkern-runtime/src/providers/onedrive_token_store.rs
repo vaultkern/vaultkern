@@ -27,7 +27,7 @@ const TOKEN_FILE_NAME: &str = "onedrive-refresh-token.dpapi";
 const MAX_PROTECTED_REFRESH_TOKEN_BYTES: usize = 64 * 1024;
 const TOKEN_STORE_LOCK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
-pub(crate) trait OneDriveRefreshTokenStore {
+pub(crate) trait OneDriveRefreshTokenStore: Send {
     fn load(&self) -> Result<Option<Zeroizing<String>>>;
     fn store(&self, token: &str) -> Result<()>;
     #[allow(dead_code)]

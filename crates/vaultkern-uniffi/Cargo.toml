@@ -1,0 +1,27 @@
+[package]
+name = "vaultkern-uniffi"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[features]
+bindgen-cli = ["uniffi/cli"]
+
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+anyhow = "1.0"
+thiserror.workspace = true
+uniffi = "=0.31.0"
+vaultkern-runtime = { path = "../../tools/vaultkern-runtime" }
+vaultkern-runtime-protocol = { path = "../vaultkern-runtime-protocol" }
+zeroize.workspace = true
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen-cli"]

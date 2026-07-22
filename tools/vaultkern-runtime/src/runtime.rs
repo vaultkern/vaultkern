@@ -290,7 +290,7 @@ pub struct Runtime {
     platform_passkey_operations: BTreeMap<Vec<u8>, PlatformPasskeyOperationLease>,
     pending_platform_relock: Option<(String, u64)>,
     passkey_ceremonies: BTreeMap<String, PasskeyCeremonyLedgerEntry>,
-    passkey_credential_id_generator: Box<dyn FnMut() -> String>,
+    passkey_credential_id_generator: Box<dyn FnMut() -> String + Send>,
     fixed_unix_time: Option<u64>,
     fixed_unix_time_ms: Option<u64>,
     #[cfg(test)]
@@ -446,6 +446,26 @@ impl Runtime {
             default_secure_storage_provider(),
             true,
         )
+    }
+
+    /// Creates the resident runtime with platform-owned biometric and secure-storage adapters.
+    ///
+    /// The adapters stay behind the same runtime traits used by the Windows slice; this
+    /// constructor only supplies them for hosts that reach the core through UniFFI.
+    pub fn new_with_platform_adapters(
+        biometric: Box<dyn BiometricProvider>,
+        secure_storage: Box<dyn SecureStorageProvider>,
+    ) -> Self {
+        let mut runtime = Self::new_with_state(
+            VaultReferenceStore::new_default(),
+            OneDriveVaultSourceProvider::new_from_env(),
+            RemoteVaultCache::new_default(),
+            SyncedBaseStore::new_default(),
+            secure_storage,
+            true,
+        );
+        runtime.biometric = biometric;
+        runtime
     }
 
     pub fn new_for_browser_origin(origin: &str) -> Self {
@@ -10976,6 +10996,10 @@ mod tests {
     use crate::providers::durable_file::{DurableFaultInjector, DurableFaultPoint};
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
     use vaultkern_core::CompositeKey;
     use vaultkern_runtime_protocol::{
         AutofillCacheStateDto, AutofillPersistDispositionDto, AutofillPersistDurabilityDto,
@@ -12248,16 +12272,13 @@ mod tests {
     }
 
     struct EarlyAuthorizingSecureStorageProvider {
-        authorizations: std::rc::Rc<std::cell::Cell<usize>>,
-        stores: std::rc::Rc<std::cell::Cell<usize>>,
+        authorizations: Arc<AtomicUsize>,
+        stores: Arc<AtomicUsize>,
         values: RefCell<BTreeMap<String, Vec<u8>>>,
     }
 
     impl EarlyAuthorizingSecureStorageProvider {
-        fn new(
-            authorizations: std::rc::Rc<std::cell::Cell<usize>>,
-            stores: std::rc::Rc<std::cell::Cell<usize>>,
-        ) -> Self {
+        fn new(authorizations: Arc<AtomicUsize>, stores: Arc<AtomicUsize>) -> Self {
             Self {
                 authorizations,
                 stores,
@@ -12268,13 +12289,12 @@ mod tests {
 
     impl SecureStorageProvider for EarlyAuthorizingSecureStorageProvider {
         fn authorize_store_user_presence(&self) -> Result<()> {
-            self.authorizations
-                .set(self.authorizations.get().saturating_add(1));
+            self.authorizations.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
         fn store(&self, key: &str, value: &[u8]) -> Result<()> {
-            self.stores.set(self.stores.get().saturating_add(1));
+            self.stores.fetch_add(1, Ordering::SeqCst);
             self.values
                 .borrow_mut()
                 .insert(key.to_owned(), value.to_owned());
@@ -12304,12 +12324,12 @@ mod tests {
     }
 
     struct ParentWindowRecordingSecureStorageProvider {
-        parent_window: std::rc::Rc<std::cell::Cell<Option<usize>>>,
+        parent_window: Arc<Mutex<Option<usize>>>,
     }
 
     impl SecureStorageProvider for ParentWindowRecordingSecureStorageProvider {
         fn set_parent_window_handle(&mut self, parent_window: Option<usize>) {
-            self.parent_window.set(parent_window);
+            *self.parent_window.lock().expect("parent window lock") = parent_window;
         }
 
         fn store(&self, _key: &str, _value: &[u8]) -> Result<()> {
@@ -12355,7 +12375,7 @@ mod tests {
 
     #[derive(Default)]
     struct CountingBiometricProvider {
-        authorizations: std::rc::Rc<RefCell<Vec<String>>>,
+        authorizations: Arc<Mutex<Vec<String>>>,
     }
 
     impl BiometricProvider for CountingBiometricProvider {
@@ -12364,13 +12384,16 @@ mod tests {
         }
 
         fn authorize(&self, reason: &str) -> Result<()> {
-            self.authorizations.borrow_mut().push(reason.to_owned());
+            self.authorizations
+                .lock()
+                .expect("authorization lock")
+                .push(reason.to_owned());
             Ok(())
         }
     }
 
     struct RecordingBiometricProvider {
-        authorized_at_epoch_ms: std::rc::Rc<RefCell<Option<u64>>>,
+        authorized_at_epoch_ms: Arc<Mutex<Option<u64>>>,
     }
 
     impl BiometricProvider for RecordingBiometricProvider {
@@ -12380,7 +12403,10 @@ mod tests {
 
         fn authorize(&self, _reason: &str) -> Result<()> {
             std::thread::sleep(std::time::Duration::from_millis(25));
-            *self.authorized_at_epoch_ms.borrow_mut() = Some(current_unix_time_ms());
+            *self
+                .authorized_at_epoch_ms
+                .lock()
+                .expect("authorization timestamp lock") = Some(current_unix_time_ms());
             Ok(())
         }
     }
@@ -16829,7 +16855,7 @@ mod tests {
     #[test]
     fn pending_autofill_created_after_remote_kdf_rotation_remains_retryable() {
         let mut runtime = demo_onedrive_runtime(1_700_000_052);
-        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
         runtime.biometric = Box::new(CountingBiometricProvider {
             authorizations: authorizations.clone(),
         });
@@ -16916,7 +16942,7 @@ mod tests {
         runtime
             .replace_session_transformed_key(&vault_id, stale_session_key.clone())
             .unwrap();
-        authorizations.borrow_mut().clear();
+        authorizations.lock().expect("authorization lock").clear();
         let adopted = runtime.handle(clone_test_command(&command)).unwrap();
         assert!(matches!(
             adopted,
@@ -16929,7 +16955,7 @@ mod tests {
                 ..
             })
         ));
-        assert_eq!(authorizations.borrow().len(), 1);
+        assert_eq!(authorizations.lock().expect("authorization lock").len(), 1);
 
         runtime.allow_unlock_kdf = false;
         let replayed = runtime.handle(clone_test_command(&command)).unwrap();
@@ -16951,7 +16977,7 @@ mod tests {
         runtime
             .replace_session_transformed_key(&vault_id, stale_session_key)
             .unwrap();
-        authorizations.borrow_mut().clear();
+        authorizations.lock().expect("authorization lock").clear();
 
         let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
 
@@ -16961,7 +16987,7 @@ mod tests {
             status.last_error
         );
         assert_eq!(status.last_error, None);
-        assert_eq!(authorizations.borrow().len(), 1);
+        assert_eq!(authorizations.lock().expect("authorization lock").len(), 1);
         assert_eq!(
             entry_fields(&runtime.get_entry_detail(&vault_id, &target.id).unwrap()),
             desired_fields
@@ -19747,7 +19773,7 @@ mod tests {
 
     #[test]
     fn passkey_quick_unlock_user_verification_records_completion_time() {
-        let authorized_at_epoch_ms = std::rc::Rc::new(RefCell::new(None));
+        let authorized_at_epoch_ms = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::for_tests_with_quick_unlock();
         runtime.biometric = Box::new(RecordingBiometricProvider {
             authorized_at_epoch_ms: authorized_at_epoch_ms.clone(),
@@ -19756,7 +19782,9 @@ mod tests {
         runtime
             .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
             .unwrap();
-        *authorized_at_epoch_ms.borrow_mut() = None;
+        *authorized_at_epoch_ms
+            .lock()
+            .expect("authorization timestamp lock") = None;
         let registered_at_epoch_ms = runtime.current_unix_time_ms();
 
         runtime
@@ -19809,7 +19837,8 @@ mod tests {
             panic!("expected passkey UV proof, got {verified:?}");
         };
         let authorized_at = authorized_at_epoch_ms
-            .borrow()
+            .lock()
+            .expect("authorization timestamp lock")
             .expect("quick unlock authorization timestamp");
         assert!(verified.verified_at_epoch_ms as u64 >= authorized_at);
     }
@@ -19983,7 +20012,7 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
-        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.biometric = Box::new(CountingBiometricProvider {
             authorizations: authorizations.clone(),
@@ -20001,12 +20030,17 @@ mod tests {
 
         runtime.unlock_current_vault_with_quick_unlock().unwrap();
 
-        assert!(authorizations.borrow().is_empty());
+        assert!(
+            authorizations
+                .lock()
+                .expect("authorization lock")
+                .is_empty()
+        );
     }
 
     #[test]
     fn quick_unlock_enrollment_uses_external_authorization_when_only_load_enforces_presence() {
-        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.biometric = Box::new(CountingBiometricProvider {
             authorizations: authorizations.clone(),
@@ -20019,15 +20053,18 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            authorizations.borrow().as_slice(),
+            authorizations
+                .lock()
+                .expect("authorization lock")
+                .as_slice(),
             ["Enable quick unlock for this vault".to_owned()]
         );
     }
 
     #[test]
     fn quick_unlock_platform_authorization_precedes_credential_validation_and_blob_write() {
-        let authorizations = std::rc::Rc::new(std::cell::Cell::new(0));
-        let stores = std::rc::Rc::new(std::cell::Cell::new(0));
+        let authorizations = Arc::new(AtomicUsize::new(0));
+        let stores = Arc::new(AtomicUsize::new(0));
         let mut runtime = Runtime::for_tests();
         runtime.biometric = Box::new(CountingBiometricProvider::default());
         runtime.secure_storage = Box::new(EarlyAuthorizingSecureStorageProvider::new(
@@ -20040,23 +20077,26 @@ mod tests {
             .enroll_quick_unlock_for_current_vault(Some("wrong-password"), None)
             .expect_err("wrong credentials must not be enrolled");
 
-        assert_eq!(authorizations.get(), 1);
-        assert_eq!(stores.get(), 0);
+        assert_eq!(authorizations.load(Ordering::SeqCst), 1);
+        assert_eq!(stores.load(Ordering::SeqCst), 0);
     }
 
     #[test]
     fn native_parent_window_handle_is_forwarded_to_secure_storage() {
-        let parent_window = std::rc::Rc::new(std::cell::Cell::new(None));
+        let parent_window = Arc::new(Mutex::new(None));
         let mut runtime = Runtime::for_tests();
         runtime.secure_storage = Box::new(ParentWindowRecordingSecureStorageProvider {
             parent_window: parent_window.clone(),
         });
 
         runtime.set_parent_window_handle(Some(0x1234));
-        assert_eq!(parent_window.get(), Some(0x1234));
+        assert_eq!(
+            *parent_window.lock().expect("parent window lock"),
+            Some(0x1234)
+        );
 
         runtime.set_parent_window_handle(None);
-        assert_eq!(parent_window.get(), None);
+        assert_eq!(*parent_window.lock().expect("parent window lock"), None);
     }
 
     #[test]
@@ -20073,7 +20113,7 @@ mod tests {
         let path = dir.path().join("personal.kdbx");
         std::fs::write(&path, bytes).unwrap();
 
-        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let authorizations = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::for_tests_at(100);
         runtime.biometric = Box::new(CountingBiometricProvider {
             authorizations: authorizations.clone(),
@@ -20143,7 +20183,10 @@ mod tests {
         };
         assert!(verified.verified);
         assert_eq!(
-            authorizations.borrow().as_slice(),
+            authorizations
+                .lock()
+                .expect("authorization lock")
+                .as_slice(),
             [
                 "Enable quick unlock for this vault".to_owned(),
                 "Unlock this vault".to_owned(),

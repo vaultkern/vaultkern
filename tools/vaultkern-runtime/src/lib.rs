@@ -17,5 +17,7 @@ pub use passkey::{
     PlatformPasskeyAssertionInput, PlatformPasskeyAssertionOutput, PlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
 };
+pub use providers::biometric::BiometricProvider;
+pub use providers::secure_storage::SecureStorageProvider;
 pub use runtime::{QuickUnlockReconciliationCredentials, Runtime};
 pub use state_paths::is_supported_browser_origin;

@@ -558,7 +558,7 @@ fn verify_or_recreate_hello_key<T>(
 }
 
 #[allow(dead_code)]
-pub trait SecureStorageProvider {
+pub trait SecureStorageProvider: Send {
     fn set_parent_window_handle(&mut self, _parent_window: Option<usize>) {}
 
     fn authorize_store_user_presence(&self) -> Result<()> {
