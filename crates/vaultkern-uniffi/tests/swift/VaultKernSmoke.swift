@@ -80,10 +80,19 @@ guard CommandLine.arguments.count == 3 else {
 
 let fixture = URL(fileURLWithPath: CommandLine.arguments[1])
 let password = VaultKernSensitiveString(CommandLine.arguments[2])
-let root = FileManager.default.temporaryDirectory
-    .resolvingSymlinksInPath()
+let applicationSupport = try FileManager.default.url(
+    for: .applicationSupportDirectory,
+    in: .userDomainMask,
+    appropriateFor: nil,
+    create: true
+)
+let root = applicationSupport
     .appendingPathComponent("vaultkern-swift-smoke-\(UUID().uuidString)", isDirectory: true)
-try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+try FileManager.default.createDirectory(
+    at: root,
+    withIntermediateDirectories: false,
+    attributes: [.posixPermissions: 0o700]
+)
 let vault = root.appendingPathComponent("smoke.kdbx")
 try FileManager.default.copyItem(at: fixture, to: vault)
 defer {
