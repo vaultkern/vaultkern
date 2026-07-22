@@ -51,6 +51,22 @@ fn protocol_roundtrips_the_version_and_capability_handshake() {
 }
 
 #[test]
+fn protocol_envelope_preserves_a_logical_operation_id() {
+    let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
+        "version": 1,
+        "operationId": "client-a-save-1",
+        "command": {
+            "type": "save_vault",
+            "vault_id": "vault-1"
+        }
+    }))
+    .unwrap();
+
+    let encoded = serde_json::to_value(envelope).unwrap();
+    assert_eq!(encoded["operationId"], "client-a-save-1");
+}
+
+#[test]
 fn protocol_envelope_serializes_open_local_vault_command() {
     let envelope = ProtocolEnvelope::new(RuntimeCommand::OpenLocalVault {
         path: "/tmp/demo.kdbx".into(),

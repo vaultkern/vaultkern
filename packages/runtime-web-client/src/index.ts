@@ -390,6 +390,8 @@ class RuntimeResponseError extends Error {
 }
 
 export class RuntimeClient {
+  private readonly pendingSaveOperationIds = new Map<string, string[]>();
+
   constructor(private readonly transport: RuntimeTransport) {}
 
   async getSessionState(): Promise<SessionState> {
@@ -588,7 +590,7 @@ export class RuntimeClient {
     vaultId: string,
     input: EntryCreateInput
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "create_entry",
       vault_id: vaultId,
       parent_group_id: input.parentGroupId,
@@ -606,7 +608,7 @@ export class RuntimeClient {
     entryId: string,
     input: EntryDraft
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "update_entry_fields",
       vault_id: vaultId,
       entry_id: entryId,
@@ -626,7 +628,7 @@ export class RuntimeClient {
     expectedFields: EntryDraft,
     desiredFields: EntryDraft
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "compare_and_update_entry_fields",
       vault_id: vaultId,
       entry_id: entryId,
@@ -659,7 +661,7 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "clear_entry_totp",
       vault_id: vaultId,
       entry_id: entryId
@@ -671,7 +673,7 @@ export class RuntimeClient {
     entryId: string,
     passkey: EntryPasskeyUpdate
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "set_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId,
@@ -683,7 +685,7 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "clear_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId
@@ -691,7 +693,7 @@ export class RuntimeClient {
   }
 
   async deleteEntry(vaultId: string, entryId: string): Promise<void> {
-    await this.sendCommand<{ type: "saved" }>({
+    await this.sendMutationCommand<{ type: "saved" }>(vaultId, {
       type: "delete_entry",
       vault_id: vaultId,
       entry_id: entryId
@@ -699,10 +701,15 @@ export class RuntimeClient {
   }
 
   async saveVault(vaultId: string): Promise<SaveVaultResult> {
+    const pending = this.pendingSaveOperationIds.get(vaultId);
+    const operationId = pending?.shift();
+    if (pending?.length === 0) {
+      this.pendingSaveOperationIds.delete(vaultId);
+    }
     return this.sendCommand<SaveVaultResult>({
       type: "save_vault",
       vault_id: vaultId
-    });
+    }, operationId);
   }
 
   async getDatabaseSettings(vaultId: string): Promise<DatabaseSettings> {
@@ -741,7 +748,7 @@ export class RuntimeClient {
     entryId: string,
     input: EntryAttachmentInput
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "add_entry_attachment",
       vault_id: vaultId,
       entry_id: entryId,
@@ -756,7 +763,7 @@ export class RuntimeClient {
     entryId: string,
     input: EntryAttachmentMetadataUpdate
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "update_entry_attachment_metadata",
       vault_id: vaultId,
       entry_id: entryId,
@@ -771,7 +778,7 @@ export class RuntimeClient {
     entryId: string,
     input: EntryAttachmentContentUpdate
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "replace_entry_attachment_content",
       vault_id: vaultId,
       entry_id: entryId,
@@ -785,7 +792,7 @@ export class RuntimeClient {
     entryId: string,
     name: string
   ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "delete_entry_attachment",
       vault_id: vaultId,
       entry_id: entryId,
@@ -845,9 +852,25 @@ export class RuntimeClient {
     return response.entryIds;
   }
 
-  private async sendCommand<T>(command: Record<string, unknown>): Promise<T> {
+  private async sendMutationCommand<T>(
+    vaultId: string,
+    command: Record<string, unknown>
+  ): Promise<T> {
+    const operationId = createLogicalOperationId();
+    const response = await this.sendCommand<T>(command, operationId);
+    const pending = this.pendingSaveOperationIds.get(vaultId) ?? [];
+    pending.push(operationId);
+    this.pendingSaveOperationIds.set(vaultId, pending);
+    return response;
+  }
+
+  private async sendCommand<T>(
+    command: Record<string, unknown>,
+    operationId?: string
+  ): Promise<T> {
     const response = await this.transport.send({
       version: 1,
+      ...(operationId ? { operationId } : {}),
       command
     });
 
@@ -857,6 +880,18 @@ export class RuntimeClient {
 
     return response as T;
   }
+}
+
+let logicalOperationSequence = 0;
+
+function createLogicalOperationId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  logicalOperationSequence += 1;
+  return `${Date.now().toString(36)}-${logicalOperationSequence.toString(36)}-${Math.random()
+    .toString(36)
+    .slice(2)}`;
 }
 
 export type { RuntimeTransport };

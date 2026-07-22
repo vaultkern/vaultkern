@@ -6,7 +6,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde::{Deserialize, Serialize};
 
 const HOST_NAME: &str = "com.vaultkern.runtime";
-const RUNTIME_DIR_NAME: &str = "vaultkern-runtime";
+const VENDOR_DIR_NAME: &str = "VaultKern";
+const BROWSER_INTEGRATION_DIR_NAME: &str = "Browser Integration";
 const RUNTIME_FILE_NAME: &str = "vaultkern-runtime.exe";
 pub const DEFAULT_EXTENSION_ID_ENV: &str = "VAULTKERN_DEFAULT_EXTENSION_ID";
 static TEMPORARY_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -83,7 +84,7 @@ pub struct BrowserSetupConfig {
     browser: BrowserKind,
     extension_id: String,
     runtime_path: PathBuf,
-    local_app_data: PathBuf,
+    install_root: PathBuf,
 }
 
 impl BrowserSetupConfig {
@@ -91,13 +92,13 @@ impl BrowserSetupConfig {
         browser: BrowserKind,
         extension_id: impl Into<String>,
         runtime_path: PathBuf,
-        local_app_data: PathBuf,
+        install_root: PathBuf,
     ) -> Self {
         Self {
             browser,
             extension_id: extension_id.into(),
             runtime_path,
-            local_app_data,
+            install_root,
         }
     }
 
@@ -118,9 +119,7 @@ impl BrowserSetupConfig {
     }
 
     pub fn manifest_path(&self) -> PathBuf {
-        self.local_app_data
-            .join(RUNTIME_DIR_NAME)
-            .join(self.browser.manifest_filename())
+        browser_integration_install_dir(&self.install_root).join(self.browser.manifest_filename())
     }
 
     pub fn extension_origin(&self) -> String {
@@ -154,6 +153,7 @@ impl BrowserSetupConfig {
             && manifest_matches_setup
             && probe.registered_runtime_exists == Some(true)
             && probe.setup_runtime_exists
+            && probe.registry_key_protected
         {
             return RegistrationStatus::Registered;
         }
@@ -188,6 +188,7 @@ pub struct BrowserRegistrationProbe {
     pub manifest_content: Option<String>,
     pub registered_runtime_exists: Option<bool>,
     pub setup_runtime_exists: bool,
+    pub registry_key_protected: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,10 +281,14 @@ pub fn render_native_host_manifest(runtime_path: &str, extension_origin: &str) -
     serde_json::to_string(&manifest).expect("native host manifest serialization is infallible")
 }
 
-pub fn runtime_install_path(local_app_data: &Path) -> PathBuf {
-    local_app_data
-        .join(RUNTIME_DIR_NAME)
-        .join(RUNTIME_FILE_NAME)
+fn browser_integration_install_dir(install_root: &Path) -> PathBuf {
+    install_root
+        .join(VENDOR_DIR_NAME)
+        .join(BROWSER_INTEGRATION_DIR_NAME)
+}
+
+pub fn runtime_install_path(install_root: &Path) -> PathBuf {
+    browser_integration_install_dir(install_root).join(RUNTIME_FILE_NAME)
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -323,12 +328,12 @@ fn browser_install_candidates_for_roots(
     candidates
 }
 
-pub fn install_runtime_payload(local_app_data: &Path, payload: &[u8]) -> Result<PathBuf, String> {
+pub fn install_runtime_payload(install_root: &Path, payload: &[u8]) -> Result<PathBuf, String> {
     if payload.is_empty() {
         return Err("embedded runtime payload is missing".into());
     }
 
-    let runtime_path = runtime_install_path(local_app_data);
+    let runtime_path = runtime_install_path(install_root);
     atomic_write_file(&runtime_path, payload).map_err(|error| error.to_string())?;
     Ok(runtime_path)
 }
@@ -494,39 +499,87 @@ fn allowed_origins_match(allowed_origins: &[String], expected_origin: Option<&st
 #[cfg(windows)]
 pub mod windows_setup {
     use std::env;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
+    use std::io;
+    use std::mem::size_of;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use std::path::{Path, PathBuf};
+    use std::ptr;
+    use std::slice;
 
+    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, EqualSid, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+        SECURITY_ATTRIBUTES,
+    };
+    use windows_sys::Win32::System::Com::CoTaskMemFree;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, RegCloseKey, RegCreateKeyExW,
+        RegFlushKey, RegGetKeySecurity, RegSetKeySecurity, RegSetValueExW,
+    };
+    use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath};
     use winreg::RegKey;
-    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::enums::{
+        HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+    };
 
     use crate::{
         BrowserDiagnosis, BrowserKind, BrowserRegistrationProbe, BrowserSetupConfig,
         RegistrationStatus, atomic_write_file, browser_install_candidates_for_roots,
-        built_in_extension_id, install_runtime_payload, runtime_install_path,
+        built_in_extension_id, install_runtime_payload, paths_match, runtime_install_path,
     };
 
     const RUNTIME_PAYLOAD: &[u8] =
         include_bytes!(concat!(env!("OUT_DIR"), "/vaultkern-runtime.exe"));
+    const REGISTRY_VIEWS: [REG_SAM_FLAGS; 2] = [KEY_WOW64_32KEY, KEY_WOW64_64KEY];
+    const PROTECTED_REGISTRATION_SDDL: &str = "O:BAD:P(A;;KA;;;SY)(A;;KA;;;BA)(A;;KR;;;BU)";
 
-    pub fn local_app_data_dir() -> Result<PathBuf, String> {
-        env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .ok_or_else(|| "LOCALAPPDATA is not set".to_string())
+    struct LocalSecurityDescriptor(PSECURITY_DESCRIPTOR);
+
+    impl Drop for LocalSecurityDescriptor {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    LocalFree(self.0.cast());
+                }
+            }
+        }
+    }
+
+    struct RegistryHandle(HKEY);
+
+    impl Drop for RegistryHandle {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    RegCloseKey(self.0);
+                }
+            }
+        }
+    }
+
+    pub fn program_files_dir() -> Result<PathBuf, String> {
+        known_folder_path(&FOLDERID_ProgramFiles, "Program Files")
     }
 
     pub fn default_config(
         browser: BrowserKind,
         extension_id: &str,
     ) -> Result<BrowserSetupConfig, String> {
-        let local_app_data = local_app_data_dir()?;
-        let runtime_path = runtime_install_path(&local_app_data);
+        let program_files = program_files_dir()?;
+        let runtime_path = runtime_install_path(&program_files);
         let extension_id = built_in_extension_id().unwrap_or(extension_id);
         Ok(BrowserSetupConfig::new(
             browser,
             extension_id,
             runtime_path,
-            local_app_data,
+            program_files,
         ))
     }
 
@@ -536,7 +589,8 @@ pub mod windows_setup {
     ) -> Result<BrowserDiagnosis, String> {
         let config = default_config(browser, extension_id)?;
         let browser_path = detect_browser_path(browser);
-        let registry_manifest_path = read_registry_manifest_path(browser)?;
+        let (registry_manifest_path, registry_key_protected) =
+            read_registry_manifest_path(browser)?;
         let manifest_content = registry_manifest_path
             .as_deref()
             .and_then(|path| fs::read_to_string(path).ok());
@@ -552,6 +606,7 @@ pub mod windows_setup {
             manifest_content,
             registered_runtime_exists,
             setup_runtime_exists,
+            registry_key_protected,
         });
         let detail = detail_for_status(status);
 
@@ -587,16 +642,17 @@ pub mod windows_setup {
     pub fn unregister_browser(browser: BrowserKind) -> Result<(), String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let key_path = registry_subkey(browser);
-        match hkcu.delete_subkey_all(key_path) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error.to_string()),
-        }?;
+        for view in REGISTRY_VIEWS {
+            match hkcu.delete_subkey_with_flags(key_path, view) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.to_string()),
+            }
+        }
 
-        if let Ok(local_app_data) = local_app_data_dir() {
+        if let Ok(program_files) = program_files_dir() {
             let manifest_path =
-                BrowserSetupConfig::new(browser, "", PathBuf::new(), local_app_data)
-                    .manifest_path();
+                BrowserSetupConfig::new(browser, "", PathBuf::new(), program_files).manifest_path();
             match fs::remove_file(&manifest_path) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -612,8 +668,8 @@ pub mod windows_setup {
     }
 
     fn install_embedded_runtime(config: &BrowserSetupConfig) -> Result<PathBuf, String> {
-        let local_app_data = local_app_data_dir()?;
-        let runtime_path = install_runtime_payload(&local_app_data, RUNTIME_PAYLOAD)?;
+        let program_files = program_files_dir()?;
+        let runtime_path = install_runtime_payload(&program_files, RUNTIME_PAYLOAD)?;
         if runtime_path != config.runtime_path() {
             return Err(format!(
                 "runtime install path mismatch: {}",
@@ -642,13 +698,38 @@ pub mod windows_setup {
         )
     }
 
-    fn read_registry_manifest_path(browser: BrowserKind) -> Result<Option<PathBuf>, String> {
+    fn read_registry_manifest_path(
+        browser: BrowserKind,
+    ) -> Result<(Option<PathBuf>, bool), String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let Ok(key) = hkcu.open_subkey(registry_subkey(browser)) else {
-            return Ok(None);
+        let mut registrations = Vec::new();
+        for view in REGISTRY_VIEWS {
+            let key = match hkcu.open_subkey_with_flags(registry_subkey(browser), KEY_READ | view) {
+                Ok(key) => key,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let value: String = match key.get_value("") {
+                Ok(value) => value,
+                Err(_) => {
+                    registrations.push((PathBuf::new(), false));
+                    continue;
+                }
+            };
+            registrations.push((
+                PathBuf::from(value),
+                registration_key_has_expected_acl(&key)?,
+            ));
+        }
+
+        let Some((first_path, _)) = registrations.first() else {
+            return Ok((None, false));
         };
-        let value: String = key.get_value("").map_err(|error| error.to_string())?;
-        Ok(Some(PathBuf::from(value)))
+        let both_views_match = registrations.len() == REGISTRY_VIEWS.len()
+            && registrations
+                .iter()
+                .all(|(path, protected)| paths_match(path, first_path) && *protected);
+        Ok((Some(first_path.clone()), both_views_match))
     }
 
     fn write_registry_manifest_path(
@@ -656,11 +737,210 @@ pub mod windows_setup {
         manifest_path: &Path,
     ) -> Result<(), String> {
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let (key, _) = hkcu
-            .create_subkey(registry_subkey(browser))
-            .map_err(|error| error.to_string())?;
-        key.set_value("", &manifest_path.display().to_string())
-            .map_err(|error| error.to_string())
+        let value = manifest_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        for view in REGISTRY_VIEWS {
+            let key = create_protected_registration_key(
+                hkcu.raw_handle(),
+                registry_subkey(browser),
+                view,
+            )?;
+            let result = unsafe {
+                RegSetValueExW(
+                    key.0,
+                    ptr::null(),
+                    0,
+                    REG_SZ,
+                    value.as_ptr().cast(),
+                    (value.len() * size_of::<u16>()) as u32,
+                )
+            };
+            win32_result(result)?;
+            win32_result(unsafe { RegFlushKey(key.0) })?;
+        }
+        Ok(())
+    }
+
+    fn create_protected_registration_key(
+        root: HKEY,
+        path: &str,
+        view: REG_SAM_FLAGS,
+    ) -> Result<RegistryHandle, String> {
+        let descriptor = protected_registration_descriptor()?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let path = OsStr::new(path)
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut key = ptr::null_mut();
+        let mut disposition = 0;
+        let result = unsafe {
+            RegCreateKeyExW(
+                root,
+                path.as_ptr(),
+                0,
+                ptr::null(),
+                REG_OPTION_NON_VOLATILE,
+                KEY_ALL_ACCESS | view,
+                &attributes,
+                &mut key,
+                &mut disposition,
+            )
+        };
+        win32_result(result)?;
+        let key = RegistryHandle(key);
+        win32_result(unsafe {
+            RegSetKeySecurity(
+                key.0,
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor.0,
+            )
+        })?;
+        Ok(key)
+    }
+
+    fn protected_registration_descriptor() -> Result<LocalSecurityDescriptor, String> {
+        let sddl = OsStr::new(PROTECTED_REGISTRATION_SDDL)
+            .encode_wide()
+            .chain(Some(0))
+            .collect::<Vec<_>>();
+        let mut descriptor = ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        Ok(LocalSecurityDescriptor(descriptor))
+    }
+
+    fn known_folder_path(
+        folder_id: &windows_sys::core::GUID,
+        label: &str,
+    ) -> Result<PathBuf, String> {
+        let mut raw_path = ptr::null_mut();
+        let status = unsafe { SHGetKnownFolderPath(folder_id, 0, ptr::null_mut(), &mut raw_path) };
+        if status < 0 {
+            return Err(format!(
+                "SHGetKnownFolderPath({label}) failed: {:#010x}",
+                status as u32
+            ));
+        }
+        if raw_path.is_null() {
+            return Err(format!("SHGetKnownFolderPath({label}) returned no path"));
+        }
+
+        let length = unsafe {
+            let mut length = 0;
+            while *raw_path.add(length) != 0 {
+                length += 1;
+            }
+            length
+        };
+        let path = PathBuf::from(OsString::from_wide(unsafe {
+            slice::from_raw_parts(raw_path, length)
+        }));
+        unsafe {
+            CoTaskMemFree(raw_path.cast());
+        }
+        Ok(path)
+    }
+
+    fn registration_key_has_expected_acl(key: &RegKey) -> Result<bool, String> {
+        let mut descriptor_size = 0;
+        let first = unsafe {
+            RegGetKeySecurity(
+                key.raw_handle(),
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                &mut descriptor_size,
+            )
+        };
+        if first != ERROR_INSUFFICIENT_BUFFER {
+            return win32_result(first).map(|()| false);
+        }
+        let word_count = (descriptor_size as usize).div_ceil(size_of::<usize>());
+        let mut storage = vec![0usize; word_count];
+        let actual = storage.as_mut_ptr().cast();
+        win32_result(unsafe {
+            RegGetKeySecurity(
+                key.raw_handle(),
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                actual,
+                &mut descriptor_size,
+            )
+        })?;
+
+        let mut control = 0;
+        let mut revision = 0;
+        if unsafe { GetSecurityDescriptorControl(actual, &mut control, &mut revision) } == 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        if control & SE_DACL_PROTECTED == 0 {
+            return Ok(false);
+        }
+
+        let expected = protected_registration_descriptor()?;
+        Ok(security_descriptor_owners_match(actual, expected.0)?
+            && dacl_bytes(actual)? == dacl_bytes(expected.0)?)
+    }
+
+    fn security_descriptor_owners_match(
+        actual: PSECURITY_DESCRIPTOR,
+        expected: PSECURITY_DESCRIPTOR,
+    ) -> Result<bool, String> {
+        let mut actual_owner: PSID = ptr::null_mut();
+        let mut expected_owner: PSID = ptr::null_mut();
+        let mut defaulted = 0;
+        if unsafe { GetSecurityDescriptorOwner(actual, &mut actual_owner, &mut defaulted) } == 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        if unsafe { GetSecurityDescriptorOwner(expected, &mut expected_owner, &mut defaulted) } == 0
+        {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        if actual_owner.is_null() || expected_owner.is_null() {
+            return Ok(false);
+        }
+        Ok(unsafe { EqualSid(actual_owner, expected_owner) } != 0)
+    }
+
+    fn dacl_bytes(descriptor: PSECURITY_DESCRIPTOR) -> Result<Vec<u8>, String> {
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl: *mut ACL = ptr::null_mut();
+        if unsafe { GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) }
+            == 0
+        {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        if present == 0 || dacl.is_null() {
+            return Ok(Vec::new());
+        }
+        let size = unsafe { (*dacl).AclSize as usize };
+        Ok(unsafe { slice::from_raw_parts(dacl.cast(), size) }.to_vec())
+    }
+
+    fn win32_result(result: u32) -> Result<(), String> {
+        if result == ERROR_SUCCESS {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(result as i32).to_string())
+        }
     }
 
     fn registry_subkey(browser: BrowserKind) -> &'static str {
@@ -745,7 +1025,7 @@ mod tests {
             BrowserKind::Chrome,
             "kblgblkjghklighdgmejjfondchkjcgf",
             PathBuf::from(r"C:\VaultKern\vaultkern-runtime.exe"),
-            PathBuf::from("/home/alice/AppData/Local"),
+            PathBuf::from("/Program Files"),
         );
 
         assert_eq!(
@@ -755,7 +1035,7 @@ mod tests {
         assert_eq!(
             config.manifest_path(),
             PathBuf::from(
-                "/home/alice/AppData/Local/vaultkern-runtime/com.vaultkern.runtime.chrome.json"
+                "/Program Files/VaultKern/Browser Integration/com.vaultkern.runtime.chrome.json"
             )
         );
         assert_eq!(
@@ -770,7 +1050,7 @@ mod tests {
             BrowserKind::Edge,
             "edgeextensionid",
             PathBuf::from(r"C:\VaultKern\vaultkern-runtime.exe"),
-            PathBuf::from("/home/alice/AppData/Local"),
+            PathBuf::from("/Program Files"),
         );
 
         assert_eq!(
@@ -780,7 +1060,7 @@ mod tests {
         assert_eq!(
             config.manifest_path(),
             PathBuf::from(
-                "/home/alice/AppData/Local/vaultkern-runtime/com.vaultkern.runtime.edge.json"
+                "/Program Files/VaultKern/Browser Integration/com.vaultkern.runtime.edge.json"
             )
         );
     }
@@ -799,11 +1079,42 @@ mod tests {
     }
 
     #[test]
-    fn runtime_installs_under_local_app_data_payload_directory() {
+    fn runtime_installs_under_the_machine_protected_payload_directory() {
         assert_eq!(
-            runtime_install_path(Path::new("/home/alice/AppData/Local")),
-            PathBuf::from("/home/alice/AppData/Local/vaultkern-runtime/vaultkern-runtime.exe")
+            runtime_install_path(Path::new("/Program Files")),
+            PathBuf::from("/Program Files/VaultKern/Browser Integration/vaultkern-runtime.exe")
         );
+    }
+
+    #[test]
+    fn production_runtime_and_manifests_share_a_machine_protected_install_directory() {
+        let program_files = Path::new("/Program Files");
+        let runtime_path = runtime_install_path(program_files);
+        let config = BrowserSetupConfig::new(
+            BrowserKind::Chrome,
+            "kblgblkjghklighdgmejjfondchkjcgf",
+            runtime_path.clone(),
+            program_files.to_path_buf(),
+        );
+
+        assert_eq!(
+            runtime_path,
+            PathBuf::from("/Program Files/VaultKern/Browser Integration/vaultkern-runtime.exe")
+        );
+        assert_eq!(
+            config.manifest_path(),
+            PathBuf::from(
+                "/Program Files/VaultKern/Browser Integration/com.vaultkern.runtime.chrome.json"
+            )
+        );
+    }
+
+    #[test]
+    fn native_setup_requires_elevation_before_it_can_publish_browser_registration() {
+        let manifest = include_str!("../windows/app.manifest");
+
+        assert!(manifest.contains(r#"requestedExecutionLevel level="requireAdministrator""#));
+        assert!(!manifest.contains(r#"requestedExecutionLevel level="asInvoker""#));
     }
 
     #[test]
@@ -816,7 +1127,7 @@ mod tests {
             runtime_path,
             temp_dir
                 .path()
-                .join("vaultkern-runtime/vaultkern-runtime.exe")
+                .join("VaultKern/Browser Integration/vaultkern-runtime.exe")
         );
         assert_eq!(fs::read(runtime_path).unwrap(), b"runtime-bytes");
     }
@@ -875,6 +1186,7 @@ mod tests {
                 manifest_content: None,
                 registered_runtime_exists: None,
                 setup_runtime_exists: true,
+                registry_key_protected: true,
             }),
             RegistrationStatus::NotRegistered
         );
@@ -886,6 +1198,7 @@ mod tests {
                 manifest_content: None,
                 registered_runtime_exists: None,
                 setup_runtime_exists: true,
+                registry_key_protected: true,
             }),
             RegistrationStatus::NeedsRepair
         );
@@ -897,6 +1210,7 @@ mod tests {
                 manifest_content: Some(expected.expected_manifest()),
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: true,
+                registry_key_protected: true,
             }),
             RegistrationStatus::Registered
         );
@@ -924,6 +1238,29 @@ mod tests {
                 manifest_content: Some(existing_manifest),
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: true,
+                registry_key_protected: true,
+            }),
+            RegistrationStatus::NeedsRepair
+        );
+    }
+
+    #[test]
+    fn diagnosis_rejects_a_user_writable_native_host_registration() {
+        let expected = BrowserSetupConfig::new(
+            BrowserKind::Chrome,
+            "kblgblkjghklighdgmejjfondchkjcgf",
+            PathBuf::from(r"C:\Program Files\VaultKern\Browser Integration\vaultkern-runtime.exe"),
+            PathBuf::from(r"C:\Program Files"),
+        );
+
+        assert_eq!(
+            expected.diagnose(BrowserRegistrationProbe {
+                browser_installed: true,
+                registry_manifest_path: Some(expected.manifest_path()),
+                manifest_content: Some(expected.expected_manifest()),
+                registered_runtime_exists: Some(true),
+                setup_runtime_exists: true,
+                registry_key_protected: false,
             }),
             RegistrationStatus::NeedsRepair
         );
@@ -950,6 +1287,7 @@ mod tests {
                 manifest_content: Some(manifest_with_extra_origin),
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: true,
+                registry_key_protected: true,
             }),
             RegistrationStatus::NeedsRepair
         );
@@ -975,6 +1313,7 @@ mod tests {
                 manifest_content: Some(wrong_case_manifest),
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: true,
+                registry_key_protected: true,
             }),
             RegistrationStatus::NeedsRepair
         );
@@ -1000,16 +1339,17 @@ mod tests {
                 manifest_content: Some(existing_manifest),
                 registered_runtime_exists: Some(true),
                 setup_runtime_exists: false,
+                registry_key_protected: true,
             }),
             RegistrationStatus::RuntimeMissing
         );
     }
 
     #[test]
-    fn windows_application_manifest_declares_no_uac_elevation() {
+    fn windows_application_manifest_requires_uac_for_protected_registration() {
         let manifest = read_package_file("windows/app.manifest");
 
-        assert!(manifest.contains(r#"requestedExecutionLevel level="asInvoker""#));
+        assert!(manifest.contains(r#"requestedExecutionLevel level="requireAdministrator""#));
         assert!(manifest.contains(r#"uiAccess="false""#));
     }
 

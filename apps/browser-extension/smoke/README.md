@@ -71,7 +71,7 @@ Linux / WSL Chrome native host manifest installation can use:
 tools/vaultkern-runtime/scripts/install_native_host.sh kblgblkjghklighdgmejjfondchkjcgf /absolute/path/to/vaultkern-runtime
 ```
 
-On Windows Chrome, use `vaultkern-native-setup` to register the `HKCU` native host. The setup utility extracts the embedded runtime and writes the browser manifest:
+On Windows Chrome, use the elevated `vaultkern-native-setup` utility to register the `HKCU` native host in both registry views. The registration leaf is protected from ordinary-user writes:
 
 ```text
 HKCU\Software\Google\Chrome\NativeMessagingHosts\com.vaultkern.runtime
@@ -80,8 +80,8 @@ HKCU\Software\Google\Chrome\NativeMessagingHosts\com.vaultkern.runtime
 Stable Windows manifest and runtime paths:
 
 ```text
-%LOCALAPPDATA%\vaultkern-runtime\com.vaultkern.runtime.chrome.json
-%LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe
+%ProgramFiles%\VaultKern\Browser Integration\com.vaultkern.runtime.chrome.json
+%ProgramFiles%\VaultKern\Browser Integration\vaultkern-runtime.exe
 ```
 
 Start the VaultKern Windows app before testing the extension. On Windows the installed native host is a stateless shim: it authenticates the resident app over a per-user named pipe and forwards protocol requests to the app's single in-process runtime. It does not fall back to a per-port runtime when the app is unavailable.
@@ -102,7 +102,7 @@ C:\Users\<user>\AppData\Local\vaultkern-runtime\extensions\<extension-id>\
 The manifest should contain:
 
 ```json
-{"name":"com.vaultkern.runtime","description":"VaultKern resident app IPC shim","path":"C:\\Users\\<user>\\AppData\\Local\\vaultkern-runtime\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
+{"name":"com.vaultkern.runtime","description":"VaultKern resident app IPC shim","path":"C:\\Program Files\\VaultKern\\Browser Integration\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
 ```
 
 Open:

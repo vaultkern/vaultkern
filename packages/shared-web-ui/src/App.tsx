@@ -206,8 +206,15 @@ interface PendingAttachmentSave extends PendingEntrySave {
   fallbackMessage: string;
 }
 
+interface PendingDatabaseSettingsSave {
+  vaultId: string;
+  sessionEpoch: number;
+  promise: Promise<boolean>;
+}
+
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
+const MAX_BROWSER_ATTACHMENT_DOWNLOAD_BYTES = 720 * 1024;
 
 function getViewMode(width: number): ManagerViewMode {
   if (width < STACKED_BREAKPOINT) {
@@ -364,6 +371,8 @@ export function App({
       ? normalizeBrowserExtensionSettings
       : normalizeWindowsAppSettings;
   const [session, setSession] = useState<SessionStateLike | null>(null);
+  const sessionRef = useRef<SessionStateLike | null>(null);
+  sessionRef.current = session;
   const residentSessionEpoch = useRef(0);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [sessionErrorCause, setSessionErrorCause] = useState<unknown>(null);
@@ -380,7 +389,9 @@ export function App({
   const [databaseSettingsBusy, setDatabaseSettingsBusy] = useState(false);
   const databaseSettingsDraftUpdate = useRef<DatabaseSettingsUpdate | null>(null);
   const [databaseSettingsDraftDirty, setDatabaseSettingsDraftDirty] = useState(false);
-  const databaseSettingsSaveInFlight = useRef<Promise<boolean> | null>(null);
+  const databaseSettingsSaveInFlight = useRef<PendingDatabaseSettingsSave | null>(
+    null
+  );
   const [databaseName, setDatabaseName] = useState<string | null>(null);
   const [groupTree, setGroupTree] = useState<GroupTree | null>(null);
   const [groupsError, setGroupsError] = useState<string | null>(null);
@@ -477,6 +488,34 @@ export function App({
     }
     setSession(nextSession);
     return true;
+  }
+
+  function invalidateSessionOwnedWork() {
+    residentSessionEpoch.current += 1;
+    secretViewEpoch.current += 1;
+    historyDetailRequestEpoch.current += 1;
+    databaseSettingsSaveInFlight.current = null;
+    resetDatabaseSettingsDraftState();
+    setDatabaseSettingsBusy(false);
+    setDatabaseSettingsError(null);
+  }
+
+  function acceptAuthoritativeSession(
+    nextSession: SessionStateLike,
+    forceInvalidation = false
+  ) {
+    const current = sessionRef.current;
+    const identityChanged =
+      current?.unlocked !== nextSession.unlocked ||
+      current?.activeVaultId !== nextSession.activeVaultId ||
+      current?.currentVaultRefId !== nextSession.currentVaultRefId;
+    if (identityChanged || forceInvalidation) {
+      invalidateSessionOwnedWork();
+    }
+    sessionRef.current = nextSession;
+    setSession(nextSession);
+    setSessionError(null);
+    setSessionErrorCause(null);
   }
 
   async function reloadLockedState() {
@@ -1422,6 +1461,23 @@ export function App({
       return;
     }
 
+    const attachment = entryDetail?.attachments?.find(
+      (candidate) => candidate.name === name
+    );
+    if (
+      settingsSurface === "browser" &&
+      attachment &&
+      attachment.size > MAX_BROWSER_ATTACHMENT_DOWNLOAD_BYTES
+    ) {
+      setEntryActionError(
+        translate(
+          extensionSettings.language,
+          "Open the Windows app to download this large attachment."
+        )
+      );
+      return;
+    }
+
     setEntryActionError(null);
     const requestEpoch = secretViewEpoch.current;
 
@@ -1577,15 +1633,24 @@ export function App({
     );
   }
 
-  function runDatabaseSettingsSave(operation: () => Promise<boolean>) {
-    if (databaseSettingsSaveInFlight.current) {
-      return databaseSettingsSaveInFlight.current;
+  function runDatabaseSettingsSave(
+    vaultId: string,
+    sessionEpoch: number,
+    operation: () => Promise<boolean>
+  ) {
+    const inFlight = databaseSettingsSaveInFlight.current;
+    if (
+      inFlight?.vaultId === vaultId &&
+      inFlight.sessionEpoch === sessionEpoch
+    ) {
+      return inFlight.promise;
     }
 
     const promise = operation();
-    databaseSettingsSaveInFlight.current = promise;
+    const pending = { vaultId, sessionEpoch, promise };
+    databaseSettingsSaveInFlight.current = pending;
     void promise.finally(() => {
-      if (databaseSettingsSaveInFlight.current === promise) {
+      if (databaseSettingsSaveInFlight.current === pending) {
         databaseSettingsSaveInFlight.current = null;
       }
     });
@@ -1593,20 +1658,32 @@ export function App({
   }
 
   function handleSaveDatabaseSettings(update: DatabaseSettingsUpdate) {
-    return runDatabaseSettingsSave(() => saveDatabaseSettings(update));
+    const vaultId = sessionRef.current?.activeVaultId;
+    if (!vaultId) {
+      return Promise.resolve(false);
+    }
+    const sessionEpoch = residentSessionEpoch.current;
+    return runDatabaseSettingsSave(vaultId, sessionEpoch, () =>
+      saveDatabaseSettings(update, vaultId, sessionEpoch)
+    );
   }
 
-  async function saveDatabaseSettings(update: DatabaseSettingsUpdate) {
-    if (!session?.activeVaultId) {
-      return false;
-    }
-
-    const vaultId = session.activeVaultId;
+  async function saveDatabaseSettings(
+    update: DatabaseSettingsUpdate,
+    vaultId: string,
+    requestEpoch: number
+  ) {
     setDatabaseSettingsBusy(true);
     setDatabaseSettingsError(null);
 
     try {
       const result = await client.updateDatabaseSettings(vaultId, update);
+      if (
+        requestEpoch !== residentSessionEpoch.current ||
+        sessionRef.current?.activeVaultId !== vaultId
+      ) {
+        return false;
+      }
       setDatabaseSettings(result.settings);
       setDatabaseName(result.settings.metadata.name);
       resetDatabaseSettingsDraftState();
@@ -1618,15 +1695,25 @@ export function App({
       }
       return true;
     } catch (settingsError) {
-      setDatabaseSettingsError(
-        errorMessage(
-          settingsError,
-          translate(extensionSettings.language, "Failed to save database settings")
-        )
-      );
+      if (
+        requestEpoch === residentSessionEpoch.current &&
+        sessionRef.current?.activeVaultId === vaultId
+      ) {
+        setDatabaseSettingsError(
+          errorMessage(
+            settingsError,
+            translate(extensionSettings.language, "Failed to save database settings")
+          )
+        );
+      }
       return false;
     } finally {
-      setDatabaseSettingsBusy(false);
+      if (
+        requestEpoch === residentSessionEpoch.current &&
+        sessionRef.current?.activeVaultId === vaultId
+      ) {
+        setDatabaseSettingsBusy(false);
+      }
     }
   }
 
@@ -1760,20 +1847,71 @@ export function App({
   }, [client, localExtensionSettingsStore, subscribeSessionState]);
 
   useEffect(() => {
+    if (subscribeSessionState || typeof window === "undefined") {
+      return undefined;
+    }
+    let disposed = false;
+    let refreshPending = false;
+
+    async function refreshAuthoritativeSession() {
+      if (disposed || refreshPending) {
+        return;
+      }
+      refreshPending = true;
+      const requestEpoch = residentSessionEpoch.current;
+      try {
+        const nextSession = await client.getSessionState();
+        if (!disposed && requestEpoch === residentSessionEpoch.current) {
+          acceptAuthoritativeSession(nextSession);
+        }
+      } catch (refreshError) {
+        if (!disposed && requestEpoch === residentSessionEpoch.current) {
+          invalidateSessionOwnedWork();
+          sessionRef.current = null;
+          setSession(null);
+          setSessionErrorCause(refreshError);
+          setSessionError(
+            errorMessage(refreshError, "Resident session refresh is unavailable")
+          );
+        }
+      } finally {
+        refreshPending = false;
+      }
+    }
+
+    const refreshOnVisibility = () => {
+      if (document.visibilityState === "visible") {
+        void refreshAuthoritativeSession();
+      }
+    };
+    const refreshOnFocus = () => void refreshAuthoritativeSession();
+    const timer = window.setInterval(() => {
+      void refreshAuthoritativeSession();
+    }, 1000);
+    window.addEventListener("focus", refreshOnFocus);
+    document.addEventListener("visibilitychange", refreshOnVisibility);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshOnFocus);
+      document.removeEventListener("visibilitychange", refreshOnVisibility);
+    };
+  }, [client, subscribeSessionState]);
+
+  useEffect(() => {
     if (!subscribeSessionState) {
       return undefined;
     }
     let disposed = false;
     let unsubscribe: (() => void) | undefined;
-    residentSessionEpoch.current += 1;
+    invalidateSessionOwnedWork();
+    sessionRef.current = null;
     setSession(null);
 
     void subscribeSessionState((nextSession) => {
       if (!disposed) {
-        residentSessionEpoch.current += 1;
-        setSession(nextSession);
-        setSessionError(null);
-        setSessionErrorCause(null);
+        acceptAuthoritativeSession(nextSession, true);
       }
     })
       .then((nextUnsubscribe) => {
@@ -1789,15 +1927,13 @@ export function App({
                 !disposed &&
                 requestEpoch === residentSessionEpoch.current
               ) {
-                residentSessionEpoch.current += 1;
-                setSession(nextSession);
-                setSessionError(null);
-                setSessionErrorCause(null);
+                acceptAuthoritativeSession(nextSession, true);
               }
             })
             .catch((refreshError) => {
               if (!disposed) {
-                residentSessionEpoch.current += 1;
+                invalidateSessionOwnedWork();
+                sessionRef.current = null;
                 setSession(null);
                 setSessionErrorCause(refreshError);
                 setSessionError(
@@ -1812,7 +1948,8 @@ export function App({
       })
       .catch((subscriptionError) => {
         if (!disposed) {
-          residentSessionEpoch.current += 1;
+          invalidateSessionOwnedWork();
+          sessionRef.current = null;
           setSession(null);
           setSessionErrorCause(subscriptionError);
           setSessionError(
@@ -2665,6 +2802,11 @@ export function App({
               onDownloadAttachment={(name) => {
                 void handleDownloadAttachment(name);
               }}
+              attachmentDownloadLimitBytes={
+                settingsSurface === "browser"
+                  ? MAX_BROWSER_ATTACHMENT_DOWNLOAD_BYTES
+                  : undefined
+              }
               onAddAttachment={(file, protectInMemory) => {
                 void handleAddAttachment(file, protectInMemory);
               }}

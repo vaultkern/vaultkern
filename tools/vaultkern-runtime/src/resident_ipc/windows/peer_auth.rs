@@ -516,10 +516,9 @@ fn native_messaging_stdio_peer_process_ids(stdin: HANDLE, stdout: HANDLE) -> Res
 }
 
 fn expected_native_shim_path() -> Result<std::path::PathBuf> {
-    let local_app_data = std::env::var_os("LOCALAPPDATA")
-        .context("LOCALAPPDATA is unavailable for native shim authentication")?;
-    let path = Path::new(&local_app_data)
-        .join("vaultkern-runtime")
+    let path = known_folder_path(&FOLDERID_ProgramFiles, "Program Files")?
+        .join("VaultKern")
+        .join("Browser Integration")
         .join("vaultkern-runtime.exe");
     let path = std::fs::canonicalize(&path).context("canonicalize installed native shim path")?;
     Ok(path)
@@ -1186,7 +1185,7 @@ mod tests {
 
     #[test]
     fn unsigned_same_user_process_cannot_impersonate_native_shim() {
-        let path = r"C:\Users\alice\AppData\Local\vaultkern-runtime\vaultkern-runtime.exe";
+        let path = r"C:\Program Files\VaultKern\Browser Integration\vaultkern-runtime.exe";
         let peer = NativeShimIdentity {
             executable_path: path.into(),
             signer: None,
@@ -1214,7 +1213,7 @@ mod tests {
 
     #[test]
     fn server_accepts_a_trusted_shim_without_rechecking_browser_parent_topology() {
-        let path = r"C:\Users\alice\AppData\Local\vaultkern-runtime\vaultkern-runtime.exe";
+        let path = r"C:\Program Files\VaultKern\Browser Integration\vaultkern-runtime.exe";
         let peer = NativeShimIdentity {
             executable_path: path.into(),
             signer: Some(signer("11")),

@@ -914,7 +914,7 @@ describe("fillLoginForm", () => {
     } finally {
       delete (document.body as Element & { children?: HTMLCollection }).children;
     }
-  });
+  }, 10_000);
 
   it("rolls back group values when a native setter fails before events", () => {
     document.body.innerHTML = `

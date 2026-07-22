@@ -48,6 +48,7 @@ enum RuntimeRequest {
     },
     Protocol {
         command: RuntimeCommand,
+        operation_id: Option<String>,
         cancelled: Arc<AtomicBool>,
         execution_started: Arc<AtomicBool>,
         browser_client: bool,
@@ -105,8 +106,10 @@ struct ResidentIdleLock {
 #[derive(Default)]
 struct ResidentMutationState {
     unsaved_vault_ids: BTreeSet<String>,
-    pending_save_receipts: BTreeMap<String, RuntimeResponse>,
+    pending_save_receipts: BTreeMap<(String, String), RuntimeResponse>,
 }
+
+const MAX_PENDING_SAVE_RECEIPTS: usize = 256;
 
 impl ResidentMutationState {
     #[cfg(test)]
@@ -140,17 +143,39 @@ impl ResidentMutationState {
         )
     }
 
-    fn record_inline_save(&mut self, vault_id: String, response: RuntimeResponse) {
+    fn record_inline_save(
+        &mut self,
+        vault_id: String,
+        operation_id: Option<String>,
+        response: RuntimeResponse,
+    ) {
         if response_recoverably_persists_active_vault(&response) {
             self.unsaved_vault_ids.remove(&vault_id);
         } else {
             self.unsaved_vault_ids.insert(vault_id.clone());
         }
-        self.pending_save_receipts.insert(vault_id, response);
+        if let Some(operation_id) = operation_id {
+            self.pending_save_receipts
+                .insert((vault_id, operation_id), response);
+            while self.pending_save_receipts.len() > MAX_PENDING_SAVE_RECEIPTS {
+                self.pending_save_receipts.pop_first();
+            }
+        }
     }
 
-    fn take_save_receipt(&mut self, vault_id: &str) -> Option<RuntimeResponse> {
-        self.pending_save_receipts.remove(vault_id)
+    fn take_save_receipt(
+        &mut self,
+        vault_id: &str,
+        operation_id: Option<&str>,
+    ) -> Option<RuntimeResponse> {
+        let operation_id = operation_id?;
+        self.pending_save_receipts
+            .remove(&(vault_id.to_owned(), operation_id.to_owned()))
+    }
+
+    fn clear_save_receipts(&mut self, vault_id: &str) {
+        self.pending_save_receipts
+            .retain(|(receipt_vault_id, _), _| receipt_vault_id != vault_id);
     }
 }
 
@@ -294,6 +319,7 @@ impl RuntimeBridge {
                         }
                         RuntimeRequest::Protocol {
                             command,
+                            operation_id,
                             cancelled,
                             execution_started,
                             browser_client,
@@ -320,7 +346,10 @@ impl RuntimeBridge {
                                 } else if let Some(receipt) = pending_save_vault_id
                                     .as_deref()
                                     .and_then(|vault_id| {
-                                        mutation_state.take_save_receipt(vault_id)
+                                        mutation_state.take_save_receipt(
+                                            vault_id,
+                                            operation_id.as_deref(),
+                                        )
                                     })
                                 {
                                     (receipt, None)
@@ -392,7 +421,11 @@ impl RuntimeBridge {
                                             let inline_save_committed =
                                                 response_commits_active_vault(&inline_save);
                                             mutation_state
-                                                .record_inline_save(vault_id, inline_save);
+                                                .record_inline_save(
+                                                    vault_id,
+                                                    operation_id.clone(),
+                                                    inline_save,
+                                                );
                                             if inline_save_committed {
                                                 notify_reconciliation_slot(
                                                     &worker_reconciliation_notifier,
@@ -403,7 +436,7 @@ impl RuntimeBridge {
                                             && let Some(vault_id) = persisted_vault_id
                                         {
                                             mutation_state.unsaved_vault_ids.remove(&vault_id);
-                                            mutation_state.pending_save_receipts.remove(&vault_id);
+                                            mutation_state.clear_save_receipts(&vault_id);
                                         }
                                     }
                                     outcome
@@ -609,8 +642,14 @@ impl RuntimeBridge {
                 format!("unsupported runtime protocol version: {}", envelope.version),
             );
         }
+        let ProtocolEnvelope {
+            version,
+            request_id,
+            operation_id,
+            command,
+        } = envelope;
         let dispatch = match self.desktop_protocol_session.lock() {
-            Ok(mut session) => session.accept(envelope.command),
+            Ok(mut session) => session.accept(command),
             Err(_) => {
                 return error_response(
                     "runtime_unavailable",
@@ -623,7 +662,12 @@ impl RuntimeBridge {
             RuntimeProtocolDispatch::Dispatch(command) => command,
         };
         self.request_protocol(
-            ProtocolEnvelope::new(command),
+            ProtocolEnvelope {
+                version,
+                request_id,
+                operation_id,
+                command,
+            },
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             false,
@@ -649,6 +693,7 @@ impl RuntimeBridge {
             }
         }
 
+        let operation_id = envelope.operation_id;
         let command = envelope.command;
         let reconciliation_reasons = reconciliation_reasons(&command);
         let (response, receiver) = mpsc::channel();
@@ -656,6 +701,7 @@ impl RuntimeBridge {
             .requests
             .send(RuntimeRequest::Protocol {
                 command,
+                operation_id,
                 cancelled,
                 execution_started,
                 browser_client,
@@ -1010,7 +1056,7 @@ fn persist_unsaved_before_idle_lock(
         }
         committed_active_vault |= response_commits_active_vault(&response);
         mutation_state.unsaved_vault_ids.remove(&vault_id);
-        mutation_state.pending_save_receipts.remove(&vault_id);
+        mutation_state.clear_save_receipts(&vault_id);
     }
     if committed_active_vault {
         notify_reconciliation_slot(reconciliation_notifier);
@@ -1433,6 +1479,7 @@ mod tests {
         });
         state.record_inline_save(
             "vault-1".into(),
+            Some("operation-1".into()),
             RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
                 status: SaveVaultStatusDto::Merged,
                 merge_summary: None,
@@ -1446,10 +1493,54 @@ mod tests {
                 .is_none()
         );
         let receipt = state
-            .take_save_receipt("vault-1")
+            .take_save_receipt("vault-1", Some("operation-1"))
             .expect("follow-up save receives the inline result");
         assert!(matches!(
             receipt,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn inline_save_receipts_for_the_same_vault_do_not_overwrite_each_other() {
+        let mut state = ResidentMutationState::default();
+        state.record_inline_save(
+            "vault-1".into(),
+            Some("operation-a".into()),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                merge_summary: None,
+                conflict_copy_path: None,
+            }),
+        );
+        state.record_inline_save(
+            "vault-1".into(),
+            Some("operation-b".into()),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                merge_summary: None,
+                conflict_copy_path: None,
+            }),
+        );
+
+        let first = state
+            .take_save_receipt("vault-1", Some("operation-b"))
+            .expect("latest logical operation keeps its receipt");
+        let second = state
+            .take_save_receipt("vault-1", Some("operation-a"))
+            .expect("earlier logical operation also keeps its receipt");
+        assert!(matches!(
+            first,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            })
+        ));
+        assert!(matches!(
+            second,
             RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
                 status: SaveVaultStatusDto::Merged,
                 ..

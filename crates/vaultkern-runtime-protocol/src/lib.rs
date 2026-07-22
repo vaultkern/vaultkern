@@ -119,6 +119,12 @@ pub struct ProtocolEnvelope {
     pub version: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(
+        default,
+        rename = "operationId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub operation_id: Option<String>,
     pub command: RuntimeCommand,
 }
 
@@ -127,6 +133,7 @@ impl ProtocolEnvelope {
         Self {
             version: PROTOCOL_VERSION,
             request_id: None,
+            operation_id: None,
             command,
         }
     }

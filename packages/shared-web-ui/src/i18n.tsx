@@ -146,6 +146,7 @@ type TranslationKey =
   | "Name"
   | "Replace"
   | "Download"
+  | "Open the Windows app to download this large attachment."
   | "History Detail"
   | "Back to entries"
   | "Vault Setup"
@@ -375,6 +376,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   Name: "名称",
   Replace: "替换",
   Download: "下载",
+  "Open the Windows app to download this large attachment.":
+    "请在 Windows 应用中下载这个大附件。",
   "History Detail": "历史详情",
   "Back to entries": "返回条目",
   "Vault Setup": "数据库设置向导",

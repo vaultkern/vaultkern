@@ -231,11 +231,13 @@ pub(crate) fn prepare_runtime_protocol_request(
         ));
     }
     let request_id = envelope.request_id;
+    let operation_id = envelope.operation_id;
     match session.accept(envelope.command) {
         RuntimeProtocolDispatch::Respond(response) => Err(response),
         RuntimeProtocolDispatch::Dispatch(command) => Ok(ProtocolEnvelope {
             version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
             request_id,
+            operation_id,
             command,
         }),
     }

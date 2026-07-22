@@ -48,6 +48,7 @@ export function EntryEditor({
   onAddCustomField,
   onDeleteCustomField,
   onDownloadAttachment,
+  attachmentDownloadLimitBytes,
   onAddAttachment,
   onRenameAttachment,
   onReplaceAttachment,
@@ -79,6 +80,7 @@ export function EntryEditor({
   onAddCustomField: () => void;
   onDeleteCustomField: (index: number) => void;
   onDownloadAttachment?: (name: string) => void;
+  attachmentDownloadLimitBytes?: number;
   onAddAttachment?: (file: File, protectInMemory: boolean) => void;
   onRenameAttachment?: (
     oldName: string,
@@ -383,6 +385,7 @@ export function EntryEditor({
           entry={entry}
           text={text}
           onDownloadAttachment={onDownloadAttachment}
+          attachmentDownloadLimitBytes={attachmentDownloadLimitBytes}
         />
       ) : null}
       {editable && draft ? (
@@ -1069,11 +1072,13 @@ function emptyStringAsNull(value: string | null): string | null {
 function EntryDetailExtras({
   entry,
   text,
-  onDownloadAttachment
+  onDownloadAttachment,
+  attachmentDownloadLimitBytes
 }: {
   entry: EntryDetail;
   text: ReturnType<typeof useText>;
   onDownloadAttachment?: (name: string) => void;
+  attachmentDownloadLimitBytes?: number;
 }) {
   const [revealedFields, setRevealedFields] = useState<Set<string>>(() => new Set());
   const customFields = entry.customFields ?? [];
@@ -1138,7 +1143,11 @@ function EntryDetailExtras({
         <section aria-label={text("Attachments")} style={sectionStyle}>
           <h3 style={sectionTitleStyle}>{text("Attachments")}</h3>
           <div style={detailListStyle}>
-            {attachments.map((attachment) => (
+            {attachments.map((attachment) => {
+              const downloadUnavailable =
+                attachmentDownloadLimitBytes !== undefined &&
+                attachment.size > attachmentDownloadLimitBytes;
+              return (
               <div key={attachment.name} style={detailRowStyle}>
                 <div style={detailKeyStyle}>{attachment.name}</div>
                 <div style={detailValueStyle}>{formatBytes(attachment.size)}</div>
@@ -1149,12 +1158,19 @@ function EntryDetailExtras({
                   type="button"
                   aria-label={`Download ${attachment.name}`}
                   onClick={() => onDownloadAttachment?.(attachment.name)}
+                  disabled={downloadUnavailable}
                   style={secondaryActionStyle}
                 >
                   {text("Download")}
                 </button>
+                {downloadUnavailable ? (
+                  <div style={detailValueStyle}>
+                    {text("Open the Windows app to download this large attachment.")}
+                  </div>
+                ) : null}
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       ) : null}

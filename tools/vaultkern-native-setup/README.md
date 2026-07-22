@@ -6,9 +6,9 @@
 
 - Windows GUI executable: `VaultKernNativeSetup.exe`
 - Single-file distribution: the runtime payload is embedded in the setup executable
-- Runtime install path: `%LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe`
-- Registration scope: current user `HKCU`; no administrator rights required
-- Windows application manifest: `asInvoker`, so the `Setup` filename does not trigger installer elevation detection
+- Runtime and manifest install path: `%ProgramFiles%\VaultKern\Browser Integration`
+- Registration scope: current user `HKCU`, written to both registry views with a protected read-only user ACL
+- Windows application manifest: `requireAdministrator`; registration and removal intentionally show UAC
 - Windows subsystem: GUI, so no extra console window is opened
 - Supported browsers: Chrome and Edge
 - Extension id: signed packages require and pin one build-time `VAULTKERN_DEFAULT_EXTENSION_ID`; the GUI and runtime cannot override it
@@ -59,17 +59,17 @@ HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.vaultkern.runtime
 Manifest files written by the setup utility:
 
 ```text
-%LOCALAPPDATA%\vaultkern-runtime\com.vaultkern.runtime.chrome.json
-%LOCALAPPDATA%\vaultkern-runtime\com.vaultkern.runtime.edge.json
+%ProgramFiles%\VaultKern\Browser Integration\com.vaultkern.runtime.chrome.json
+%ProgramFiles%\VaultKern\Browser Integration\com.vaultkern.runtime.edge.json
 ```
 
 When `Register / Repair` is clicked, the setup utility extracts the embedded runtime to:
 
 ```text
-%LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe
+%ProgramFiles%\VaultKern\Browser Integration\vaultkern-runtime.exe
 ```
 
-The manifest points to this stable runtime path and sets `allowed_origins` to the extension id pinned into the packaged shim. Before connecting, the shim authenticates the real browser channel and enforces that exact origin; the resident independently authenticates the signed shim and validates the forwarded origin's syntax. Changing the per-user manifest therefore cannot authorize another extension.
+The manifest points to this administrator-protected runtime path and sets `allowed_origins` to the extension id pinned into the packaged shim. The setup writes identical registrations to the 32-bit and 64-bit `HKCU` views, then protects each leaf key so ordinary user processes can read but cannot replace it. Before connecting, the shim authenticates the real browser channel and enforces that exact origin; the resident independently authenticates the signed shim and validates the forwarded origin's syntax.
 
 Development, sideload, and E2E validation use a separately built and signed package pinned to that build's stable extension id:
 
@@ -80,7 +80,7 @@ VAULTKERN_DEFAULT_EXTENSION_ID="<developer-extension-id>" \
 
 Unsigned local builds without a build-time default may still accept a CLI argument, `VAULTKERN_EXTENSION_ID`, or the GUI field for isolated UI development, but the browser IPC path fails closed until a trusted id is embedded.
 
-`Unregister` removes the browser-specific `HKCU` registry value and removes the browser-specific manifest file written by this tool. It does not remove the runtime executable extracted under `%LOCALAPPDATA%`.
+`Unregister` removes both protected browser-specific `HKCU` registry views and the browser-specific manifest file written by this tool. It does not remove the shared runtime executable under `%ProgramFiles%`.
 
 ## Diagnostics
 

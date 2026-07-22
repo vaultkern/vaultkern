@@ -709,6 +709,62 @@ it("removes rendered secrets when the resident session is invalidated by another
   expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
 });
 
+it("refreshes the authoritative resident session when a client without push wakes", async () => {
+  let currentSession = {
+    unlocked: true,
+    activeVaultId: "vault-1" as string | null,
+    currentVaultRefId: "vault-ref-1" as string | null
+  };
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => currentSession),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Demo Vault",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "resident-secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  expect(await screen.findByDisplayValue("resident-secret")).toBeInTheDocument();
+
+  currentSession = {
+    unlocked: false,
+    activeVaultId: null,
+    currentVaultRefId: "vault-ref-1"
+  };
+  fireEvent(window, new Event("focus"));
+
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  expect(screen.queryByDisplayValue("resident-secret")).not.toBeInTheDocument();
+  expect(client.getSessionState).toHaveBeenCalledTimes(2);
+});
+
 it("does not let an initial session read overwrite a newer resident invalidation", async () => {
   const initialSession = createDeferred<{
     unlocked: boolean;
@@ -2586,6 +2642,78 @@ it("accepts normalized database settings as the clean draft after a successful c
   );
   fireEvent.click(screen.getByRole("button", { name: "Back to archive" }));
   expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+});
+
+it("does not let a database settings completion from another resident session reset the draft", async () => {
+  const vaultMethods = createVaultSelectionMethods();
+  const template = await vaultMethods.getDatabaseSettings();
+  const vaultASettings: DatabaseSettings = {
+    ...template,
+    metadata: { ...template.metadata, name: "Vault A" }
+  };
+  const vaultBSettings: DatabaseSettings = {
+    ...template,
+    metadata: { ...template.metadata, name: "Vault B" }
+  };
+  const vaultACommit = createDeferred<DatabaseSettingsCommitResult>();
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const client = {
+    ...vaultMethods,
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-a",
+      currentVaultRefId: "vault-ref-a"
+    })),
+    getDatabaseSettings: vi.fn(async (vaultId: string) =>
+      vaultId === "vault-a" ? vaultASettings : vaultBSettings
+    ),
+    updateDatabaseSettings: vi.fn(() => vaultACommit.promise)
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(async (listener) => {
+        publishSessionState = listener;
+        return () => undefined;
+      })}
+    />
+  );
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "Database Settings" }));
+  const vaultAName = await screen.findByLabelText("Database Name");
+  expect(vaultAName).toHaveValue("Vault A");
+  fireEvent.change(vaultAName, { target: { value: "Vault A saved" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(client.updateDatabaseSettings).toHaveBeenCalledTimes(1));
+
+  act(() => {
+    publishSessionState({
+      unlocked: true,
+      activeVaultId: "vault-b",
+      currentVaultRefId: "vault-ref-b"
+    });
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "Database Settings" }));
+  const vaultBName = await screen.findByDisplayValue("Vault B");
+  fireEvent.change(vaultBName, { target: { value: "Vault B draft" } });
+
+  await act(async () => {
+    vaultACommit.resolve(
+      committedDatabaseSettings({
+        ...vaultASettings,
+        metadata: { ...vaultASettings.metadata, name: "Vault A saved" }
+      })
+    );
+    await vaultACommit.promise;
+  });
+
+  expect(screen.getByLabelText("Database Name")).toHaveValue("Vault B draft");
 });
 
 it("retries a failed atomic database settings commit", async () => {
@@ -5312,6 +5440,73 @@ it("manages entry attachments from the detail pane", async () => {
   expect(saveVault).toHaveBeenCalledTimes(3);
 });
 
+it("routes oversized browser attachment downloads to the Windows app", async () => {
+  const getEntryAttachmentContent = vi.fn();
+  const settingsStore = createSettingsStore();
+  settingsStore.surface = "browser";
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret-123",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      attachments: [
+        {
+          name: "archive.bin",
+          size: 800_000,
+          protectInMemory: false
+        }
+      ]
+    }),
+    getEntryAttachmentContent
+  };
+
+  render(
+    <App client={client as any} extensionSettingsStore={settingsStore} />
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  const download = await screen.findByRole("button", {
+    name: "Download archive.bin"
+  });
+
+  expect(download).toBeDisabled();
+  expect(
+    screen.getByText("Open the Windows app to download this large attachment.")
+  ).toBeInTheDocument();
+  expect(getEntryAttachmentContent).not.toHaveBeenCalled();
+});
+
 it("does not deliver an attachment response after the selected entry changes", async () => {
   const originalInnerWidth = window.innerWidth;
   window.innerWidth = 1280;
@@ -5401,6 +5596,195 @@ it("does not deliver an attachment response after the selected entry changes", a
     expect(click).not.toHaveBeenCalled();
   } finally {
     window.innerWidth = originalInnerWidth;
+    click.mockRestore();
+    if (originalUserAgent) {
+      Object.defineProperty(navigator, "userAgent", originalUserAgent);
+    } else {
+      delete (navigator as Navigator & { userAgent?: string }).userAgent;
+    }
+  }
+});
+
+it("does not deliver an attachment response after a resident lock notification", async () => {
+  const attachment = createDeferred<{
+    type: "entry_attachment_content";
+    name: string;
+    dataBase64: string;
+    protectInMemory: boolean;
+  }>();
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const originalUserAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+  Object.defineProperty(navigator, "userAgent", {
+    configurable: true,
+    value: "Chrome"
+  });
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "resident-secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      attachments: [{ name: "secret.bin", size: 6, protectInMemory: true }]
+    })),
+    getEntryAttachmentContent: vi.fn(() => attachment.promise)
+  } satisfies RuntimeClientLike;
+
+  try {
+    render(
+      <App
+        client={client}
+        subscribeSessionState={vi.fn(async (listener) => {
+          publishSessionState = listener;
+          return () => undefined;
+        })}
+      />
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Download secret.bin" }));
+    await waitFor(() => expect(client.getEntryAttachmentContent).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      publishSessionState({
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-1"
+      });
+      attachment.resolve({
+        type: "entry_attachment_content",
+        name: "secret.bin",
+        dataBase64: "c2VjcmV0",
+        protectInMemory: true
+      });
+      await attachment.promise;
+    });
+
+    expect(click).not.toHaveBeenCalled();
+  } finally {
+    click.mockRestore();
+    if (originalUserAgent) {
+      Object.defineProperty(navigator, "userAgent", originalUserAgent);
+    } else {
+      delete (navigator as Navigator & { userAgent?: string }).userAgent;
+    }
+  }
+});
+
+it("does not deliver an attachment after authoritative session refresh fails", async () => {
+  const attachment = createDeferred<{
+    type: "entry_attachment_content";
+    name: string;
+    dataBase64: string;
+    protectInMemory: boolean;
+  }>();
+  const originalUserAgent = Object.getOwnPropertyDescriptor(navigator, "userAgent");
+  Object.defineProperty(navigator, "userAgent", {
+    configurable: true,
+    value: "Chrome"
+  });
+  const click = vi
+    .spyOn(HTMLAnchorElement.prototype, "click")
+    .mockImplementation(() => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi
+      .fn()
+      .mockResolvedValueOnce({
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1"
+      })
+      .mockRejectedValue(new Error("resident unavailable")),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "resident-secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      attachments: [{ name: "secret.bin", size: 6, protectInMemory: true }]
+    }),
+    getEntryAttachmentContent: vi.fn(() => attachment.promise)
+  };
+
+  try {
+    render(<App client={client as any} />);
+    fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Download secret.bin" }));
+    await waitFor(() => expect(client.getEntryAttachmentContent).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      fireEvent.focus(window);
+      attachment.resolve({
+        type: "entry_attachment_content",
+        name: "secret.bin",
+        dataBase64: "c2VjcmV0",
+        protectInMemory: true
+      });
+      await attachment.promise;
+      await Promise.resolve();
+    });
+
+    expect(click).not.toHaveBeenCalled();
+  } finally {
     click.mockRestore();
     if (originalUserAgent) {
       Object.defineProperty(navigator, "userAgent", originalUserAgent);

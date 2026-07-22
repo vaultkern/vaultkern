@@ -604,6 +604,7 @@ describe("RuntimeClient", () => {
 
     expect(transport.send).toHaveBeenCalledWith({
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "create_entry",
         vault_id: "vault-1",
@@ -663,6 +664,7 @@ describe("RuntimeClient", () => {
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "update_entry_fields",
         vault_id: "vault-1",
@@ -684,6 +686,7 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "delete_entry",
         vault_id: "vault-1",
@@ -726,6 +729,7 @@ describe("RuntimeClient", () => {
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "compare_and_update_entry_fields",
         vault_id: "vault-1",
@@ -1308,6 +1312,7 @@ describe("RuntimeClient", () => {
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "set_entry_passkey",
         vault_id: "vault-1",
@@ -1317,6 +1322,7 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "clear_entry_passkey",
         vault_id: "vault-1",
@@ -1354,6 +1360,47 @@ describe("RuntimeClient", () => {
         vault_id: "vault-1"
       }
     });
+  });
+
+  it("correlates a mutation with only its own follow-up save", async () => {
+    const messages: Array<Record<string, unknown>> = [];
+    const transport = {
+      send: vi.fn(async (message: unknown) => {
+        messages.push(message as Record<string, unknown>);
+        return messages.length === 1
+          ? {
+              type: "entry_detail",
+              id: "entry-1",
+              title: "Example",
+              username: "alice",
+              password: "secret",
+              url: "https://example.com",
+              notes: "",
+              totp: null,
+              customFields: []
+            }
+          : {
+              type: "save_vault_result",
+              status: "saved",
+              mergeSummary: null
+            };
+      })
+    };
+    const client = new RuntimeClient(transport);
+
+    await client.updateEntryFields("vault-1", "entry-1", {
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: "",
+      totpUri: null,
+      customFields: []
+    });
+    await client.saveVault("vault-1");
+
+    expect(messages[0]?.operationId).toEqual(expect.any(String));
+    expect(messages[1]?.operationId).toBe(messages[0]?.operationId);
   });
 
   it("returns local cache save status", async () => {
@@ -1456,6 +1503,7 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(2, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "add_entry_attachment",
         vault_id: "vault-1",
@@ -1467,6 +1515,7 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "update_entry_attachment_metadata",
         vault_id: "vault-1",
@@ -1478,6 +1527,7 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(4, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "replace_entry_attachment_content",
         vault_id: "vault-1",
@@ -1488,6 +1538,7 @@ describe("RuntimeClient", () => {
     });
     expect(transport.send).toHaveBeenNthCalledWith(5, {
       version: 1,
+      operationId: expect.any(String),
       command: {
         type: "delete_entry_attachment",
         vault_id: "vault-1",
