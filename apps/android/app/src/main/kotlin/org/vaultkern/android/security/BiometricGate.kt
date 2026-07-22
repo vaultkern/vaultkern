@@ -107,6 +107,7 @@ class BiometricGateActivity : FragmentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
         token = intent.getStringExtra(EXTRA_TOKEN).orEmpty()
         val request = BiometricRequestBroker.request(token)
         if (request == null) {
@@ -147,7 +148,7 @@ class BiometricGateActivity : FragmentActivity() {
         )
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle(request.reason)
-            .setSubtitle("VaultKern quick unlock")
+            .setSubtitle("Confirm your identity")
             .setAllowedAuthenticators(BiometricManager.Authenticators.BIOMETRIC_STRONG)
             .setNegativeButtonText("Cancel")
             .build()
