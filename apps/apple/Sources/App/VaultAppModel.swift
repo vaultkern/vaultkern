@@ -6,10 +6,29 @@ struct KDFConfirmationPrompt: Identifiable, Equatable {
   let message: String
 }
 
+enum OneDriveBrowserState: Equatable, Sendable {
+  case idle
+  case checking
+  case needsAuthorization
+  case authorizing
+  case awaitingCallback
+  case browsing(accountLabel: String?)
+  case failed(message: String)
+}
+
+struct OneDriveFolderLevel: Identifiable, Equatable, Sendable {
+  let id: String
+  let name: String
+  let itemID: String?
+
+  static let root = OneDriveFolderLevel(id: "root", name: "OneDrive", itemID: nil)
+}
+
 @MainActor
 final class VaultAppModel: ObservableObject {
   @Published private(set) var bootError: String?
   @Published private(set) var currentVault: VaultHandleDto?
+  @Published private(set) var selectedRemoteVault: VaultReferenceDto?
   @Published private(set) var entries: [EntrySummaryDto] = []
   @Published private(set) var selectedEntryID: String?
   @Published private(set) var draft: EntryDraft?
@@ -18,6 +37,11 @@ final class VaultAppModel: ObservableObject {
   @Published private(set) var isUnlocked = false
   @Published private(set) var supportsBiometricUnlock = false
   @Published private(set) var quickUnlockKnownEnrolled: Bool?
+  @Published private(set) var sourceStatus: VaultSourceStatusDto?
+  @Published private(set) var oneDriveBrowserState: OneDriveBrowserState = .idle
+  @Published private(set) var oneDriveItems: [OneDriveItemDto] = []
+  @Published private(set) var oneDriveFolders: [OneDriveFolderLevel] = [.root]
+  @Published private(set) var oneDriveAuthorizationURL: URL?
   @Published var errorMessage: String?
   @Published var noticeMessage: String?
   @Published var kdfPrompt: KDFConfirmationPrompt?
@@ -25,12 +49,21 @@ final class VaultAppModel: ObservableObject {
   private let runtime: (any VaultRuntimeClient)?
   private let scopedAccess = SecurityScopedAccess()
   private var vaultURL: URL?
+  private var loadedVaultID: String?
   private var pendingKDF: PendingKDFOperation?
 
   init() {
     do {
-      runtime = try LiveVaultRuntimeClient(configuration: AppConfiguration.live())
+      let liveRuntime = try LiveVaultRuntimeClient(configuration: AppConfiguration.live())
+      let reference = try liveRuntime.currentVaultReference()
+      let state = try liveRuntime.sessionState()
+      runtime = liveRuntime
       bootError = nil
+      apply(state)
+      if let reference, reference.sourceKind == "onedrive" {
+        selectedRemoteVault = reference
+        quickUnlockKnownEnrolled = reference.supportsQuickUnlock
+      }
     } catch {
       runtime = nil
       bootError = Self.describe(error)
@@ -44,6 +77,14 @@ final class VaultAppModel: ObservableObject {
 
   var hasUncommittedChanges: Bool { saveProgress.hasUncommittedChanges }
 
+  var hasSelectedVault: Bool { currentVault != nil || selectedRemoteVault != nil }
+
+  var selectedVaultName: String? {
+    currentVault?.name ?? selectedRemoteVault?.displayName
+  }
+
+  var isRemoteVault: Bool { selectedRemoteVault != nil }
+
   var canChangeVault: Bool {
     !isBusy && !saveProgress.hasUncommittedChanges && pendingKDF == nil
   }
@@ -51,7 +92,7 @@ final class VaultAppModel: ObservableObject {
   func openVault(_ url: URL) async {
     guard let runtime, beginOperation() else { return }
     defer { endOperation() }
-    guard currentVault == nil else {
+    guard !hasSelectedVault else {
       errorMessage = "Close the current vault before opening another one."
       return
     }
@@ -69,6 +110,8 @@ final class VaultAppModel: ObservableObject {
       }
       vaultURL = url
       currentVault = opened.handle
+      selectedRemoteVault = nil
+      loadedVaultID = opened.handle.vaultId
       apply(opened.state)
       quickUnlockKnownEnrolled = nil
       noticeMessage = nil
@@ -83,7 +126,7 @@ final class VaultAppModel: ObservableObject {
     _ password: VaultKernSensitiveString?,
     keyFileURL: URL?
   ) async {
-    guard let runtime, let vault = currentVault, beginOperation() else {
+    guard let runtime, let target = unlockTarget, beginOperation() else {
       password?.close()
       return
     }
@@ -94,8 +137,8 @@ final class VaultAppModel: ObservableObject {
 
     do {
       let state = try await BackgroundWork.run {
-        try runtime.unlockVault(
-          vaultID: vault.vaultId,
+        try target.unlock(
+          runtime: runtime,
           password: password,
           keyFilePath: keyFileURL?.path,
           kdfConfirmed: false
@@ -109,7 +152,7 @@ final class VaultAppModel: ObservableObject {
     } catch let error as VaultKernError {
       if captureKDFConfirmation(
         error,
-        operation: .unlock(password: password, keyFileURL: keyFileURL)
+        operation: .unlock(target: target, password: password, keyFileURL: keyFileURL)
       ) {
         return
       }
@@ -128,7 +171,7 @@ final class VaultAppModel: ObservableObject {
   }
 
   func unlockWithBiometrics() async {
-    guard let runtime, currentVault != nil, beginOperation() else { return }
+    guard let runtime, hasSelectedVault, beginOperation() else { return }
     defer { endOperation() }
     do {
       let result = try await BackgroundWork.run {
@@ -221,11 +264,10 @@ final class VaultAppModel: ObservableObject {
 
     do {
       switch operation {
-      case .unlock(let password, let keyFileURL):
-        guard let vault = currentVault else { return }
+      case .unlock(let target, let password, let keyFileURL):
         let state = try await BackgroundWork.run {
-          try runtime.unlockVault(
-            vaultID: vault.vaultId,
+          try target.unlock(
+            runtime: runtime,
             password: password,
             keyFilePath: keyFileURL?.path,
             kdfConfirmed: true
@@ -260,6 +302,168 @@ final class VaultAppModel: ObservableObject {
     pendingKDF = nil
     kdfPrompt = nil
     operation.close(using: scopedAccess)
+  }
+
+  func prepareOneDriveBrowser() async {
+    guard let runtime, !hasSelectedVault, beginOperation() else { return }
+    oneDriveBrowserState = .checking
+    defer { endOperation() }
+    do {
+      let items = try await BackgroundWork.run {
+        try runtime.listOneDriveChildren(parentItemID: nil)
+      }
+      oneDriveFolders = [.root]
+      oneDriveItems = Self.selectableOneDriveItems(items)
+      oneDriveBrowserState = .browsing(accountLabel: nil)
+    } catch {
+      oneDriveItems = []
+      oneDriveFolders = [.root]
+      oneDriveBrowserState = .needsAuthorization
+    }
+  }
+
+  func beginOneDriveLogin() async -> URL? {
+    guard let runtime, !hasSelectedVault, beginOperation() else { return nil }
+    oneDriveAuthorizationURL = nil
+    oneDriveBrowserState = .authorizing
+    defer { endOperation() }
+    do {
+      let session = try await BackgroundWork.run { try runtime.beginOneDriveLogin() }
+      guard
+        let url = URL(string: session.authUrl),
+        url.scheme == "https",
+        url.host == "login.microsoftonline.com"
+      else {
+        throw OneDrivePresentationError.invalidAuthorizationURL
+      }
+      oneDriveAuthorizationURL = url
+      return url
+    } catch {
+      oneDriveAuthorizationURL = nil
+      let message = Self.describe(error)
+      oneDriveBrowserState = .failed(message: message)
+      return nil
+    }
+  }
+
+  func completeOneDriveLogin() async {
+    guard let runtime, !hasSelectedVault, beginOperation() else { return }
+    oneDriveBrowserState = .authorizing
+    defer { endOperation() }
+    do {
+      let status = try await BackgroundWork.run {
+        try runtime.completePendingOneDriveLogin()
+      }
+      oneDriveAuthorizationURL = nil
+      oneDriveBrowserState = .browsing(accountLabel: status.accountLabel)
+      let items = try await BackgroundWork.run {
+        try runtime.listOneDriveChildren(parentItemID: nil)
+      }
+      oneDriveFolders = [.root]
+      oneDriveItems = Self.selectableOneDriveItems(items)
+      errorMessage = nil
+    } catch {
+      oneDriveAuthorizationURL = nil
+      let message = Self.describe(error)
+      oneDriveBrowserState = .failed(message: message)
+    }
+  }
+
+  func oneDriveAuthorizationBrowserDidOpen() {
+    guard oneDriveAuthorizationURL != nil else { return }
+    oneDriveBrowserState = .awaitingCallback
+  }
+
+  func oneDriveAuthorizationBrowserDidNotOpen() {
+    guard oneDriveAuthorizationURL != nil else { return }
+    oneDriveBrowserState = .awaitingCallback
+  }
+
+  func enterOneDriveFolder(_ item: OneDriveItemDto) async {
+    guard item.folder, let runtime, beginOperation() else { return }
+    defer { endOperation() }
+    do {
+      let items = try await BackgroundWork.run {
+        try runtime.listOneDriveChildren(parentItemID: item.itemId)
+      }
+      oneDriveFolders.append(
+        OneDriveFolderLevel(id: item.itemId, name: item.name, itemID: item.itemId)
+      )
+      oneDriveItems = Self.selectableOneDriveItems(items)
+      errorMessage = nil
+    } catch {
+      errorMessage = Self.describe(error)
+    }
+  }
+
+  func leaveOneDriveFolder() async {
+    guard oneDriveFolders.count > 1, let runtime, beginOperation() else { return }
+    let parent = oneDriveFolders[oneDriveFolders.count - 2]
+    defer { endOperation() }
+    do {
+      let items = try await BackgroundWork.run {
+        try runtime.listOneDriveChildren(parentItemID: parent.itemID)
+      }
+      oneDriveFolders.removeLast()
+      oneDriveItems = Self.selectableOneDriveItems(items)
+      errorMessage = nil
+    } catch {
+      errorMessage = Self.describe(error)
+    }
+  }
+
+  func selectOneDriveVault(_ item: OneDriveItemDto) async -> Bool {
+    guard
+      !item.folder,
+      item.name.lowercased().hasSuffix(".kdbx"),
+      let runtime,
+      !hasSelectedVault,
+      beginOperation()
+    else { return false }
+    defer { endOperation() }
+    do {
+      let reference = try await BackgroundWork.run {
+        try runtime.addOneDriveVault(
+          driveID: item.driveId,
+          itemID: item.itemId
+        )
+      }
+      clearDraft()
+      entries = []
+      selectedEntryID = nil
+      currentVault = nil
+      selectedRemoteVault = reference
+      loadedVaultID = nil
+      vaultURL = nil
+      isUnlocked = false
+      if let state = try? await BackgroundWork.run({ try runtime.sessionState() }) {
+        apply(state)
+      } else {
+        sourceStatus = try? await BackgroundWork.run { try runtime.syncStatus() }
+      }
+      quickUnlockKnownEnrolled = reference.supportsQuickUnlock
+      oneDriveItems = []
+      oneDriveFolders = [.root]
+      oneDriveAuthorizationURL = nil
+      oneDriveBrowserState = .idle
+      noticeMessage = nil
+      errorMessage = nil
+      return true
+    } catch {
+      errorMessage = Self.describe(error)
+      return false
+    }
+  }
+
+  func resetOneDriveBrowser() {
+    guard
+      oneDriveBrowserState != .authorizing,
+      oneDriveBrowserState != .awaitingCallback
+    else { return }
+    oneDriveItems = []
+    oneDriveFolders = [.root]
+    oneDriveAuthorizationURL = nil
+    oneDriveBrowserState = .idle
   }
 
   func selectEntry(_ entryID: String) async {
@@ -303,6 +507,45 @@ final class VaultAppModel: ObservableObject {
       errorMessage = nil
     } catch {
       errorMessage = Self.describe(error)
+    }
+  }
+
+  func syncCurrentVault() async {
+    guard
+      let runtime,
+      isRemoteVault,
+      let vaultID = activeVaultID,
+      !saveProgress.hasUncommittedChanges,
+      beginOperation()
+    else { return }
+    defer { endOperation() }
+    let selectedEntryID = selectedEntryID
+    do {
+      sourceStatus = try await BackgroundWork.run {
+        try runtime.sync(vaultID: vaultID)
+      }
+    } catch {
+      errorMessage = Self.describe(error)
+      return
+    }
+
+    do {
+      let snapshot = try await BackgroundWork.run {
+        let entries = try runtime.listEntries(vaultID: vaultID)
+        let draft = try selectedEntryID.map {
+          try runtime.readEntry(vaultID: vaultID, entryID: $0)
+        }
+        return SyncedVaultSnapshot(entries: entries, draft: draft)
+      }
+      entries = snapshot.entries
+      if let draft = snapshot.draft {
+        replaceDraft(with: draft)
+      }
+      noticeMessage = "OneDrive sync finished."
+      errorMessage = nil
+    } catch {
+      errorMessage =
+        "OneDrive sync finished, but refreshing the view failed: \(Self.describe(error))"
     }
   }
 
@@ -378,6 +621,7 @@ final class VaultAppModel: ObservableObject {
 
     do {
       try await reloadAfterCommittedSave(runtime: runtime, vaultID: vaultID)
+      sourceStatus = try await BackgroundWork.run { try runtime.syncStatus() }
     } catch {
       errorMessage = "The save committed, but refreshing the view failed: \(Self.describe(error))"
     }
@@ -411,19 +655,29 @@ final class VaultAppModel: ObservableObject {
   }
 
   func closeVault() async {
-    guard let runtime, let vault = currentVault, beginOperation() else { return }
+    guard let runtime, hasSelectedVault, !isRemoteVault, beginOperation() else { return }
     defer { endOperation() }
     guard !saveProgress.hasUncommittedChanges else {
       errorMessage = "Save the current entry before closing the vault."
       return
     }
     do {
-      let state = try await BackgroundWork.run { try runtime.closeVault(vaultID: vault.vaultId) }
+      let state: SessionStateDto
+      if let loadedVaultID {
+        state = try await BackgroundWork.run {
+          try runtime.closeVault(vaultID: loadedVaultID)
+        }
+      } else {
+        state = try await BackgroundWork.run { try runtime.sessionState() }
+      }
       clearDraft()
       entries.removeAll(keepingCapacity: false)
       selectedEntryID = nil
       currentVault = nil
+      selectedRemoteVault = nil
+      self.loadedVaultID = nil
       apply(state)
+      sourceStatus = nil
       quickUnlockKnownEnrolled = nil
       if let vaultURL {
         scopedAccess.release(vaultURL)
@@ -438,7 +692,14 @@ final class VaultAppModel: ObservableObject {
 
   private var activeVaultID: String? {
     guard isUnlocked else { return nil }
-    return currentVault?.vaultId
+    return loadedVaultID
+  }
+
+  private var unlockTarget: UnlockTarget? {
+    if selectedRemoteVault != nil {
+      return .currentReference
+    }
+    return currentVault.map { .vault($0.vaultId) }
   }
 
   private func beginOperation(allowPendingKDF: Bool = false) -> Bool {
@@ -490,6 +751,10 @@ final class VaultAppModel: ObservableObject {
   private func apply(_ state: SessionStateDto) {
     isUnlocked = state.unlocked
     supportsBiometricUnlock = state.supportsBiometricUnlock
+    sourceStatus = state.sourceStatus
+    if let activeVaultID = state.activeVaultId {
+      loadedVaultID = activeVaultID
+    }
   }
 
   private func captureKDFConfirmation(
@@ -543,6 +808,19 @@ final class VaultAppModel: ObservableObject {
     }
   }
 
+  private static func selectableOneDriveItems(
+    _ items: [OneDriveItemDto]
+  ) -> [OneDriveItemDto] {
+    items
+      .filter { $0.folder || $0.name.lowercased().hasSuffix(".kdbx") }
+      .sorted {
+        if $0.folder != $1.folder {
+          return $0.folder
+        }
+        return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+      }
+  }
+
   private static func describe(_ error: Error) -> String {
     if let error = error as? LocalizedError, let description = error.errorDescription {
       return description
@@ -552,14 +830,19 @@ final class VaultAppModel: ObservableObject {
 }
 
 private enum PendingKDFOperation {
-  case unlock(password: VaultKernSensitiveString?, keyFileURL: URL?)
+  case unlock(
+    target: UnlockTarget,
+    password: VaultKernSensitiveString?,
+    keyFileURL: URL?
+  )
   case unlockBlob
   case enroll(password: VaultKernSensitiveString?, keyFileURL: URL?)
 
   @MainActor
   func close(using scopedAccess: SecurityScopedAccess) {
     switch self {
-    case .unlock(let password, let keyFileURL), .enroll(let password, let keyFileURL):
+    case .unlock(_, let password, let keyFileURL),
+      .enroll(let password, let keyFileURL):
       password?.close()
       if let keyFileURL {
         scopedAccess.release(keyFileURL)
@@ -570,7 +853,48 @@ private enum PendingKDFOperation {
   }
 }
 
+private enum UnlockTarget: Sendable {
+  case currentReference
+  case vault(String)
+
+  func unlock(
+    runtime: any VaultRuntimeClient,
+    password: VaultKernSensitiveString?,
+    keyFilePath: String?,
+    kdfConfirmed: Bool
+  ) throws -> SessionStateDto {
+    switch self {
+    case .currentReference:
+      try runtime.unlockCurrent(
+        password: password,
+        keyFilePath: keyFilePath,
+        kdfConfirmed: kdfConfirmed
+      )
+    case .vault(let vaultID):
+      try runtime.unlockVault(
+        vaultID: vaultID,
+        password: password,
+        keyFilePath: keyFilePath,
+        kdfConfirmed: kdfConfirmed
+      )
+    }
+  }
+}
+
 private struct OpenedVault: Sendable {
   let handle: VaultHandleDto
   let state: SessionStateDto
+}
+
+private struct SyncedVaultSnapshot: Sendable {
+  let entries: [EntrySummaryDto]
+  let draft: EntryDraft?
+}
+
+private enum OneDrivePresentationError: LocalizedError {
+  case invalidAuthorizationURL
+
+  var errorDescription: String? {
+    "OneDrive returned an invalid authorization URL."
+  }
 }

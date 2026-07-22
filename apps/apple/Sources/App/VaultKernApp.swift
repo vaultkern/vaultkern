@@ -16,7 +16,7 @@ struct VaultKernApp: App {
           NotificationCenter.default.post(name: .openVaultPicker, object: nil)
         }
         .keyboardShortcut("o")
-        .disabled(!model.canChangeVault || model.currentVault != nil)
+        .disabled(!model.canChangeVault || model.hasSelectedVault)
       }
     }
   }

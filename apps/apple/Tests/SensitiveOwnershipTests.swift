@@ -52,14 +52,6 @@ final class SensitiveOwnershipTests: XCTestCase {
     }
   }
 
-  func testUnavailableOneDriveAdapterClosesRejectedToken() {
-    let token = VaultKernSensitiveString("refresh-token")
-    let adapter = UnavailableOneDriveTokenAdapter()
-
-    XCTAssertThrowsError(try adapter.storeRefreshToken(token: token))
-    XCTAssertEqual(token.reveal(), "")
-  }
-
   func testSwiftUIDraftsRedactDescriptions() {
     let customField = EntryCustomFieldDraft(
       key: "account",

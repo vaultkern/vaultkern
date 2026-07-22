@@ -41,6 +41,45 @@ final class VaultAppModelTests: XCTestCase {
     XCTAssertNil(model.kdfPrompt)
     XCTAssertEqual(password.reveal(), "")
   }
+
+  func testOneDriveSelectionUnlocksCurrentReferenceAndSyncsOnce() async throws {
+    let runtime = ModelTestRuntime()
+    let model = VaultAppModel(runtime: runtime)
+
+    await model.prepareOneDriveBrowser()
+    let item = try XCTUnwrap(model.oneDriveItems.first)
+    let selected = await model.selectOneDriveVault(item)
+    XCTAssertTrue(selected)
+    XCTAssertTrue(model.isRemoteVault)
+
+    let password = VaultKernSensitiveString("master-password")
+    await model.unlockWithPassword(password, keyFileURL: nil)
+    XCTAssertEqual(runtime.unlockCurrentCount, 1)
+    XCTAssertEqual(password.reveal(), "")
+
+    await model.syncCurrentVault()
+    XCTAssertEqual(runtime.syncCount, 1)
+    XCTAssertEqual(model.sourceStatus?.remoteState, "synced")
+  }
+
+  func testOneDriveLoginPublishesOnlyValidatedMicrosoftAuthorizationURL() async {
+    let runtime = ModelTestRuntime()
+    let model = VaultAppModel(runtime: runtime)
+
+    let url = await model.beginOneDriveLogin()
+    XCTAssertEqual(url?.scheme, "https")
+    XCTAssertEqual(url?.host, "login.microsoftonline.com")
+    model.oneDriveAuthorizationBrowserDidOpen()
+    XCTAssertEqual(model.oneDriveBrowserState, .awaitingCallback)
+    XCTAssertEqual(runtime.completeLoginCount, 0)
+    model.resetOneDriveBrowser()
+    XCTAssertEqual(model.oneDriveBrowserState, .awaitingCallback)
+
+    await model.completeOneDriveLogin()
+    XCTAssertEqual(runtime.completeLoginCount, 1)
+    XCTAssertEqual(model.oneDriveBrowserState, .browsing(accountLabel: "Personal"))
+    XCTAssertEqual(model.oneDriveItems.map(\.name), ["Personal.kdbx"])
+  }
 }
 
 private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
@@ -49,6 +88,9 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
   private let requiresKDFConfirmation: Bool
   private var mutableEditCount = 0
   private var mutableSaveCount = 0
+  private var mutableUnlockCurrentCount = 0
+  private var mutableSyncCount = 0
+  private var mutableCompleteLoginCount = 0
   private var currentDraft = EntryDraft(
     id: "entry",
     title: "Example",
@@ -69,6 +111,9 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
 
   var editCount: Int { lock.withLock { mutableEditCount } }
   var saveCount: Int { lock.withLock { mutableSaveCount } }
+  var unlockCurrentCount: Int { lock.withLock { mutableUnlockCurrentCount } }
+  var syncCount: Int { lock.withLock { mutableSyncCount } }
+  var completeLoginCount: Int { lock.withLock { mutableCompleteLoginCount } }
 
   func openVault(path: String) throws -> VaultHandleDto {
     VaultHandleDto(vaultId: "vault", name: "Test", path: path)
@@ -95,6 +140,15 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
 
   func unlockWithBlob(kdfConfirmed: Bool) throws -> UnlockBlobResultDto {
     UnlockBlobResultDto(status: .notEnrolled, state: state(unlocked: false))
+  }
+
+  func unlockCurrent(
+    password: VaultKernSensitiveString?,
+    keyFilePath: String?,
+    kdfConfirmed: Bool
+  ) throws -> SessionStateDto {
+    lock.withLock { mutableUnlockCurrentCount += 1 }
+    return state(unlocked: true, remote: true)
   }
 
   func enroll(
@@ -147,13 +201,70 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
     }
   }
 
-  private func state(unlocked: Bool) -> SessionStateDto {
+  func currentVaultReference() throws -> VaultReferenceDto? { nil }
+
+  func beginOneDriveLogin() throws -> OneDriveAuthSessionDto {
+    OneDriveAuthSessionDto(
+      authUrl: "https://login.microsoftonline.com/consumers/oauth2/v2.0/authorize?test=1",
+      redirectUri: "http://127.0.0.1:53121/callback",
+      expiresInSeconds: 600
+    )
+  }
+
+  func completePendingOneDriveLogin() throws -> OneDriveAuthStatusDto {
+    lock.withLock { mutableCompleteLoginCount += 1 }
+    return OneDriveAuthStatusDto(status: "authorized", accountLabel: "Personal")
+  }
+
+  func listOneDriveChildren(parentItemID: String?) throws -> [OneDriveItemDto] {
+    [
+      OneDriveItemDto(
+        driveId: "drive",
+        itemId: "item",
+        name: "Personal.kdbx",
+        folder: false,
+        size: 128
+      )
+    ]
+  }
+
+  func addOneDriveVault(driveID: String, itemID: String) throws -> VaultReferenceDto {
+    VaultReferenceDto(
+      vaultRefId: "remote-ref",
+      displayName: "Personal.kdbx",
+      sourceKind: "onedrive",
+      sourceSummary: "OneDrive / Personal.kdbx",
+      lastUsedAt: 1,
+      availability: "available",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    )
+  }
+
+  func sync(vaultID: String) throws -> VaultSourceStatusDto {
+    lock.withLock { mutableSyncCount += 1 }
+    return sourceStatus
+  }
+
+  func syncStatus() throws -> VaultSourceStatusDto? { sourceStatus }
+
+  private var sourceStatus: VaultSourceStatusDto {
+    VaultSourceStatusDto(
+      sourceKind: "onedrive",
+      remoteState: "synced",
+      lastSyncAt: 1,
+      cachedAt: 1,
+      lastError: nil
+    )
+  }
+
+  private func state(unlocked: Bool, remote: Bool = false) -> SessionStateDto {
     SessionStateDto(
       unlocked: unlocked,
       activeVaultId: unlocked ? "vault" : nil,
-      currentVaultRefId: nil,
+      currentVaultRefId: remote ? "remote-ref" : nil,
       supportsBiometricUnlock: false,
-      sourceStatus: nil
+      sourceStatus: remote ? sourceStatus : nil
     )
   }
 }

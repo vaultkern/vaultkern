@@ -9,7 +9,7 @@
 /* Begin PBXBuildFile section */
 		0557BDA28EDFD452C14A32A8 /* VaultKernApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA8B8476DB85E1571586DCB /* VaultKernApp.swift */; };
 		0BCD385FEC4E61299B0785AD /* VaultKernCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68222B147A01AEF4BC682A83 /* VaultKernCore.swift */; };
-		31B8B6DBE6C3C643C1F22300 /* UnavailableOneDriveTokenAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6902299F02982D67AC40102A /* UnavailableOneDriveTokenAdapter.swift */; };
+		215D20C4A1F631763FF74446 /* MacOSOneDriveTokenAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC2457587CFA63BE3AF2E92 /* MacOSOneDriveTokenAdapter.swift */; };
 		3FD4A44F0067BDD3BAB7BABC /* SaveProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB2448BFFF9B54E48104F2AF /* SaveProgress.swift */; };
 		4A92481AFDAC8A872D560F69 /* MacOSUnlockBlobAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B51FC3D050A9B80A1845D11 /* MacOSUnlockBlobAdapter.swift */; };
 		57636281B97E2286DDB14B35 /* LocalVaultRoundTripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF749586DFBCD2BCEB1ADA98 /* LocalVaultRoundTripTests.swift */; };
@@ -37,13 +37,13 @@
 
 /* Begin PBXFileReference section */
 		05C3549FDD55455ED0F831C4 /* VaultAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultAppModelTests.swift; sourceTree = "<group>"; };
+		0FC2457587CFA63BE3AF2E92 /* MacOSOneDriveTokenAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOSOneDriveTokenAdapter.swift; sourceTree = "<group>"; };
 		16D559E19685258D0CCF2655 /* EntryDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryDraft.swift; sourceTree = "<group>"; };
 		1B51FC3D050A9B80A1845D11 /* MacOSUnlockBlobAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOSUnlockBlobAdapter.swift; sourceTree = "<group>"; };
 		1D10B7BD139158365B2C2DA8 /* VaultAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultAppModel.swift; sourceTree = "<group>"; };
 		3A7319B5960C8F2BB78328A2 /* SensitiveTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveTypes.swift; sourceTree = "<group>"; };
 		5743B486285B6423B798FAED /* VaultRuntimeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultRuntimeClient.swift; sourceTree = "<group>"; };
 		68222B147A01AEF4BC682A83 /* VaultKernCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultKernCore.swift; sourceTree = "<group>"; };
-		6902299F02982D67AC40102A /* UnavailableOneDriveTokenAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnavailableOneDriveTokenAdapter.swift; sourceTree = "<group>"; };
 		752957DEEC88EDA24B758F88 /* SensitiveOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveOwnershipTests.swift; sourceTree = "<group>"; };
 		9CA8B8476DB85E1571586DCB /* VaultKernApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultKernApp.swift; sourceTree = "<group>"; };
 		A647E3FDE573464317E7EDD5 /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
@@ -62,7 +62,6 @@
 			children = (
 				A647E3FDE573464317E7EDD5 /* AppConfiguration.swift */,
 				D46B881942400EDD573CCAEE /* SecurityScopedAccess.swift */,
-				6902299F02982D67AC40102A /* UnavailableOneDriveTokenAdapter.swift */,
 			);
 			path = Platform;
 			sourceTree = "<group>";
@@ -120,6 +119,7 @@
 		C7B88C59C9FE03F71428078E /* swift */ = {
 			isa = PBXGroup;
 			children = (
+				0FC2457587CFA63BE3AF2E92 /* MacOSOneDriveTokenAdapter.swift */,
 				1B51FC3D050A9B80A1845D11 /* MacOSUnlockBlobAdapter.swift */,
 				3A7319B5960C8F2BB78328A2 /* SensitiveTypes.swift */,
 				68222B147A01AEF4BC682A83 /* VaultKernCore.swift */,
@@ -257,11 +257,11 @@
 				728DB8B3FBF4670D0C85E66C /* AppConfiguration.swift in Sources */,
 				77D53D5B800D36335BACBDDA /* ContentView.swift in Sources */,
 				59BD457E5D411FA572952A92 /* EntryDraft.swift in Sources */,
+				215D20C4A1F631763FF74446 /* MacOSOneDriveTokenAdapter.swift in Sources */,
 				4A92481AFDAC8A872D560F69 /* MacOSUnlockBlobAdapter.swift in Sources */,
 				3FD4A44F0067BDD3BAB7BABC /* SaveProgress.swift in Sources */,
 				75F1169EBB493795417A3C39 /* SecurityScopedAccess.swift in Sources */,
 				AEDDEEE2FD2343B766C3C601 /* SensitiveTypes.swift in Sources */,
-				31B8B6DBE6C3C643C1F22300 /* UnavailableOneDriveTokenAdapter.swift in Sources */,
 				CF5AAC47F1C22E7DF63B13ED /* VaultAppModel.swift in Sources */,
 				0557BDA28EDFD452C14A32A8 /* VaultKernApp.swift in Sources */,
 				0BCD385FEC4E61299B0785AD /* VaultKernCore.swift in Sources */,
