@@ -77,11 +77,12 @@ class VaultKernSmokeTest {
     @Test
     fun opensListsAndExercisesUnlockBlobOnAndroid14() {
         assertEquals(34, android.os.Build.VERSION.SDK_INT)
-        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
         val root = File(context.noBackupFilesDir, "vaultkern-uniffi-smoke-${System.nanoTime()}")
         val vault = File(root, "smoke.kdbx")
         root.mkdirs()
-        context.assets.open("keepassxc-2.7.6-kdbx4.1.kdbx").use { input ->
+        instrumentation.context.assets.open("keepassxc-2.7.6-kdbx4.1.kdbx").use { input ->
             vault.outputStream().use(input::copyTo)
         }
 
