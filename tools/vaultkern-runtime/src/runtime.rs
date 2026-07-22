@@ -35,8 +35,8 @@ use vaultkern_runtime_protocol::{
     EntryAttachmentContentDto, EntryAttachmentDto, EntryCustomFieldDto, EntryDetailDto,
     EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto,
     EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
-    EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, MergeSummaryDto,
-    OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, HandshakeDto,
+    MergeSummaryDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
     PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
     PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto,
@@ -300,6 +300,7 @@ struct PendingQuickUnlockEnrollment {
 }
 
 pub struct QuickUnlockReconciliationCredentials {
+    vault_ref_id: Option<Zeroizing<String>>,
     password: Option<Zeroizing<String>>,
     key_file_path: Option<Zeroizing<String>>,
 }
@@ -310,9 +311,19 @@ impl QuickUnlockReconciliationCredentials {
         key_file_path: Option<String>,
     ) -> Self {
         Self {
+            vault_ref_id: None,
             password: password.map(SensitiveString::into_zeroizing),
             key_file_path: key_file_path.map(Zeroizing::new),
         }
+    }
+
+    pub fn bound_to_vault_ref(mut self, vault_ref_id: &str) -> Self {
+        self.vault_ref_id = Some(Zeroizing::new(vault_ref_id.to_owned()));
+        self
+    }
+
+    fn vault_ref_id(&self) -> Option<&str> {
+        self.vault_ref_id.as_deref().map(String::as_str)
     }
 
     pub fn password(&self) -> Option<&str> {
@@ -332,6 +343,7 @@ impl std::fmt::Debug for QuickUnlockReconciliationCredentials {
 
 impl Zeroize for QuickUnlockReconciliationCredentials {
     fn zeroize(&mut self) {
+        self.vault_ref_id.zeroize();
         self.password.zeroize();
         self.key_file_path.zeroize();
     }
@@ -1655,6 +1667,9 @@ impl Runtime {
         let Some(credentials) = credentials else {
             return Ok(false);
         };
+        if credentials.vault_ref_id() != Some(current_vault_ref_id.as_str()) {
+            return Ok(false);
+        }
         self.enable_quick_unlock_for_current_vault(
             credentials.password(),
             credentials.key_file_path(),
@@ -1671,15 +1686,32 @@ impl Runtime {
         if !self.allow_unlock_kdf {
             return;
         }
-        if self.vault_session.current_vault_ref_id().is_none() {
+        let Some(vault_ref_id) = self.vault_session.current_vault_ref_id().map(str::to_owned)
+        else {
             return;
-        }
+        };
         self.pending_quick_unlock_enrollment = Some(PendingQuickUnlockEnrollment {
             credentials: QuickUnlockReconciliationCredentials::from_protocol_input(
                 password,
                 key_file_path,
-            ),
+            )
+            .bound_to_vault_ref(&vault_ref_id),
         });
+    }
+
+    pub fn bind_quick_unlock_reconciliation_credentials(
+        &self,
+        credentials: QuickUnlockReconciliationCredentials,
+        expected_vault_ref_id: &str,
+    ) -> Result<QuickUnlockReconciliationCredentials> {
+        let vault_ref_id = self
+            .vault_session
+            .current_vault_ref_id()
+            .context("no current vault selected")?;
+        if vault_ref_id != expected_vault_ref_id {
+            anyhow::bail!("current vault changed before quick unlock enrollment was bound");
+        }
+        Ok(credentials.bound_to_vault_ref(vault_ref_id))
     }
 
     pub fn session_state(&self) -> vaultkern_runtime_protocol::SessionStateDto {
@@ -2323,6 +2355,7 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         parent_group_id: &str,
+        requested_entry_id: Option<String>,
         title: SensitiveString,
         username: SensitiveString,
         password: SensitiveString,
@@ -2342,25 +2375,63 @@ impl Runtime {
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
 
-            let created = self.core.add_entry(
-                vault,
-                parent_group_id,
-                EntryCreate {
+            if let Some(entry_id) = requested_entry_id.as_deref()
+                && let Ok(existing) = self.core.project_entry_detail(vault, entry_id)
+            {
+                let in_requested_parent = self
+                    .core
+                    .find_group_view_by_id(vault, parent_group_id)
+                    .is_some_and(|group| group.entries.iter().any(|entry| entry.id == entry_id));
+                let existing_totp = self.core.project_entry_totp(vault, entry_id)?;
+                let same_totp = match (existing_totp.as_ref(), totp.as_ref()) {
+                    (None, None) => true,
+                    (Some(existing), Some(requested)) => {
+                        existing.secret_base32 == requested.secret_base32
+                            && existing.algorithm == requested.algorithm
+                            && existing.digits == requested.digits
+                            && existing.period_seconds == requested.period_seconds
+                            && existing.issuer == requested.issuer
+                            && existing.account_name == requested.account_name
+                    }
+                    _ => false,
+                };
+                if !in_requested_parent
+                    || existing.title != title.as_str()
+                    || existing.username != username.as_str()
+                    || existing.password != password.as_str()
+                    || existing.url != url.as_str()
+                    || existing.notes != notes.as_str()
+                    || !same_totp
+                {
+                    anyhow::bail!(
+                        "planned entry id collision: {entry_id} does not match the requested entry"
+                    );
+                }
+                entry_id.to_owned()
+            } else {
+                let create = EntryCreate {
                     title: take_sensitive_string(title),
                     username: take_sensitive_string(username),
                     password: take_sensitive_string(password),
                     url: take_sensitive_string(url),
                     notes: take_sensitive_string(notes),
-                },
-            )?;
+                };
+                let created = match requested_entry_id {
+                    Some(entry_id) => {
+                        self.core
+                            .add_entry_with_id(vault, parent_group_id, &entry_id, create)?
+                    }
+                    None => self.core.add_entry(vault, parent_group_id, create)?,
+                };
 
-            initialize_entry_creation_times(&self.core, vault, &created.id, modified_at)?;
+                initialize_entry_creation_times(&self.core, vault, &created.id, modified_at)?;
 
-            if let Some(totp) = totp {
-                self.core.set_entry_totp(vault, &created.id, totp)?;
+                if let Some(totp) = totp {
+                    self.core.set_entry_totp(vault, &created.id, totp)?;
+                }
+
+                created.id
             }
-
-            created.id
         };
 
         self.get_entry_detail(vault_id, &entry_id)
@@ -4303,14 +4374,27 @@ impl Runtime {
             anyhow::bail!("browser request was cancelled");
         }
         if browser_command_authorization(command) == BrowserCommandAuthorization::FreshInteractive {
+            let reason = if matches!(command, RuntimeCommand::Handshake { .. }) {
+                "Connect the VaultKern browser extension"
+            } else {
+                "Allow browser access to VaultKern secrets or security settings"
+            };
             self.biometric
-                .authorize("Allow browser access to VaultKern secrets or security settings")
+                .authorize(reason)
                 .context("fresh browser request verification failed")?;
         }
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("browser request was cancelled");
         }
         Ok(())
+    }
+
+    pub fn authorize_browser_command_only(
+        &mut self,
+        command: &RuntimeCommand,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
+        self.authorize_browser_command(command, cancelled)
     }
 
     pub fn handle(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
@@ -4335,9 +4419,13 @@ impl Runtime {
 
     fn handle_inner(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
         match command {
-            RuntimeCommand::Handshake { .. } => {
-                anyhow::bail!("runtime handshake reached the business-state dispatcher")
-            }
+            RuntimeCommand::Handshake {
+                protocol_version,
+                capabilities,
+            } => Ok(RuntimeResponse::Handshake(HandshakeDto {
+                protocol_version,
+                capabilities,
+            })),
             RuntimeCommand::GetSessionState => {
                 Ok(RuntimeResponse::SessionState(self.session_state()))
             }
@@ -4435,6 +4523,7 @@ impl Runtime {
             RuntimeCommand::CreateEntry {
                 vault_id,
                 parent_group_id,
+                entry_id,
                 title,
                 username,
                 password,
@@ -4445,6 +4534,7 @@ impl Runtime {
                 .create_entry(
                     &vault_id,
                     &parent_group_id,
+                    entry_id,
                     title,
                     username,
                     password,
@@ -8540,7 +8630,8 @@ enum BrowserCommandAuthorization {
 
 fn browser_command_authorization(command: &RuntimeCommand) -> BrowserCommandAuthorization {
     match command {
-        RuntimeCommand::AddLocalVaultReference { .. }
+        RuntimeCommand::Handshake { .. }
+        | RuntimeCommand::AddLocalVaultReference { .. }
         | RuntimeCommand::BeginOneDriveLogin
         | RuntimeCommand::CompletePendingOneDriveLogin
         | RuntimeCommand::ListOneDriveChildren { .. }
@@ -8589,8 +8680,7 @@ fn browser_command_authorization(command: &RuntimeCommand) -> BrowserCommandAuth
         | RuntimeCommand::PasskeyCredentialStatusBatch { .. } => {
             BrowserCommandAuthorization::PasskeyCeremonyBound
         }
-        RuntimeCommand::Handshake { .. }
-        | RuntimeCommand::GetSessionState
+        RuntimeCommand::GetSessionState
         | RuntimeCommand::ListRecentVaults
         | RuntimeCommand::PreloadCurrentVault
         | RuntimeCommand::SetCurrentVault { .. }
@@ -11039,7 +11129,7 @@ mod tests {
                 update: DatabaseSettingsUpdateDto::default(),
             }
         ));
-        assert!(!browser_command_requires_fresh_verification(
+        assert!(browser_command_requires_fresh_verification(
             &RuntimeCommand::Handshake {
                 protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
                 capabilities: vec!["browser-extension".into()],
@@ -11069,6 +11159,28 @@ mod tests {
             authorizations.borrow().as_slice(),
             ["Allow browser access to VaultKern secrets or security settings"]
         );
+    }
+
+    #[test]
+    fn browser_runtime_authorizes_and_answers_the_connection_handshake() {
+        let authorizations = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(CountingBiometricProvider {
+            authorizations: authorizations.clone(),
+        });
+
+        let response = runtime
+            .handle_browser_command(RuntimeCommand::Handshake {
+                protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
+                capabilities: vec!["runtime-core".into(), "browser-extension".into()],
+            })
+            .expect("authorized handshake should be answered");
+
+        assert_eq!(
+            authorizations.borrow().as_slice(),
+            ["Connect the VaultKern browser extension"]
+        );
+        assert!(matches!(response, RuntimeResponse::Handshake(_)));
     }
 
     #[test]
@@ -13328,6 +13440,7 @@ mod tests {
             .create_entry(
                 vault_id,
                 &root_group_id,
+                None,
                 "Example".into(),
                 "alice".into(),
                 "secret".into(),
@@ -14047,6 +14160,7 @@ mod tests {
                 .create_entry(
                     &opened.vault_id,
                     &root_group_id,
+                    None,
                     "Invalid TOTP".into(),
                     "alice".into(),
                     "secret".into(),
@@ -14064,6 +14178,67 @@ mod tests {
                 .entries
                 .len(),
             before
+        );
+    }
+
+    #[test]
+    fn planned_create_id_replays_only_the_same_entry_intent() {
+        let mut runtime = Runtime::for_tests();
+        let (_directory, opened) = open_unlocked_demo_vault(&mut runtime);
+        let root_group_id = runtime.list_groups(&opened.vault_id).unwrap().root.id;
+        let planned_id = "12345678-1234-4abc-8def-1234567890ad";
+
+        let created = runtime
+            .create_entry(
+                &opened.vault_id,
+                &root_group_id,
+                Some(planned_id.into()),
+                "Example".into(),
+                "alice".into(),
+                "secret".into(),
+                "https://example.com".into(),
+                "notes".into(),
+                None,
+            )
+            .expect("create planned entry");
+        let replayed = runtime
+            .create_entry(
+                &opened.vault_id,
+                &root_group_id,
+                Some(planned_id.into()),
+                "Example".into(),
+                "alice".into(),
+                "secret".into(),
+                "https://example.com".into(),
+                "notes".into(),
+                None,
+            )
+            .expect("replay identical planned entry");
+
+        assert_eq!(created, replayed);
+        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 1);
+
+        let error = runtime
+            .create_entry(
+                &opened.vault_id,
+                &root_group_id,
+                Some(planned_id.into()),
+                "Different entry".into(),
+                "mallory".into(),
+                "different-secret".into(),
+                "https://attacker.example".into(),
+                String::new().into(),
+                None,
+            )
+            .expect_err("the same planned UUID must not alias a different entry intent");
+
+        assert!(error.to_string().contains("planned entry id collision"));
+        assert_eq!(
+            runtime
+                .get_entry_detail(&opened.vault_id, planned_id)
+                .unwrap()
+                .title,
+            "Example"
         );
     }
 
@@ -19144,6 +19319,7 @@ mod tests {
             .create_entry(
                 &opened.vault_id,
                 &root_id,
+                None,
                 "Example".into(),
                 "alice".into(),
                 "secret".into(),
@@ -19556,6 +19732,59 @@ mod tests {
     }
 
     #[test]
+    fn quick_unlock_credentials_cannot_enroll_a_different_current_vault() {
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let credentials = QuickUnlockReconciliationCredentials::from_protocol_input(
+            Some("demo-password".into()),
+            None,
+        )
+        .bound_to_vault_ref("another-vault-reference");
+
+        assert!(
+            !runtime
+                .reconcile_quick_unlock(true, Some(credentials))
+                .expect("mismatched enrollment is skipped")
+        );
+        assert!(
+            runtime
+                .list_recent_vaults()
+                .unwrap()
+                .vaults
+                .iter()
+                .all(|vault| !vault.supports_quick_unlock)
+        );
+    }
+
+    #[test]
+    fn manual_quick_unlock_credentials_are_bound_only_to_the_expected_current_vault() {
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let actual_vault_ref_id = runtime
+            .session_state()
+            .current_vault_ref_id
+            .expect("current vault reference");
+        let credentials = QuickUnlockReconciliationCredentials::from_protocol_input(
+            Some("demo-password".into()),
+            None,
+        );
+
+        let error = runtime
+            .bind_quick_unlock_reconciliation_credentials(credentials, "stale-vault-reference")
+            .expect_err("a stale settings page must not bind credentials to another vault");
+        assert!(error.to_string().contains("current vault changed"));
+
+        let credentials = QuickUnlockReconciliationCredentials::from_protocol_input(
+            Some("demo-password".into()),
+            None,
+        );
+        let bound = runtime
+            .bind_quick_unlock_reconciliation_credentials(credentials, &actual_vault_ref_id)
+            .expect("matching vault reference binds credentials");
+        assert_eq!(bound.vault_ref_id(), Some(actual_vault_ref_id.as_str()));
+    }
+
+    #[test]
     fn quick_unlock_reconciliation_drops_failed_credentials_and_retries_from_a_fresh_handoff() {
         struct FailFirstStore {
             fail_next: std::cell::Cell<bool>,
@@ -19595,6 +19824,10 @@ mod tests {
 
         let mut runtime = Runtime::for_tests_with_quick_unlock();
         let (_dir, _opened) = open_unlocked_demo_vault(&mut runtime);
+        let vault_ref_id = runtime
+            .session_state()
+            .current_vault_ref_id
+            .expect("current vault reference");
         runtime.secure_storage = Box::new(FailFirstStore {
             fail_next: std::cell::Cell::new(true),
             values: RefCell::new(BTreeMap::new()),
@@ -19603,10 +19836,13 @@ mod tests {
             runtime
                 .reconcile_quick_unlock(
                     true,
-                    Some(QuickUnlockReconciliationCredentials::from_protocol_input(
-                        Some("demo-password".into()),
-                        None,
-                    )),
+                    Some(
+                        QuickUnlockReconciliationCredentials::from_protocol_input(
+                            Some("demo-password".into()),
+                            None,
+                        )
+                        .bound_to_vault_ref(&vault_ref_id)
+                    ),
                 )
                 .is_err()
         );
@@ -19615,10 +19851,13 @@ mod tests {
             runtime
                 .reconcile_quick_unlock(
                     true,
-                    Some(QuickUnlockReconciliationCredentials::from_protocol_input(
-                        Some("demo-password".into()),
-                        None,
-                    )),
+                    Some(
+                        QuickUnlockReconciliationCredentials::from_protocol_input(
+                            Some("demo-password".into()),
+                            None,
+                        )
+                        .bound_to_vault_ref(&vault_ref_id)
+                    ),
                 )
                 .unwrap()
         );

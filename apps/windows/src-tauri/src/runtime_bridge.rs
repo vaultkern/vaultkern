@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyAssertionOutput, PlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
@@ -14,6 +16,7 @@ use vaultkern_runtime_protocol::{
     ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
     SessionStateDto,
 };
+use zeroize::Zeroizing;
 
 #[derive(Clone)]
 pub struct RuntimeBridge {
@@ -50,7 +53,6 @@ enum RuntimeRequest {
         command: RuntimeCommand,
         operation_id: Option<String>,
         cancelled: Arc<AtomicBool>,
-        execution_started: Arc<AtomicBool>,
         browser_client: bool,
         parent_window: Option<usize>,
         response: Sender<RuntimeProtocolResponse>,
@@ -65,6 +67,11 @@ enum RuntimeRequest {
     },
     EndPlatformPasskeyOperation {
         operation_id: Vec<u8>,
+    },
+    BindQuickUnlockCredentials {
+        credentials: QuickUnlockReconciliationCredentials,
+        expected_vault_ref_id: String,
+        response: Sender<Result<QuickUnlockReconciliationCredentials, String>>,
     },
     ReconcileQuickUnlock {
         enabled: bool,
@@ -107,11 +114,85 @@ struct ResidentIdleLock {
 struct ResidentMutationState {
     unsaved_vault_ids: BTreeSet<String>,
     pending_save_receipts: BTreeMap<(String, String), RuntimeResponse>,
+    pending_save_receipt_order: VecDeque<(String, String)>,
+    operation_receipts: BTreeMap<(String, String), ResidentOperationReceipt>,
+    operation_receipt_order: VecDeque<(String, String)>,
 }
 
 const MAX_PENDING_SAVE_RECEIPTS: usize = 256;
+const MAX_OPERATION_RECEIPTS: usize = 256;
+const MAX_LOGICAL_OPERATION_ID_BYTES: usize = 256;
+
+struct ResidentOperationReceipt {
+    command_digest: [u8; 32],
+    response_json: Option<Zeroizing<Vec<u8>>>,
+}
+
+struct OperationReceiptIdentity {
+    key: (String, String),
+    command_digest: [u8; 32],
+}
+
+enum OperationReceiptLookup {
+    Miss,
+    Replay(RuntimeResponse),
+    Expired,
+    Conflict,
+}
 
 impl ResidentMutationState {
+    fn lookup_operation_receipt(
+        &self,
+        identity: Option<&OperationReceiptIdentity>,
+    ) -> Result<OperationReceiptLookup, String> {
+        let Some(identity) = identity else {
+            return Ok(OperationReceiptLookup::Miss);
+        };
+        let Some(receipt) = self.operation_receipts.get(&identity.key) else {
+            return Ok(OperationReceiptLookup::Miss);
+        };
+        if receipt.command_digest != identity.command_digest {
+            return Ok(OperationReceiptLookup::Conflict);
+        }
+        let Some(response_json) = receipt.response_json.as_deref() else {
+            return Ok(OperationReceiptLookup::Expired);
+        };
+        let response = serde_json::from_slice(response_json)
+            .map_err(|error| format!("failed to decode resident operation receipt: {error}"))?;
+        Ok(OperationReceiptLookup::Replay(response))
+    }
+
+    fn record_operation_receipt(
+        &mut self,
+        identity: Option<OperationReceiptIdentity>,
+        response: &RuntimeResponse,
+    ) -> Result<(), String> {
+        let Some(identity) = identity else {
+            return Ok(());
+        };
+        let receipt = ResidentOperationReceipt {
+            command_digest: identity.command_digest,
+            response_json: Some(vaultkern_runtime::encode_zeroizing_json(response).map_err(
+                |error| format!("failed to encode resident operation receipt: {error}"),
+            )?),
+        };
+        if self
+            .operation_receipts
+            .insert(identity.key.clone(), receipt)
+            .is_some()
+        {
+            self.operation_receipt_order
+                .retain(|key| key != &identity.key);
+        }
+        self.operation_receipt_order.push_back(identity.key);
+        while self.operation_receipts.len() > MAX_OPERATION_RECEIPTS {
+            if let Some(oldest) = self.operation_receipt_order.pop_front() {
+                self.operation_receipts.remove(&oldest);
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     fn note_dispatch(&mut self, command: &RuntimeCommand) {
         if let Some(vault_id) = command_unsaved_vault_id(command) {
@@ -151,32 +232,117 @@ impl ResidentMutationState {
     ) {
         if response_recoverably_persists_active_vault(&response) {
             self.unsaved_vault_ids.remove(&vault_id);
+            self.record_save_receipt(vault_id, operation_id, &response);
         } else {
             self.unsaved_vault_ids.insert(vault_id.clone());
         }
+    }
+
+    fn record_save_receipt(
+        &mut self,
+        vault_id: String,
+        operation_id: Option<String>,
+        response: &RuntimeResponse,
+    ) {
+        let RuntimeResponse::SaveVaultResult(result) = response else {
+            return;
+        };
         if let Some(operation_id) = operation_id {
-            self.pending_save_receipts
-                .insert((vault_id, operation_id), response);
+            let key = (vault_id, operation_id);
+            if self
+                .pending_save_receipts
+                .insert(
+                    key.clone(),
+                    RuntimeResponse::SaveVaultResult(result.clone()),
+                )
+                .is_some()
+            {
+                self.pending_save_receipt_order
+                    .retain(|candidate| candidate != &key);
+            }
+            self.pending_save_receipt_order.push_back(key);
             while self.pending_save_receipts.len() > MAX_PENDING_SAVE_RECEIPTS {
-                self.pending_save_receipts.pop_first();
+                if let Some(oldest) = self.pending_save_receipt_order.pop_front() {
+                    self.pending_save_receipts.remove(&oldest);
+                }
             }
         }
     }
 
-    fn take_save_receipt(
-        &mut self,
+    fn save_receipt(
+        &self,
         vault_id: &str,
         operation_id: Option<&str>,
-    ) -> Option<RuntimeResponse> {
-        let operation_id = operation_id?;
-        self.pending_save_receipts
-            .remove(&(vault_id.to_owned(), operation_id.to_owned()))
+    ) -> Result<Option<RuntimeResponse>, String> {
+        let Some(operation_id) = operation_id else {
+            return Ok(None);
+        };
+        let key = (vault_id.to_owned(), operation_id.to_owned());
+        let Some(receipt) = self.pending_save_receipts.get(&key) else {
+            return Ok(None);
+        };
+        let encoded = vaultkern_runtime::encode_zeroizing_json(receipt)
+            .map_err(|error| format!("failed to encode resident save receipt: {error}"))?;
+        serde_json::from_slice(&encoded)
+            .map(Some)
+            .map_err(|error| format!("failed to decode resident save receipt: {error}"))
     }
 
     fn clear_save_receipts(&mut self, vault_id: &str) {
         self.pending_save_receipts
             .retain(|(receipt_vault_id, _), _| receipt_vault_id != vault_id);
+        self.pending_save_receipt_order
+            .retain(|(receipt_vault_id, _)| receipt_vault_id != vault_id);
     }
+
+    fn scrub_session_secrets(&mut self) {
+        for receipt in self.operation_receipts.values_mut() {
+            receipt.response_json = None;
+        }
+    }
+}
+
+fn operation_receipt_identity(
+    command: &RuntimeCommand,
+    operation_id: Option<&str>,
+) -> Result<Option<OperationReceiptIdentity>, String> {
+    let Some(vault_id) = command_unsaved_vault_id(command) else {
+        return Ok(None);
+    };
+    let Some(operation_id) = operation_id else {
+        return Ok(None);
+    };
+    Ok(Some(OperationReceiptIdentity {
+        key: (vault_id.to_owned(), operation_id.to_owned()),
+        command_digest: runtime_command_digest(command)?,
+    }))
+}
+
+fn valid_logical_operation_id(operation_id: &str) -> bool {
+    !operation_id.is_empty()
+        && operation_id.len() <= MAX_LOGICAL_OPERATION_ID_BYTES
+        && operation_id.trim() == operation_id
+        && !operation_id.chars().any(char::is_control)
+}
+
+fn runtime_command_digest(command: &RuntimeCommand) -> Result<[u8; 32], String> {
+    struct DigestWriter<'a>(&'a mut Sha256);
+
+    impl Write for DigestWriter<'_> {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.0.update(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(DigestWriter(&mut hasher), command)
+        .map_err(|error| format!("failed to fingerprint resident operation: {error}"))?;
+    Ok(hasher.finalize().into())
 }
 
 impl ResidentIdleLock {
@@ -258,6 +424,7 @@ impl RuntimeBridge {
                             idle_lock.record_activity();
                             continue;
                         }
+                        mutation_state.scrub_session_secrets();
                         runtime.lock_session();
                         publish_session_state(
                             &worker_session_state_notifier,
@@ -280,6 +447,7 @@ impl RuntimeBridge {
                                     idle_lock.record_activity();
                                     continue;
                                 }
+                                mutation_state.scrub_session_secrets();
                                 runtime.lock_session();
                                 publish_session_state(
                                     &worker_session_state_notifier,
@@ -321,15 +489,75 @@ impl RuntimeBridge {
                             command,
                             operation_id,
                             cancelled,
-                            execution_started,
                             browser_client,
                             parent_window,
                             response,
                         } => {
+                            if operation_id
+                                .as_deref()
+                                .is_some_and(|value| !valid_logical_operation_id(value))
+                            {
+                                let _ = response.send(RuntimeProtocolResponse {
+                                    response: error_response(
+                                        "invalid_request",
+                                        "invalid logical operation ID",
+                                    ),
+                                    quick_unlock_credentials: None,
+                                });
+                                continue;
+                            }
+                            let operation_identity =
+                                match operation_receipt_identity(&command, operation_id.as_deref())
+                                {
+                                    Ok(identity) => identity,
+                                    Err(error) => {
+                                        let _ = response.send(RuntimeProtocolResponse {
+                                            response: error_response(
+                                                "runtime_unavailable",
+                                                error,
+                                            ),
+                                            quick_unlock_credentials: None,
+                                        });
+                                        continue;
+                                    }
+                                };
+                            let operation_lookup = match mutation_state
+                                .lookup_operation_receipt(operation_identity.as_ref())
+                            {
+                                Ok(lookup) => lookup,
+                                Err(error) => {
+                                    let _ = response.send(RuntimeProtocolResponse {
+                                        response: error_response(
+                                            "runtime_unavailable",
+                                            error,
+                                        ),
+                                        quick_unlock_credentials: None,
+                                    });
+                                    continue;
+                                }
+                            };
                             let publishes_session_state =
                                 command_can_change_session_state(&command);
                             let pending_save_vault_id =
                                 save_command_vault_id(&command).map(ToOwned::to_owned);
+                            let pending_save_receipt = match pending_save_vault_id.as_deref() {
+                                Some(vault_id) => match mutation_state
+                                    .save_receipt(vault_id, operation_id.as_deref())
+                                {
+                                    Ok(receipt) => receipt,
+                                    Err(error) => {
+                                        let _ = response.send(RuntimeProtocolResponse {
+                                            response: error_response(
+                                                "runtime_unavailable",
+                                                error,
+                                            ),
+                                            quick_unlock_credentials: None,
+                                        });
+                                        continue;
+                                    }
+                                },
+                                None => None,
+                            };
                             let records_activity = matches!(
                                 &command,
                                 RuntimeCommand::RecordUserActivity
@@ -339,20 +567,61 @@ impl RuntimeBridge {
                                     | RuntimeCommand::UnlockWithPassword { .. }
                                     | RuntimeCommand::UnlockVault { .. }
                             );
-                            execution_started.store(true, Ordering::Release);
                             let (value, quick_unlock_credentials) =
                                 if cancelled.load(Ordering::Acquire) {
                                     (cancelled_response(), None)
-                                } else if let Some(receipt) = pending_save_vault_id
-                                    .as_deref()
-                                    .and_then(|vault_id| {
-                                        mutation_state.take_save_receipt(
-                                            vault_id,
-                                            operation_id.as_deref(),
-                                        )
-                                    })
-                                {
+                                } else if let Some(receipt) = pending_save_receipt {
                                     (receipt, None)
+                                } else if matches!(operation_lookup, OperationReceiptLookup::Conflict)
+                                {
+                                    (
+                                        error_response(
+                                            "operation_id_conflict",
+                                            "logical operation ID was already used for a different mutation",
+                                        ),
+                                        None,
+                                    )
+                                } else if matches!(operation_lookup, OperationReceiptLookup::Expired)
+                                {
+                                    (
+                                        error_response(
+                                            "operation_outcome_expired",
+                                            "the logical operation completed in an earlier resident session; reload the vault instead of repeating it",
+                                        ),
+                                        None,
+                                    )
+                                } else if let OperationReceiptLookup::Replay(receipt) = operation_lookup
+                                {
+                                    let previous_parent = browser_client.then(|| {
+                                        runtime.replace_parent_window_handle(parent_window)
+                                    });
+                                    let authorization = if browser_client {
+                                        runtime.authorize_browser_command_only(
+                                            &command,
+                                            cancelled.as_ref(),
+                                        )
+                                    } else {
+                                        Ok(())
+                                    };
+                                    if let Some(previous_parent) = previous_parent {
+                                        runtime.set_parent_window_handle(previous_parent);
+                                    }
+                                    match authorization {
+                                        Ok(()) => (receipt, None),
+                                        Err(error)
+                                            if error.to_string()
+                                                == "browser request was cancelled" =>
+                                        {
+                                            (cancelled_response(), None)
+                                        }
+                                        Err(error) => (
+                                            error_response(
+                                                "runtime_error",
+                                                format!("{error:#}"),
+                                            ),
+                                            None,
+                                        ),
+                                    }
                                 } else if let Some(error) =
                                     platform_passkey_operation_preflight_error(
                                         runtime.has_active_platform_passkey_operations(),
@@ -384,7 +653,7 @@ impl RuntimeBridge {
                                     if let Some(previous_parent) = previous_parent {
                                         runtime.set_parent_window_handle(previous_parent);
                                     }
-                                    let outcome = match result {
+                                    let mut outcome = match result {
                                         Ok((response, credentials)) => (response, credentials),
                                         Err(error)
                                             if error.to_string()
@@ -437,6 +706,29 @@ impl RuntimeBridge {
                                         {
                                             mutation_state.unsaved_vault_ids.remove(&vault_id);
                                             mutation_state.clear_save_receipts(&vault_id);
+                                            if pending_save_vault_id.as_deref()
+                                                == Some(vault_id.as_str())
+                                            {
+                                                mutation_state.record_save_receipt(
+                                                    vault_id,
+                                                    operation_id.clone(),
+                                                    &outcome.0,
+                                                );
+                                            }
+                                        }
+                                        if let Err(error) = mutation_state
+                                            .record_operation_receipt(
+                                                operation_identity,
+                                                &outcome.0,
+                                            )
+                                        {
+                                            outcome = (
+                                                error_response(
+                                                    "request_outcome_unknown",
+                                                    error,
+                                                ),
+                                                None,
+                                            );
                                         }
                                     }
                                     outcome
@@ -449,6 +741,7 @@ impl RuntimeBridge {
                             if publishes_session_state
                                 && !matches!(&value, RuntimeResponse::Error(_))
                             {
+                                mutation_state.scrub_session_secrets();
                                 publish_session_state(
                                     &worker_session_state_notifier,
                                     runtime.session_state(),
@@ -479,6 +772,7 @@ impl RuntimeBridge {
                             if result.is_ok() {
                                 let next_state = runtime.session_state();
                                 if next_state != previous_state {
+                                    mutation_state.scrub_session_secrets();
                                     publish_session_state(
                                         &worker_session_state_notifier,
                                         next_state,
@@ -492,11 +786,25 @@ impl RuntimeBridge {
                             runtime.end_platform_passkey_operation(&operation_id);
                             let next_state = runtime.session_state();
                             if next_state != previous_state {
+                                mutation_state.scrub_session_secrets();
                                 publish_session_state(
                                     &worker_session_state_notifier,
                                     next_state,
                                 );
                             }
+                        }
+                        RuntimeRequest::BindQuickUnlockCredentials {
+                            credentials,
+                            expected_vault_ref_id,
+                            response,
+                        } => {
+                            let result = runtime_result(|| {
+                                runtime.bind_quick_unlock_reconciliation_credentials(
+                                    credentials,
+                                    &expected_vault_ref_id,
+                                )
+                            });
+                            let _ = response.send(result);
                         }
                         RuntimeRequest::ReconcileQuickUnlock {
                             enabled,
@@ -584,33 +892,25 @@ impl RuntimeBridge {
     }
 
     pub fn request_cancellable(&self, message: Value, cancelled: Arc<AtomicBool>) -> Value {
-        self.request_value(
-            message,
-            cancelled,
-            Arc::new(AtomicBool::new(false)),
-            false,
-            None,
-        )
+        self.request_value(message, cancelled, false, None)
     }
 
     pub fn request_browser_cancellable(
         &self,
         envelope: ProtocolEnvelope,
         cancelled: Arc<AtomicBool>,
-        execution_started: Arc<AtomicBool>,
         parent_window: Option<usize>,
     ) -> RuntimeResponse {
         if cancelled.load(Ordering::Acquire) {
             return cancelled_response();
         }
-        self.request_protocol(envelope, cancelled, execution_started, true, parent_window)
+        self.request_protocol(envelope, cancelled, true, parent_window)
     }
 
     fn request_value(
         &self,
         message: Value,
         cancelled: Arc<AtomicBool>,
-        execution_started: Arc<AtomicBool>,
         browser_client: bool,
         parent_window: Option<usize>,
     ) -> Value {
@@ -626,13 +926,7 @@ impl RuntimeBridge {
                 ));
             }
         };
-        response_value(self.request_protocol(
-            envelope,
-            cancelled,
-            execution_started,
-            browser_client,
-            parent_window,
-        ))
+        response_value(self.request_protocol(envelope, cancelled, browser_client, parent_window))
     }
 
     pub fn request_envelope(&self, envelope: ProtocolEnvelope) -> RuntimeResponse {
@@ -669,7 +963,6 @@ impl RuntimeBridge {
                 command,
             },
             Arc::new(AtomicBool::new(false)),
-            Arc::new(AtomicBool::new(false)),
             false,
             None,
         )
@@ -679,7 +972,6 @@ impl RuntimeBridge {
         &self,
         envelope: ProtocolEnvelope,
         cancelled: Arc<AtomicBool>,
-        execution_started: Arc<AtomicBool>,
         browser_client: bool,
         parent_window: Option<usize>,
     ) -> RuntimeResponse {
@@ -703,7 +995,6 @@ impl RuntimeBridge {
                 command,
                 operation_id,
                 cancelled,
-                execution_started,
                 browser_client,
                 parent_window,
                 response,
@@ -821,7 +1112,14 @@ impl RuntimeBridge {
     pub fn queue_quick_unlock_enrollment(
         &self,
         credentials: QuickUnlockReconciliationCredentials,
+        expected_vault_ref_id: String,
     ) -> Result<(), String> {
+        let credentials =
+            self.request_platform(|response| RuntimeRequest::BindQuickUnlockCredentials {
+                credentials,
+                expected_vault_ref_id,
+                response,
+            })?;
         self.reconcile_with_quick_unlock_credentials(credentials)
     }
 
@@ -1223,8 +1521,9 @@ fn response_schedules_reconciliation(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResidentIdleLock, ResidentMutationState, RuntimeBridge, RuntimeRequest,
-        reconciliation_reasons, response_schedules_reconciliation,
+        OperationReceiptLookup, ResidentIdleLock, ResidentMutationState, RuntimeBridge,
+        RuntimeRequest, operation_receipt_identity, reconciliation_reasons,
+        response_schedules_reconciliation,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -1340,7 +1639,6 @@ mod tests {
                 vault_id: "missing-vault".into(),
                 entry_id: "missing-entry".into(),
             }),
-            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             None,
         );
@@ -1471,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn inline_mutation_save_is_replayed_to_the_followup_save_request() {
+    fn inline_mutation_save_receipt_survives_an_ambiguous_followup_response() {
         let mut state = ResidentMutationState::default();
         state.note_dispatch(&RuntimeCommand::ClearEntryTotp {
             vault_id: "vault-1".into(),
@@ -1492,16 +1790,56 @@ mod tests {
                 .preflight_error(&RuntimeCommand::LockSession)
                 .is_none()
         );
-        let receipt = state
-            .take_save_receipt("vault-1", Some("operation-1"))
+        let first = state
+            .save_receipt("vault-1", Some("operation-1"))
+            .expect("decode follow-up save receipt")
             .expect("follow-up save receives the inline result");
+        let replay = state
+            .save_receipt("vault-1", Some("operation-1"))
+            .expect("decode replayed save receipt")
+            .expect("an ambiguous transport can replay the same inline result");
         assert!(matches!(
-            receipt,
+            first,
             RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
                 status: SaveVaultStatusDto::Merged,
                 ..
             })
         ));
+        assert!(matches!(
+            replay,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_inline_save_remains_retryable_instead_of_becoming_a_receipt() {
+        let mut state = ResidentMutationState::default();
+        state.note_dispatch(&RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        });
+        state.record_inline_save(
+            "vault-1".into(),
+            Some("operation-1".into()),
+            super::error_response("runtime_error", "disk temporarily unavailable"),
+        );
+
+        assert!(
+            state
+                .save_receipt("vault-1", Some("operation-1"))
+                .expect("lookup failed inline save")
+                .is_none(),
+            "a cached failure would make every retry replay the stale error"
+        );
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::LockSession)
+                .is_some(),
+            "the in-memory mutation must remain protected until a retry persists it"
+        );
     }
 
     #[test]
@@ -1527,10 +1865,12 @@ mod tests {
         );
 
         let first = state
-            .take_save_receipt("vault-1", Some("operation-b"))
+            .save_receipt("vault-1", Some("operation-b"))
+            .expect("decode latest save receipt")
             .expect("latest logical operation keeps its receipt");
         let second = state
-            .take_save_receipt("vault-1", Some("operation-a"))
+            .save_receipt("vault-1", Some("operation-a"))
+            .expect("decode earlier save receipt")
             .expect("earlier logical operation also keeps its receipt");
         assert!(matches!(
             first,
@@ -1546,6 +1886,150 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn logical_mutation_receipts_replay_only_the_identical_command() {
+        let mut state = ResidentMutationState::default();
+        let original = RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        };
+        let original_identity = operation_receipt_identity(&original, Some("operation-1"))
+            .expect("fingerprint original operation");
+        state
+            .record_operation_receipt(original_identity, &RuntimeResponse::Saved)
+            .expect("record operation receipt");
+
+        let replay_identity =
+            operation_receipt_identity(&original, Some("operation-1")).expect("fingerprint replay");
+        assert!(matches!(
+            state
+                .lookup_operation_receipt(replay_identity.as_ref())
+                .expect("lookup replay"),
+            OperationReceiptLookup::Replay(RuntimeResponse::Saved)
+        ));
+
+        let different = RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-2".into(),
+        };
+        let conflicting_identity = operation_receipt_identity(&different, Some("operation-1"))
+            .expect("fingerprint conflicting operation");
+        assert!(matches!(
+            state
+                .lookup_operation_receipt(conflicting_identity.as_ref())
+                .expect("lookup conflict"),
+            OperationReceiptLookup::Conflict
+        ));
+    }
+
+    #[test]
+    fn session_invalidation_scrubs_secret_receipts_without_reopening_the_operation() {
+        let mut state = ResidentMutationState::default();
+        let command = RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        };
+        let identity = operation_receipt_identity(&command, Some("operation-1"))
+            .expect("fingerprint operation");
+        state
+            .record_operation_receipt(identity, &RuntimeResponse::Saved)
+            .expect("record operation receipt");
+
+        state.scrub_session_secrets();
+
+        let replay_identity =
+            operation_receipt_identity(&command, Some("operation-1")).expect("fingerprint replay");
+        assert!(matches!(
+            state
+                .lookup_operation_receipt(replay_identity.as_ref())
+                .expect("lookup scrubbed operation"),
+            OperationReceiptLookup::Expired
+        ));
+    }
+
+    #[test]
+    fn logical_mutation_receipts_evict_by_age_not_operation_id_sort_order() {
+        let mut state = ResidentMutationState::default();
+        let command = RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        };
+        for index in 0..super::MAX_OPERATION_RECEIPTS {
+            let operation_id = format!("z-{index:04}");
+            let identity = operation_receipt_identity(&command, Some(&operation_id))
+                .expect("fingerprint retained operation");
+            state
+                .record_operation_receipt(identity, &RuntimeResponse::Saved)
+                .expect("record retained operation");
+        }
+        let newest_id = "a-newest";
+        state
+            .record_operation_receipt(
+                operation_receipt_identity(&command, Some(newest_id))
+                    .expect("fingerprint newest operation"),
+                &RuntimeResponse::Saved,
+            )
+            .expect("record newest operation");
+
+        assert!(matches!(
+            state
+                .lookup_operation_receipt(
+                    operation_receipt_identity(&command, Some(newest_id))
+                        .expect("fingerprint newest lookup")
+                        .as_ref(),
+                )
+                .expect("lookup newest operation"),
+            OperationReceiptLookup::Replay(RuntimeResponse::Saved)
+        ));
+        assert!(matches!(
+            state
+                .lookup_operation_receipt(
+                    operation_receipt_identity(&command, Some("z-0000"))
+                        .expect("fingerprint oldest lookup")
+                        .as_ref(),
+                )
+                .expect("lookup oldest operation"),
+            OperationReceiptLookup::Miss
+        ));
+    }
+
+    #[test]
+    fn followup_save_receipts_evict_by_age_not_operation_id_sort_order() {
+        fn saved_response() -> RuntimeResponse {
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                merge_summary: None,
+                conflict_copy_path: None,
+            })
+        }
+
+        let mut state = ResidentMutationState::default();
+        for index in 0..super::MAX_PENDING_SAVE_RECEIPTS {
+            state.record_inline_save(
+                "vault-1".into(),
+                Some(format!("z-{index:04}")),
+                saved_response(),
+            );
+        }
+        state.record_inline_save("vault-1".into(), Some("a-newest".into()), saved_response());
+
+        assert!(matches!(
+            state
+                .save_receipt("vault-1", Some("a-newest"))
+                .expect("decode newest save receipt"),
+            Some(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Saved,
+                ..
+            }))
+        ));
+        assert!(
+            state
+                .save_receipt("vault-1", Some("z-0000"))
+                .expect("lookup evicted save receipt")
+                .is_none()
+        );
     }
 
     #[test]

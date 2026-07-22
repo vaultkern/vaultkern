@@ -40,7 +40,7 @@ export interface ExtensionSettingsStore {
   queueQuickUnlockEnrollment?(credentials: {
     password?: string | null;
     keyFilePath?: string | null;
-  }): Promise<void>;
+  }, expectedVaultRefId: string): Promise<void>;
   load(): Promise<ExtensionSettings>;
   save(settings: ExtensionSettings): Promise<void>;
 }

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ReactNode } from "react";
 
 import type {
+  CommittedMutation,
   DatabaseSettings,
   DatabaseSettingsCommitResult,
   DatabaseSettingsUpdate,
@@ -27,6 +28,10 @@ import type {
   UnlockCredentials,
   VaultHandle,
   VaultReference
+} from "@vaultkern/runtime-web-client";
+import {
+  runtimeMutationOperationId,
+  runtimeMutationResult
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "./designTokens";
@@ -88,16 +93,36 @@ export interface RuntimeClientLike {
   listGroups(vaultId: string): Promise<GroupTree>;
   listEntries(vaultId: string): Promise<EntrySummary[]>;
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
-  createEntry(vaultId: string, input: EntryDraft & { parentGroupId: string }): Promise<EntryDetail>;
-  updateEntryFields(vaultId: string, entryId: string, input: EntryDraft): Promise<EntryDetail>;
+  createEntry(
+    vaultId: string,
+    input: EntryDraft & { parentGroupId: string },
+    operationId?: string
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  updateEntryFields(
+    vaultId: string,
+    entryId: string,
+    input: EntryDraft,
+    operationId?: string
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
   setEntryPasskey(
     vaultId: string,
     entryId: string,
     passkey: EntryPasskeyUpdate
-  ): Promise<EntryDetail>;
-  clearEntryPasskey(vaultId: string, entryId: string): Promise<EntryDetail>;
-  deleteEntry(vaultId: string, entryId: string): Promise<void>;
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  clearEntryPasskey(
+    vaultId: string,
+    entryId: string
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  deleteEntry(
+    vaultId: string,
+    entryId: string,
+    operationId?: string
+  ): Promise<void | CommittedMutation<void>>;
   saveVault(vaultId: string): Promise<SaveVaultResult | void>;
+  retryMutationSave?(
+    vaultId: string,
+    operationId: string
+  ): Promise<SaveVaultResult | void>;
   getDatabaseSettings(vaultId: string): Promise<DatabaseSettings>;
   updateDatabaseSettings(
     vaultId: string,
@@ -112,22 +137,22 @@ export interface RuntimeClientLike {
     vaultId: string,
     entryId: string,
     input: EntryAttachmentInput
-  ): Promise<EntryDetail>;
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
   updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
     input: EntryAttachmentMetadataUpdate
-  ): Promise<EntryDetail>;
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
   replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
     input: EntryAttachmentContentUpdate
-  ): Promise<EntryDetail>;
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
   deleteEntryAttachment(
     vaultId: string,
     entryId: string,
     name: string
-  ): Promise<EntryDetail>;
+  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
   listEntryHistory(vaultId: string, entryId: string): Promise<EntryHistoryItem[]>;
   getEntryHistoryDetail(
     vaultId: string,
@@ -195,14 +220,22 @@ type DialogState =
 interface PendingEntrySave {
   vaultId: string;
   detail: EntryDetail;
+  operationId: string | null;
 }
 
 interface PendingEntryDelete {
   vaultId: string;
   entryId: string;
+  operationId: string | null;
 }
 
 interface PendingAttachmentSave extends PendingEntrySave {
+  fallbackMessage: string;
+}
+
+interface PendingUnknownDetailSave {
+  vaultId: string;
+  operationId: string;
   fallbackMessage: string;
 }
 
@@ -215,6 +248,18 @@ interface PendingDatabaseSettingsSave {
 const COMPACT_BREAKPOINT = 1180;
 const STACKED_BREAKPOINT = 760;
 const MAX_BROWSER_ATTACHMENT_DOWNLOAD_BYTES = 720 * 1024;
+
+function isCommittedMutation<T>(
+  value: T | CommittedMutation<T>
+): value is CommittedMutation<T> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "operationId" in value &&
+    "saveResult" in value &&
+    "value" in value
+  );
+}
 
 function getViewMode(width: number): ManagerViewMode {
   if (width < STACKED_BREAKPOINT) {
@@ -410,11 +455,15 @@ export function App({
   const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
     null
   );
+  const [entryMutationOutcomeUnknown, setEntryMutationOutcomeUnknown] =
+    useState(false);
   const [pendingPasskeySave, setPendingPasskeySave] = useState<PendingEntrySave | null>(
     null
   );
   const [pendingAttachmentSave, setPendingAttachmentSave] =
     useState<PendingAttachmentSave | null>(null);
+  const [pendingUnknownDetailSave, setPendingUnknownDetailSave] =
+    useState<PendingUnknownDetailSave | null>(null);
   const [pendingEntryDelete, setPendingEntryDelete] =
     useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
@@ -422,6 +471,7 @@ export function App({
   const [entryActionBusy, setEntryActionBusy] = useState(false);
   const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
   const saveDraftInFlight = useRef<Promise<boolean> | null>(null);
+  const pendingEntryMutationOperationId = useRef<string | null>(null);
   const entryDraftBaseline = useRef<EntryDetail | null>(null);
   const secretViewEpoch = useRef(0);
   const historyDetailRequestEpoch = useRef(0);
@@ -444,9 +494,12 @@ export function App({
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlockErrorCause, setUnlockErrorCause] = useState<unknown>(null);
   const [unlockBusy, setUnlockBusy] = useState(false);
+  const [vaultSelectionBusy, setVaultSelectionBusy] = useState(false);
+  const vaultSelectionInFlight = useRef<Promise<void> | null>(null);
   const [saveTip, setSaveTip] = useState<string | null>(null);
   const [sourceSyncBusy, setSourceSyncBusy] = useState(false);
   const [sourceSyncError, setSourceSyncError] = useState<string | null>(null);
+  const sourceSyncRequestEpoch = useRef(0);
   const [extensionSettings, setExtensionSettings] =
     useState<ExtensionSettings>(DEFAULT_EXTENSION_SETTINGS);
   const [extensionSettingsError, setExtensionSettingsError] = useState<string | null>(
@@ -486,18 +539,47 @@ export function App({
     if (requestEpoch !== residentSessionEpoch.current) {
       return false;
     }
-    setSession(nextSession);
+    acceptAuthoritativeSession(nextSession);
     return true;
+  }
+
+  function ownsVaultRequest(vaultId: string, requestEpoch: number) {
+    return (
+      requestEpoch === residentSessionEpoch.current &&
+      sessionRef.current?.unlocked === true &&
+      sessionRef.current.activeVaultId === vaultId
+    );
   }
 
   function invalidateSessionOwnedWork() {
     residentSessionEpoch.current += 1;
+    recentVaultProjectionEpoch.current += 1;
     secretViewEpoch.current += 1;
     historyDetailRequestEpoch.current += 1;
+    vaultSelectionInFlight.current = null;
+    setVaultSelectionBusy(false);
+    setUnlockBusy(false);
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+    setQuickUnlockBusy(false);
+    setQuickUnlockError(null);
+    saveDraftInFlight.current = null;
+    saveAndContinueInFlight.current = false;
+    resetEditorState();
+    setPendingPasskeySave(null);
+    setPendingAttachmentSave(null);
+    setPendingUnknownDetailSave(null);
+    setPendingEntryDelete(null);
+    setEntryActionBusy(false);
+    setSaveAndContinueBusy(false);
     databaseSettingsSaveInFlight.current = null;
     resetDatabaseSettingsDraftState();
     setDatabaseSettingsBusy(false);
     setDatabaseSettingsError(null);
+    sourceSyncRequestEpoch.current += 1;
+    setSourceSyncBusy(false);
+    setSourceSyncError(null);
+    setSaveTip(null);
   }
 
   function acceptAuthoritativeSession(
@@ -526,6 +608,42 @@ export function App({
     ]);
     acceptSessionResponse(nextSession, requestEpoch);
     await applyRecentVaultLimit(nextRecentVaults);
+  }
+
+  function selectCurrentVault(vaultRefId: string) {
+    if (vaultSelectionInFlight.current) {
+      return vaultSelectionInFlight.current;
+    }
+    const requestEpoch = residentSessionEpoch.current;
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+    setVaultSelectionBusy(true);
+    const operation = (async () => {
+      const nextSession = await client.setCurrentVault(vaultRefId);
+      if (acceptSessionResponse(nextSession, requestEpoch)) {
+        await reconcileSavedSettings("vault-selection", nextSession);
+      }
+    })();
+    vaultSelectionInFlight.current = operation;
+    void operation
+      .catch((selectionError) => {
+        if (requestEpoch === residentSessionEpoch.current) {
+          setUnlockError(
+            errorMessage(
+              selectionError,
+              translate(extensionSettings.language, "Failed to select vault")
+            )
+          );
+          setUnlockErrorCause(selectionError);
+        }
+      })
+      .finally(() => {
+        if (vaultSelectionInFlight.current === operation) {
+          vaultSelectionInFlight.current = null;
+          setVaultSelectionBusy(false);
+        }
+      });
+    return operation;
   }
 
   async function applyRecentVaultLimit(vaults: VaultReference[]) {
@@ -610,6 +728,10 @@ export function App({
     credentials: UnlockCredentials
   ): Promise<void> {
     const requestEpoch = residentSessionEpoch.current;
+    const expectedVaultRefId = sessionRef.current?.currentVaultRefId;
+    if (!expectedVaultRefId || sessionRef.current?.unlocked !== true) {
+      return;
+    }
     setQuickUnlockError(null);
     setQuickUnlockBusy(true);
     try {
@@ -618,20 +740,28 @@ export function App({
       );
       if (
         requestEpoch !== residentSessionEpoch.current ||
+        sessionRef.current?.currentVaultRefId !== expectedVaultRefId ||
         !desired.quickUnlockEnabled
       ) {
         return;
       }
-      await localExtensionSettingsStore.queueQuickUnlockEnrollment!(credentials);
-    } catch (quickUnlockFailure) {
-      setQuickUnlockError(
-        errorMessage(
-          quickUnlockFailure,
-          translate(extensionSettings.language, "Failed to update quick unlock")
-        )
+      await localExtensionSettingsStore.queueQuickUnlockEnrollment!(
+        credentials,
+        expectedVaultRefId
       );
+    } catch (quickUnlockFailure) {
+      if (requestEpoch === residentSessionEpoch.current) {
+        setQuickUnlockError(
+          errorMessage(
+            quickUnlockFailure,
+            translate(extensionSettings.language, "Failed to update quick unlock")
+          )
+        );
+      }
     } finally {
-      setQuickUnlockBusy(false);
+      if (requestEpoch === residentSessionEpoch.current) {
+        setQuickUnlockBusy(false);
+      }
     }
   }
 
@@ -740,6 +870,8 @@ export function App({
 
   function resetEditorState(nextMode: EntryEditorMode = "view") {
     entryDraftBaseline.current = null;
+    pendingEntryMutationOperationId.current = null;
+    setEntryMutationOutcomeUnknown(false);
     setEditorMode(nextMode);
     setDraft(null);
     setPendingEntrySave(null);
@@ -824,20 +956,53 @@ export function App({
     }
   }
 
+  async function settleMutationResult<T>(
+    vaultId: string,
+    result: T | CommittedMutation<T>
+  ): Promise<{ value: T; saveResult: SaveVaultResult | void; operationId: string | null }> {
+    if (isCommittedMutation(result)) {
+      return {
+        value: result.value,
+        saveResult: result.saveResult,
+        operationId: result.operationId
+      };
+    }
+    return {
+      value: result,
+      saveResult: await client.saveVault(vaultId),
+      operationId: null
+    };
+  }
+
+  function retryMutationSave(vaultId: string, operationId: string | null) {
+    return operationId && client.retryMutationSave
+      ? client.retryMutationSave(vaultId, operationId)
+      : client.saveVault(vaultId);
+  }
+
   async function handleRetrySourceSync() {
-    if (!session?.activeVaultId) {
+    const vaultId = session?.activeVaultId;
+    if (!vaultId) {
       return;
     }
 
+    const requestEpoch = residentSessionEpoch.current;
+    const sourceRequestEpoch = ++sourceSyncRequestEpoch.current;
+    const requestIsCurrent = () =>
+      requestEpoch === residentSessionEpoch.current &&
+      sourceRequestEpoch === sourceSyncRequestEpoch.current &&
+      sessionRef.current?.activeVaultId === vaultId;
     setSourceSyncBusy(true);
     setSourceSyncError(null);
 
     try {
-      const requestEpoch = residentSessionEpoch.current;
-      const sourceStatus = await client.retryVaultSourceSync(session.activeVaultId);
-      if (requestEpoch === residentSessionEpoch.current) {
-        setSession((current) => (current ? { ...current, sourceStatus } : current));
+      const sourceStatus = await client.retryVaultSourceSync(vaultId);
+      if (!requestIsCurrent()) {
+        return;
       }
+      setSession((current) =>
+        current?.activeVaultId === vaultId ? { ...current, sourceStatus } : current
+      );
       if (sourceStatus.remoteState === "online") {
         setWorkspaceReloadKey((current) => current + 1);
         setSourceDetailReloadKey((current) => current + 1);
@@ -846,6 +1011,9 @@ export function App({
         setSourceSyncError(sourceStatus.lastError);
       }
     } catch (syncFailure) {
+      if (!requestIsCurrent()) {
+        return;
+      }
       setSourceSyncError(
         errorMessage(
           syncFailure,
@@ -853,7 +1021,9 @@ export function App({
         )
       );
     } finally {
-      setSourceSyncBusy(false);
+      if (requestIsCurrent()) {
+        setSourceSyncBusy(false);
+      }
     }
   }
 
@@ -995,8 +1165,11 @@ export function App({
     }
   }
 
-  const pendingDetailSave = pendingAttachmentSave || pendingPasskeySave;
-  const hasPendingEntrySave = Boolean(pendingEntrySave || pendingDetailSave);
+  const pendingDetailSave =
+    pendingAttachmentSave || pendingPasskeySave || pendingUnknownDetailSave;
+  const hasPendingEntrySave = Boolean(
+    pendingEntrySave || pendingDetailSave || entryMutationOutcomeUnknown
+  );
   const hasPendingDurableSave = hasPendingEntrySave || Boolean(pendingEntryDelete);
   const draftDirty =
     editorMode === "create-pending"
@@ -1148,6 +1321,31 @@ export function App({
 
     try {
       let detail: EntryDetail;
+      let saveResult: SaveVaultResult | void;
+
+      async function runEntryMutation(
+        operation: (
+          operationId?: string
+        ) => Promise<EntryDetail | CommittedMutation<EntryDetail>>
+      ) {
+        const operationId = pendingEntryMutationOperationId.current;
+        const result = operationId
+          ? await operation(operationId)
+          : await operation();
+        if (!isCommittedMutation(result) && ownsVaultRequest(vaultId, requestEpoch)) {
+          setPendingEntrySave({
+            vaultId,
+            detail: result,
+            operationId: null
+          });
+        }
+        const settled = await settleMutationResult(vaultId, result);
+        if (ownsVaultRequest(vaultId, requestEpoch)) {
+          pendingEntryMutationOperationId.current = null;
+          setEntryMutationOutcomeUnknown(false);
+        }
+        return settled;
+      }
 
       if (pendingEntrySave) {
         if (pendingEntrySave.vaultId !== vaultId) {
@@ -1155,28 +1353,57 @@ export function App({
         }
 
         detail = pendingEntrySave.detail;
-        if (!draftMatchesEntry(draft, detail)) {
-          detail = await client.updateEntryFields(vaultId, detail.id, draft);
-          if (requestEpoch === residentSessionEpoch.current) {
-            setPendingEntrySave({ vaultId, detail });
+        if (draftMatchesEntry(draft, detail)) {
+          saveResult = await retryMutationSave(
+            vaultId,
+            pendingEntrySave.operationId
+          );
+        } else {
+          pendingEntryMutationOperationId.current = null;
+          setPendingEntrySave(null);
+          const settled = await runEntryMutation((operationId) =>
+            operationId
+              ? client.updateEntryFields(vaultId, detail.id, draft, operationId)
+              : client.updateEntryFields(vaultId, detail.id, draft)
+          );
+          detail = settled.value;
+          saveResult = settled.saveResult;
+          if (ownsVaultRequest(vaultId, requestEpoch)) {
+            setPendingEntrySave({
+              vaultId,
+              detail,
+              operationId: settled.operationId
+            });
           }
         }
       } else if (wasCreating) {
-        detail = await client.createEntry(vaultId, {
-          parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
-          ...draft
+        const settled = await runEntryMutation((operationId) => {
+          const input = {
+            parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
+            ...draft
+          };
+          return operationId
+            ? client.createEntry(vaultId, input, operationId)
+            : client.createEntry(vaultId, input);
         });
+        detail = settled.value;
+        saveResult = settled.saveResult;
       } else if (editorMode === "edit" && selectedEntryId) {
-        detail = await client.updateEntryFields(vaultId, selectedEntryId, draft);
+        const settled = await runEntryMutation((operationId) =>
+          operationId
+            ? client.updateEntryFields(vaultId, selectedEntryId, draft, operationId)
+            : client.updateEntryFields(vaultId, selectedEntryId, draft)
+        );
+        detail = settled.value;
+        saveResult = settled.saveResult;
       } else {
         return false;
       }
 
-      if (requestEpoch === residentSessionEpoch.current) {
-        setPendingEntrySave({ vaultId, detail });
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setPendingEntrySave({ vaultId, detail, operationId: null });
       }
-      const saveResult = await client.saveVault(vaultId);
-      if (requestEpoch !== residentSessionEpoch.current) {
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return false;
       }
       handleSaveResult(saveResult);
@@ -1192,7 +1419,18 @@ export function App({
       setWorkspaceReloadKey((current) => current + 1);
       return true;
     } catch (mutationError) {
-      if (requestEpoch === residentSessionEpoch.current) {
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        const operationId = runtimeMutationOperationId(mutationError);
+        const mutationDetail = runtimeMutationResult<EntryDetail>(mutationError);
+        pendingEntryMutationOperationId.current = operationId;
+        if (operationId && mutationDetail) {
+          setPendingEntrySave({
+            vaultId,
+            detail: mutationDetail,
+            operationId
+          });
+        }
+        setEntryMutationOutcomeUnknown(operationId !== null && !mutationDetail);
         setEntryActionError(
           errorMessage(
             mutationError,
@@ -1202,7 +1440,9 @@ export function App({
       }
       return false;
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
@@ -1210,6 +1450,7 @@ export function App({
     if (saveAndContinueInFlight.current) {
       return;
     }
+    const requestEpoch = residentSessionEpoch.current;
     saveAndContinueInFlight.current = true;
     setSaveAndContinueBusy(true);
 
@@ -1245,12 +1486,14 @@ export function App({
         saved = await saveDraft();
       }
 
-      if (saved) {
+      if (saved && requestEpoch === residentSessionEpoch.current) {
         performAction(action);
       }
     } finally {
-      saveAndContinueInFlight.current = false;
-      setSaveAndContinueBusy(false);
+      if (requestEpoch === residentSessionEpoch.current) {
+        saveAndContinueInFlight.current = false;
+        setSaveAndContinueBusy(false);
+      }
     }
   }
 
@@ -1310,24 +1553,38 @@ export function App({
 
     const requestEpoch = residentSessionEpoch.current;
     const vaultId = session.activeVaultId;
-    let mutationApplied =
-      pendingEntryDelete?.vaultId === vaultId && pendingEntryDelete.entryId === entryId;
+    const matchingPendingDelete =
+      pendingEntryDelete?.vaultId === vaultId && pendingEntryDelete.entryId === entryId
+        ? pendingEntryDelete
+        : null;
+    let mutationApplied = matchingPendingDelete?.operationId === null;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
       if (pendingEntryDelete && !mutationApplied) {
-        throw new Error("Another entry deletion is pending");
-      }
-      if (!mutationApplied) {
-        await client.deleteEntry(vaultId, entryId);
-        mutationApplied = true;
-        if (requestEpoch === residentSessionEpoch.current) {
-          setPendingEntryDelete({ vaultId, entryId });
+        if (!matchingPendingDelete) {
+          throw new Error("Another entry deletion is pending");
         }
       }
-      const saveResult = await client.saveVault(vaultId);
-      if (requestEpoch !== residentSessionEpoch.current) {
+      let saveResult: SaveVaultResult | void;
+      if (mutationApplied) {
+        saveResult = await client.saveVault(vaultId);
+      } else {
+        const mutation = matchingPendingDelete?.operationId
+          ? await client.deleteEntry(
+            vaultId,
+            entryId,
+            matchingPendingDelete.operationId
+          )
+          : await client.deleteEntry(vaultId, entryId);
+        mutationApplied = true;
+        if (!isCommittedMutation(mutation) && ownsVaultRequest(vaultId, requestEpoch)) {
+          setPendingEntryDelete({ vaultId, entryId, operationId: null });
+        }
+        saveResult = (await settleMutationResult(vaultId, mutation)).saveResult;
+      }
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return false;
       }
       handleSaveResult(saveResult);
@@ -1337,20 +1594,26 @@ export function App({
       setDialogState(null);
       return true;
     } catch (deleteError) {
-      if (requestEpoch === residentSessionEpoch.current) {
+      const operationId = runtimeMutationOperationId(deleteError);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        if (operationId) {
+          setPendingEntryDelete({ vaultId, entryId, operationId });
+        }
         setEntryActionError(
           errorMessage(
             deleteError,
             translate(extensionSettings.language, "Failed to delete entry")
           )
         );
-        if (!mutationApplied) {
+        if (!mutationApplied && !operationId) {
           setDialogState(null);
         }
       }
       return false;
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
@@ -1366,20 +1629,51 @@ export function App({
     setEntryActionError(null);
 
     try {
-      const detail = await client.setEntryPasskey(vaultId, entryId, passkey);
-      if (requestEpoch === residentSessionEpoch.current) {
-        setEntryDetail(detail);
-        setPendingPasskeySave({ vaultId, detail });
+      const mutation = await client.setEntryPasskey(vaultId, entryId, passkey);
+      if (!isCommittedMutation(mutation) && ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryDetail(mutation);
+        setPendingPasskeySave({
+          vaultId,
+          detail: mutation,
+          operationId: null
+        });
       }
-      const saveResult = await client.saveVault(vaultId);
-      if (requestEpoch !== residentSessionEpoch.current) {
+      const { value: detail, saveResult } = await settleMutationResult(
+        vaultId,
+        mutation
+      );
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryDetail(detail);
+      }
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return;
       }
       handleSaveResult(saveResult);
       setPendingPasskeySave(null);
+      setPendingUnknownDetailSave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
-      if (requestEpoch === residentSessionEpoch.current) {
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        const operationId = runtimeMutationOperationId(passkeyError);
+        const mutationDetail = runtimeMutationResult<EntryDetail>(passkeyError);
+        if (operationId && mutationDetail) {
+          setEntryDetail(mutationDetail);
+          setPendingPasskeySave({
+            vaultId,
+            detail: mutationDetail,
+            operationId
+          });
+          setPendingUnknownDetailSave(null);
+        } else if (operationId) {
+          setPendingUnknownDetailSave({
+            vaultId,
+            operationId,
+            fallbackMessage: translate(
+              extensionSettings.language,
+              "Failed to save entry passkey"
+            )
+          });
+        }
         setEntryActionError(
           errorMessage(
             passkeyError,
@@ -1388,7 +1682,9 @@ export function App({
         );
       }
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
@@ -1404,20 +1700,51 @@ export function App({
     setEntryActionError(null);
 
     try {
-      const detail = await client.clearEntryPasskey(vaultId, entryId);
-      if (requestEpoch === residentSessionEpoch.current) {
-        setEntryDetail(detail);
-        setPendingPasskeySave({ vaultId, detail });
+      const mutation = await client.clearEntryPasskey(vaultId, entryId);
+      if (!isCommittedMutation(mutation) && ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryDetail(mutation);
+        setPendingPasskeySave({
+          vaultId,
+          detail: mutation,
+          operationId: null
+        });
       }
-      const saveResult = await client.saveVault(vaultId);
-      if (requestEpoch !== residentSessionEpoch.current) {
+      const { value: detail, saveResult } = await settleMutationResult(
+        vaultId,
+        mutation
+      );
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryDetail(detail);
+      }
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return;
       }
       handleSaveResult(saveResult);
       setPendingPasskeySave(null);
+      setPendingUnknownDetailSave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (passkeyError) {
-      if (requestEpoch === residentSessionEpoch.current) {
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        const operationId = runtimeMutationOperationId(passkeyError);
+        const mutationDetail = runtimeMutationResult<EntryDetail>(passkeyError);
+        if (operationId && mutationDetail) {
+          setEntryDetail(mutationDetail);
+          setPendingPasskeySave({
+            vaultId,
+            detail: mutationDetail,
+            operationId
+          });
+          setPendingUnknownDetailSave(null);
+        } else if (operationId) {
+          setPendingUnknownDetailSave({
+            vaultId,
+            operationId,
+            fallbackMessage: translate(
+              extensionSettings.language,
+              "Failed to save entry passkey"
+            )
+          });
+        }
         setEntryActionError(
           errorMessage(
             passkeyError,
@@ -1426,7 +1753,9 @@ export function App({
         );
       }
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
@@ -1435,24 +1764,34 @@ export function App({
       return false;
     }
 
+    const requestEpoch = residentSessionEpoch.current;
+    const { vaultId, operationId } = pendingPasskeySave;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      handleSaveResult(await client.saveVault(pendingPasskeySave.vaultId));
+      const saveResult = await retryMutationSave(vaultId, operationId);
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
+        return false;
+      }
+      handleSaveResult(saveResult);
       setPendingPasskeySave(null);
       setWorkspaceReloadKey((current) => current + 1);
       return true;
     } catch (passkeyError) {
-      setEntryActionError(
-        errorMessage(
-          passkeyError,
-          translate(extensionSettings.language, "Failed to save entry passkey")
-        )
-      );
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionError(
+          errorMessage(
+            passkeyError,
+            translate(extensionSettings.language, "Failed to save entry passkey")
+          )
+        );
+      }
       return false;
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
@@ -1492,17 +1831,19 @@ export function App({
       }
       triggerAttachmentDownload(content);
     } catch (downloadError) {
-      setEntryActionError(
-        errorMessage(
-          downloadError,
-          translate(extensionSettings.language, "Failed to download attachment")
-        )
-      );
+      if (requestEpoch === secretViewEpoch.current) {
+        setEntryActionError(
+          errorMessage(
+            downloadError,
+            translate(extensionSettings.language, "Failed to download attachment")
+          )
+        );
+      }
     }
   }
 
   async function updateAttachment(
-    operation: () => Promise<EntryDetail>,
+    operation: () => Promise<EntryDetail | CommittedMutation<EntryDetail>>,
     fallbackMessage: string
   ) {
     if (!session?.activeVaultId) {
@@ -1515,24 +1856,56 @@ export function App({
     setEntryActionError(null);
 
     try {
-      const detail = await operation();
-      if (requestEpoch === residentSessionEpoch.current) {
-        setEntryDetail(detail);
-        setPendingAttachmentSave({ vaultId, detail, fallbackMessage });
+      const mutation = await operation();
+      if (!isCommittedMutation(mutation) && ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryDetail(mutation);
+        setPendingAttachmentSave({
+          vaultId,
+          detail: mutation,
+          operationId: null,
+          fallbackMessage
+        });
       }
-      const saveResult = await client.saveVault(vaultId);
-      if (requestEpoch !== residentSessionEpoch.current) {
+      const { value: detail, saveResult } = await settleMutationResult(
+        vaultId,
+        mutation
+      );
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryDetail(detail);
+      }
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return;
       }
       handleSaveResult(saveResult);
       setPendingAttachmentSave(null);
+      setPendingUnknownDetailSave(null);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (attachmentError) {
-      if (requestEpoch === residentSessionEpoch.current) {
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        const operationId = runtimeMutationOperationId(attachmentError);
+        const mutationDetail = runtimeMutationResult<EntryDetail>(attachmentError);
+        if (operationId && mutationDetail) {
+          setEntryDetail(mutationDetail);
+          setPendingAttachmentSave({
+            vaultId,
+            detail: mutationDetail,
+            operationId,
+            fallbackMessage
+          });
+          setPendingUnknownDetailSave(null);
+        } else if (operationId) {
+          setPendingUnknownDetailSave({
+            vaultId,
+            operationId,
+            fallbackMessage
+          });
+        }
         setEntryActionError(errorMessage(attachmentError, fallbackMessage));
       }
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
@@ -1541,25 +1914,36 @@ export function App({
       return false;
     }
 
+    const requestEpoch = residentSessionEpoch.current;
+    const { vaultId, operationId, fallbackMessage } = pendingAttachmentSave;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      handleSaveResult(await client.saveVault(pendingAttachmentSave.vaultId));
+      const saveResult = await retryMutationSave(vaultId, operationId);
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
+        return false;
+      }
+      handleSaveResult(saveResult);
       setPendingAttachmentSave(null);
       setWorkspaceReloadKey((current) => current + 1);
       return true;
     } catch (attachmentError) {
-      setEntryActionError(
-        errorMessage(attachmentError, pendingAttachmentSave.fallbackMessage)
-      );
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionError(errorMessage(attachmentError, fallbackMessage));
+      }
       return false;
     } finally {
-      setEntryActionBusy(false);
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
     }
   }
 
   async function retryPendingDetailSave() {
+    if (pendingUnknownDetailSave) {
+      return retryUnknownDetailSave();
+    }
     if (pendingAttachmentSave) {
       return retryPendingAttachmentSave();
     }
@@ -1567,6 +1951,38 @@ export function App({
       return retryPendingPasskeySave();
     }
     return false;
+  }
+
+  async function retryUnknownDetailSave() {
+    if (!pendingUnknownDetailSave) {
+      return false;
+    }
+
+    const requestEpoch = residentSessionEpoch.current;
+    const { vaultId, operationId, fallbackMessage } = pendingUnknownDetailSave;
+    setEntryActionBusy(true);
+    setEntryActionError(null);
+
+    try {
+      const saveResult = await retryMutationSave(vaultId, operationId);
+      if (!ownsVaultRequest(vaultId, requestEpoch)) {
+        return false;
+      }
+      handleSaveResult(saveResult);
+      setPendingUnknownDetailSave(null);
+      setSourceDetailReloadKey((current) => current + 1);
+      setWorkspaceReloadKey((current) => current + 1);
+      return true;
+    } catch (saveError) {
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionError(errorMessage(saveError, fallbackMessage));
+      }
+      return false;
+    } finally {
+      if (ownsVaultRequest(vaultId, requestEpoch)) {
+        setEntryActionBusy(false);
+      }
+    }
   }
 
   async function handleAddAttachment(file: File, protectInMemory: boolean) {
@@ -2093,6 +2509,10 @@ export function App({
   }, [client, session?.unlocked]);
 
   useLayoutEffect(() => {
+    sourceSyncRequestEpoch.current += 1;
+    setSourceSyncBusy(false);
+    setSourceSyncError(null);
+    setSaveTip(null);
     setSearchValue("");
     setShowStatsPage(false);
     setShowDatabaseSettingsPage(false);
@@ -2111,6 +2531,7 @@ export function App({
     resetEditorState();
     setPendingPasskeySave(null);
     setPendingAttachmentSave(null);
+    setPendingUnknownDetailSave(null);
     setPendingEntryDelete(null);
     setFillCandidates([]);
     setFillError(null);
@@ -2527,21 +2948,13 @@ export function App({
         recentVaults={recentVaults}
         currentVaultRefId={session.currentVaultRefId}
         labels={labels.unlock}
-        onSelectVault={async (vaultRefId) => {
-          setUnlockError(null);
-          setUnlockErrorCause(null);
-          const requestEpoch = residentSessionEpoch.current;
-          const nextSession = await client.setCurrentVault(vaultRefId);
-          if (acceptSessionResponse(nextSession, requestEpoch)) {
-            await reconcileSavedSettings("vault-selection", nextSession);
-          }
-        }}
+        onSelectVault={selectCurrentVault}
         onUnlock={async ({ password, keyFilePath }) => {
+          const requestEpoch = residentSessionEpoch.current;
           setUnlockBusy(true);
           setUnlockError(null);
           setUnlockErrorCause(null);
           try {
-            const requestEpoch = residentSessionEpoch.current;
             const nextSession = await client.unlockCurrentVault({
               password,
               keyFilePath
@@ -2553,42 +2966,50 @@ export function App({
               });
             }
           } catch (unlockFailure) {
-            setUnlockError(
-              errorMessage(
-                unlockFailure,
-                translate(extensionSettings.language, "Failed to unlock vault")
-              )
-            );
-            setUnlockErrorCause(unlockFailure);
+            if (requestEpoch === residentSessionEpoch.current) {
+              setUnlockError(
+                errorMessage(
+                  unlockFailure,
+                  translate(extensionSettings.language, "Failed to unlock vault")
+                )
+              );
+              setUnlockErrorCause(unlockFailure);
+            }
           } finally {
-            setUnlockBusy(false);
+            if (requestEpoch === residentSessionEpoch.current) {
+              setUnlockBusy(false);
+            }
           }
         }}
         onQuickUnlock={async () => {
+          const requestEpoch = residentSessionEpoch.current;
           setUnlockBusy(true);
           setUnlockError(null);
           setUnlockErrorCause(null);
           try {
-            const requestEpoch = residentSessionEpoch.current;
             const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
             if (acceptSessionResponse(nextSession, requestEpoch)) {
               await reconcileSavedSettings("unlock", nextSession);
             }
           } catch (unlockFailure) {
-            setUnlockError(
-              errorMessage(
-                unlockFailure,
-                translate(extensionSettings.language, "Failed to unlock vault")
-              )
-            );
-            setUnlockErrorCause(unlockFailure);
-            try {
-              await applyRecentVaultLimit(await client.listRecentVaults());
-            } catch {
-              // Preserve the original quick-unlock error when status refresh also fails.
+            if (requestEpoch === residentSessionEpoch.current) {
+              setUnlockError(
+                errorMessage(
+                  unlockFailure,
+                  translate(extensionSettings.language, "Failed to unlock vault")
+                )
+              );
+              setUnlockErrorCause(unlockFailure);
+              try {
+                await applyRecentVaultLimit(await client.listRecentVaults());
+              } catch {
+                // Preserve the original quick-unlock error when status refresh also fails.
+              }
             }
           } finally {
-            setUnlockBusy(false);
+            if (requestEpoch === residentSessionEpoch.current) {
+              setUnlockBusy(false);
+            }
           }
         }}
         quickUnlockSupported={Boolean(session.supportsBiometricUnlock)}
@@ -2596,7 +3017,7 @@ export function App({
         onOpenExtensionSettings={() => requestAction({ type: "open-extension-settings" })}
         error={unlockError}
         errorCause={unlockErrorCause}
-        busy={unlockBusy}
+        busy={unlockBusy || vaultSelectionBusy}
         renderRuntimeErrorHelp={renderRuntimeErrorHelp}
       />
     );
@@ -2737,7 +3158,7 @@ export function App({
               draft={draft}
               dirty={dirty}
               busy={entryActionBusy}
-              pendingSave={Boolean(pendingDetailSave)}
+              pendingSave={hasPendingEntrySave}
               error={entryActionError ?? detailError}
               historyItems={historyItems}
               historyDetail={historyDetail}

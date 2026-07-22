@@ -4,7 +4,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::io::Read;
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -24,7 +24,7 @@ pub use windows::{
 };
 
 pub type ResidentIpcRequestHandler = Arc<
-    dyn Fn(ProtocolEnvelope, Arc<AtomicBool>, Arc<AtomicBool>, Option<usize>) -> RuntimeResponse
+    dyn Fn(ProtocolEnvelope, Arc<AtomicBool>, Option<usize>) -> RuntimeResponse
         + Send
         + Sync
         + 'static,
@@ -45,9 +45,12 @@ pub(crate) struct PendingRequests {
 
 struct PendingRequestState {
     cancelled: Arc<AtomicBool>,
-    execution_started: Arc<AtomicBool>,
-    responded: AtomicBool,
+    phase: AtomicU8,
 }
+
+const REQUEST_PENDING: u8 = 0;
+const REQUEST_EXECUTING: u8 = 1;
+const REQUEST_RESPONDED: u8 = 2;
 
 #[derive(Clone)]
 pub(crate) struct PendingRequest {
@@ -60,8 +63,7 @@ impl PendingRequests {
     pub(crate) fn register(&self, request_id: &str) -> Result<PendingRequest> {
         let state = Arc::new(PendingRequestState {
             cancelled: Arc::new(AtomicBool::new(false)),
-            execution_started: Arc::new(AtomicBool::new(false)),
-            responded: AtomicBool::new(false),
+            phase: AtomicU8::new(REQUEST_PENDING),
         });
         let mut entries = self
             .entries
@@ -88,10 +90,16 @@ impl PendingRequests {
             return false;
         };
         state.cancelled.store(true, Ordering::Release);
-        if state.execution_started.load(Ordering::Acquire) {
-            return false;
-        }
-        if state.responded.swap(true, Ordering::AcqRel) {
+        if state
+            .phase
+            .compare_exchange(
+                REQUEST_PENDING,
+                REQUEST_RESPONDED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
             return false;
         }
         entries.remove(request_id);
@@ -107,7 +115,7 @@ impl PendingRequests {
         );
         for state in entries.into_values() {
             state.cancelled.store(true, Ordering::Release);
-            state.responded.store(true, Ordering::Release);
+            state.phase.store(REQUEST_RESPONDED, Ordering::Release);
         }
     }
 }
@@ -117,8 +125,16 @@ impl PendingRequest {
         self.state.cancelled.clone()
     }
 
-    pub(crate) fn execution_started_token(&self) -> Arc<AtomicBool> {
-        self.state.execution_started.clone()
+    pub(crate) fn begin_execution(&self) -> bool {
+        self.state
+            .phase
+            .compare_exchange(
+                REQUEST_PENDING,
+                REQUEST_EXECUTING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
     }
 
     #[cfg(test)]
@@ -128,18 +144,56 @@ impl PendingRequest {
 
     pub(crate) fn claim_deadline_response(&self) -> Option<bool> {
         self.state.cancelled.store(true, Ordering::Release);
-        let execution_started = self.state.execution_started.load(Ordering::Acquire);
-        self.claim_response().then_some(execution_started)
+        loop {
+            let phase = self.state.phase.load(Ordering::Acquire);
+            if phase == REQUEST_RESPONDED {
+                return None;
+            }
+            if self
+                .state
+                .phase
+                .compare_exchange(
+                    phase,
+                    REQUEST_RESPONDED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.remove_from_registry();
+                return Some(phase == REQUEST_EXECUTING);
+            }
+        }
     }
 
     pub(crate) fn response_claimed(&self) -> bool {
-        self.state.responded.load(Ordering::Acquire)
+        self.state.phase.load(Ordering::Acquire) == REQUEST_RESPONDED
     }
 
     pub(crate) fn claim_response(&self) -> bool {
-        if self.state.responded.swap(true, Ordering::AcqRel) {
-            return false;
+        loop {
+            let phase = self.state.phase.load(Ordering::Acquire);
+            if phase == REQUEST_RESPONDED {
+                return false;
+            }
+            if self
+                .state
+                .phase
+                .compare_exchange(
+                    phase,
+                    REQUEST_RESPONDED,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                self.remove_from_registry();
+                return true;
+            }
         }
+    }
+
+    fn remove_from_registry(&self) {
         let mut entries = self
             .entries
             .lock()
@@ -150,7 +204,6 @@ impl PendingRequest {
         {
             entries.remove(&self.request_id);
         }
-        true
     }
 }
 
@@ -175,6 +228,7 @@ pub(crate) struct ClientHello {
     pub(crate) protocol_version: u32,
     pub(crate) capabilities: Vec<String>,
     pub(crate) client_origin: String,
+    pub(crate) browser_process_id: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) parent_window: Option<u64>,
 }
@@ -209,11 +263,16 @@ pub(crate) enum ResidentIpcFrame {
     },
 }
 
-pub(crate) fn client_hello(client_origin: String, parent_window: Option<usize>) -> ClientHello {
+pub(crate) fn client_hello(
+    client_origin: String,
+    browser_process_id: u32,
+    parent_window: Option<usize>,
+) -> ClientHello {
     ClientHello {
         protocol_version: RESIDENT_IPC_PROTOCOL_VERSION,
         capabilities: resident_ipc_capabilities(),
         client_origin,
+        browser_process_id,
         parent_window: parent_window.map(|value| value as u64),
     }
 }
@@ -252,6 +311,9 @@ pub(crate) fn negotiate_client_hello(hello: ClientHello) -> Result<ServerHello> 
     }
     validate_capabilities(&hello.capabilities)?;
     validate_browser_origin(&hello.client_origin)?;
+    if hello.browser_process_id == 0 {
+        anyhow::bail!("resident IPC client did not identify its authenticated browser process");
+    }
 
     Ok(ServerHello {
         protocol_version: RESIDENT_IPC_PROTOCOL_VERSION,
@@ -417,6 +479,7 @@ mod tests {
             protocol_version: RESIDENT_IPC_PROTOCOL_VERSION,
             capabilities: vec!["request_ids".into(), "cancellation".into()],
             client_origin: EXTENSION_ORIGIN.into(),
+            browser_process_id: 41,
             parent_window: Some(0x1234),
         }
     }
@@ -467,6 +530,15 @@ mod tests {
                 .unwrap_err()
                 .to_string()
                 .contains("invalid browser extension origin")
+        );
+
+        let mut hello = valid_hello();
+        hello.browser_process_id = 0;
+        assert!(
+            negotiate_client_hello(hello)
+                .unwrap_err()
+                .to_string()
+                .contains("authenticated browser process")
         );
     }
 
@@ -590,6 +662,7 @@ mod tests {
             ResidentIpcFrame::ClientHello(hello) => {
                 assert_eq!(hello.protocol_version, RESIDENT_IPC_PROTOCOL_VERSION);
                 assert_eq!(hello.client_origin, EXTENSION_ORIGIN);
+                assert_eq!(hello.browser_process_id, 41);
                 assert_eq!(hello.parent_window, Some(0x1234));
             }
             _ => panic!("expected client hello frame"),
@@ -633,13 +706,25 @@ mod tests {
         let request = pending
             .register("native-running")
             .expect("register request");
-        request
-            .execution_started_token()
-            .store(true, std::sync::atomic::Ordering::Release);
+        assert!(request.begin_execution());
 
         assert!(!pending.cancel("native-running"));
         assert!(request.cancelled());
         assert!(request.claim_response());
+    }
+
+    #[test]
+    fn deadline_and_execution_start_are_one_mutually_exclusive_transition() {
+        let pending = PendingRequests::default();
+        let request = pending
+            .register("native-deadline-race")
+            .expect("register request");
+
+        assert_eq!(request.claim_deadline_response(), Some(false));
+        assert!(
+            !request.begin_execution(),
+            "a request reported as timed out before execution must never start afterwards"
+        );
     }
 
     #[test]

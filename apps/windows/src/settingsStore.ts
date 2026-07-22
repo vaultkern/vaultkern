@@ -10,7 +10,7 @@ export function createDesktopSettingsStore(
   queueQuickUnlockEnrollment: (credentials: {
     password?: string | null;
     keyFilePath?: string | null;
-  }) => Promise<unknown> = async () => undefined,
+  }, expectedVaultRefId: string) => Promise<unknown> = async () => undefined,
   loadReconciliationError: () => Promise<unknown> = async () => null,
   subscribeReconciliationError: (
     listener: (error: string | null) => void
@@ -19,8 +19,8 @@ export function createDesktopSettingsStore(
   return {
     surface: "windows",
     nativeReconciliationOwned: true,
-    async queueQuickUnlockEnrollment(credentials) {
-      await queueQuickUnlockEnrollment(credentials);
+    async queueQuickUnlockEnrollment(credentials, expectedVaultRefId) {
+      await queueQuickUnlockEnrollment(credentials, expectedVaultRefId);
     },
     async loadReconciliationError() {
       const error = await loadReconciliationError();

@@ -46,10 +46,11 @@ use super::{
     validate_request, validate_server_hello, write_frame,
 };
 use crate::command_loop::{
-    MAX_NATIVE_REQUEST_BYTES, MAX_NATIVE_RESPONSE_BYTES, NativeMessage,
-    configure_stdio_for_native_messaging, encode_native_response,
-    read_native_message_or_eof_with_limit, write_native_message,
+    MAX_NATIVE_REQUEST_BYTES, NativeMessage, configure_stdio_for_native_messaging,
+    read_native_message_or_eof_with_limit, write_chunked_native_message, write_native_message,
 };
+#[cfg(test)]
+use crate::command_loop::{MAX_NATIVE_RESPONSE_BYTES, encode_native_response};
 
 mod peer_auth;
 
@@ -57,7 +58,8 @@ const PIPE_PREFIX: &str = r"\\.\pipe\VaultKern.Resident.";
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_CONNECT_WAIT_MS: u32 = 5_000;
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECTION_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(295);
 
 pub struct WindowsResidentIpcServer {
     shutdown: Arc<AtomicBool>,
@@ -127,11 +129,14 @@ pub fn run_windows_native_messaging_shim(
         let _ = write_startup_failure("browser_origin_rejected", message);
         return Err(error).context(message);
     }
-    if let Err(error) = peer_auth::authenticate_native_messaging_channel() {
-        let message = "VaultKern could not authenticate the native-messaging browser channel";
-        let _ = write_startup_failure("browser_authentication_failed", message);
-        return Err(error).context(message);
-    }
+    let browser_process_id = match peer_auth::authenticate_native_messaging_channel() {
+        Ok(process_id) => process_id,
+        Err(error) => {
+            let message = "VaultKern could not authenticate the native-messaging browser channel";
+            let _ = write_startup_failure("browser_authentication_failed", message);
+            return Err(error).context(message);
+        }
+    };
     let identity = ProcessIdentity::current().context("resolve native shim identity")?;
     let pipe_name = wide_nul(&format!("{PIPE_PREFIX}{}", identity.sid_string));
     let pipe = match open_client_pipe(&pipe_name) {
@@ -147,7 +152,9 @@ pub fn run_windows_native_messaging_shim(
         let _ = write_startup_failure("resident_authentication_failed", message);
         return Err(error).context("authenticate resident IPC server");
     }
-    if let Err(error) = perform_client_handshake(&pipe, browser_origin, parent_window) {
+    if let Err(error) =
+        perform_client_handshake(&pipe, browser_origin, browser_process_id, parent_window)
+    {
         let message = "VaultKern could not negotiate with the resident app";
         let _ = write_startup_failure("resident_connection_failed", message);
         return Err(error);
@@ -262,7 +269,7 @@ fn serve_connection(
     let mut reader = PipeFrameReader::new(pipe.clone());
     let writer = Arc::new(Mutex::new(PipeWriter(pipe)));
 
-    let hello = match read_pipe_frame_with_timeout(&mut reader, HANDSHAKE_TIMEOUT)
+    let hello = match read_pipe_frame_with_timeout(&mut reader, CLIENT_HELLO_TIMEOUT)
         .context("wait for resident IPC client hello")?
     {
         ResidentIpcFrame::ClientHello(hello) => hello,
@@ -272,6 +279,7 @@ fn serve_connection(
         .parent_window
         .and_then(|value| usize::try_from(value).ok())
         .filter(|value| *value != 0);
+    let browser_process_id = hello.browser_process_id;
     let hello = match negotiate_client_hello(hello) {
         Ok(hello) => hello,
         Err(error) => {
@@ -286,6 +294,42 @@ fn serve_connection(
             return Err(error.context("reject resident IPC handshake"));
         }
     };
+    let connection_parent_window =
+        resolve_request_parent_window(requested_parent_window, browser_process_id, expected_sid);
+    let authorization = handler(
+        ProtocolEnvelope::new(RuntimeCommand::Handshake {
+            protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
+            capabilities: vec!["runtime-core".into(), "browser-extension".into()],
+        }),
+        Arc::new(AtomicBool::new(false)),
+        connection_parent_window,
+    );
+    match authorization {
+        RuntimeResponse::Handshake(_) => {}
+        RuntimeResponse::Error(error) => {
+            let _ = send_frame(
+                &writer,
+                &ResidentIpcFrame::Error {
+                    request_id: None,
+                    code: "browser_authorization_failed".into(),
+                    message: error.message.clone(),
+                },
+            );
+            anyhow::bail!("resident browser authorization failed: {}", error.message);
+        }
+        _ => {
+            let _ = send_frame(
+                &writer,
+                &ResidentIpcFrame::Error {
+                    request_id: None,
+                    code: "browser_authorization_failed".into(),
+                    message: "resident runtime returned an invalid browser authorization response"
+                        .into(),
+                },
+            );
+            anyhow::bail!("resident runtime returned an invalid browser authorization response");
+        }
+    }
     send_frame(&writer, &ResidentIpcFrame::ServerHello(hello))?;
 
     let pending = PendingRequests::default();
@@ -341,8 +385,11 @@ fn serve_connection(
                         continue;
                     }
                 };
-                let parent_window =
-                    resolve_request_parent_window(requested_parent_window, expected_sid);
+                let parent_window = resolve_request_parent_window(
+                    requested_parent_window,
+                    browser_process_id,
+                    expected_sid,
+                );
                 dispatch_request(
                     request,
                     timeout_ms,
@@ -382,13 +429,16 @@ fn dispatch_request(
 ) {
     let request_id = request.request_id.clone();
     let cancellation = request.cancellation_token();
-    let execution_started = request.execution_started_token();
+    let execution_request = request.clone();
     let (result_sender, result_receiver) = mpsc::channel();
     let spawn_result = std::thread::Builder::new()
         .name("vaultkern-resident-ipc-request".into())
         .spawn(move || {
+            if !execution_request.begin_execution() {
+                return;
+            }
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                handler(message, cancellation, execution_started, parent_window)
+                handler(message, cancellation, parent_window)
             }))
             .map_err(|_| "resident IPC request handler panicked".to_owned());
             let _ = result_sender.send(result);
@@ -498,15 +548,20 @@ fn claim_response_monitor_failure(request: &PendingRequest) -> Option<ErrorDto> 
 fn perform_client_handshake(
     pipe: &Pipe,
     browser_origin: &str,
+    browser_process_id: u32,
     parent_window: Option<usize>,
 ) -> Result<()> {
     let mut writer = PipeWriter(Arc::new(pipe.duplicate()?));
     write_frame(
         &mut writer,
-        &ResidentIpcFrame::ClientHello(client_hello(browser_origin.to_owned(), parent_window)),
+        &ResidentIpcFrame::ClientHello(client_hello(
+            browser_origin.to_owned(),
+            browser_process_id,
+            parent_window,
+        )),
     )?;
     let mut reader = PipeFrameReader::new(Arc::new(pipe.duplicate()?));
-    match read_pipe_frame_with_timeout(&mut reader, HANDSHAKE_TIMEOUT)
+    match read_pipe_frame_with_timeout(&mut reader, CONNECTION_AUTHORIZATION_TIMEOUT)
         .context("wait for resident IPC server hello")?
     {
         ResidentIpcFrame::ServerHello(hello) => validate_server_hello(&hello),
@@ -680,7 +735,7 @@ fn handle_server_frame(
             if !pending.remove(&request_id) {
                 anyhow::bail!("resident IPC response used an unknown request ID");
             }
-            write_native_message(stdout, &message, Some(&request_id))
+            write_chunked_native_message(stdout, &message, &request_id)
         }
         ResidentIpcFrame::Error {
             request_id: Some(request_id),
@@ -733,16 +788,6 @@ fn send_runtime_response(
     request_id: String,
     message: RuntimeResponse,
 ) -> Result<()> {
-    if encode_native_response(&message, Some(&request_id))?.len() > MAX_NATIVE_RESPONSE_BYTES {
-        return send_frame(
-            writer,
-            &ResidentIpcFrame::Error {
-                request_id: Some(request_id),
-                code: "response_too_large".into(),
-                message: "native response exceeds Chrome's 1 MiB limit".into(),
-            },
-        );
-    }
     send_frame(
         writer,
         &ResidentIpcFrame::Response {
@@ -876,16 +921,24 @@ fn verify_process_sid(process_id: u32, expected_sid: &[u8]) -> Result<()> {
 
 fn resolve_request_parent_window(
     requested_parent_window: Option<usize>,
+    browser_process_id: u32,
     expected_sid: &[u8],
 ) -> Option<usize> {
-    let requested =
-        requested_parent_window.and_then(|window| window_identity_for_sid(window, expected_sid));
-    let foreground =
-        window_identity_for_sid(unsafe { GetForegroundWindow() } as usize, expected_sid);
-    select_request_parent_window(requested, foreground)
+    let requested = requested_parent_window
+        .and_then(|window| window_identity_for_sid(window, browser_process_id, expected_sid));
+    let foreground = window_identity_for_sid(
+        unsafe { GetForegroundWindow() } as usize,
+        browser_process_id,
+        expected_sid,
+    );
+    select_request_parent_window(browser_process_id, requested, foreground)
 }
 
-fn window_identity_for_sid(window: usize, expected_sid: &[u8]) -> Option<(usize, u32)> {
+fn window_identity_for_sid(
+    window: usize,
+    browser_process_id: u32,
+    expected_sid: &[u8],
+) -> Option<(usize, u32)> {
     if window == 0 {
         return None;
     }
@@ -894,6 +947,7 @@ fn window_identity_for_sid(window: usize, expected_sid: &[u8]) -> Option<(usize,
         unsafe { GetWindowThreadProcessId(window as *mut std::ffi::c_void, &mut process_id) };
     if thread_id == 0
         || process_id == 0
+        || process_id != browser_process_id
         || verify_process_sid(process_id, expected_sid).is_err()
         || peer_auth::authenticate_browser_process(process_id).is_err()
     {
@@ -903,9 +957,12 @@ fn window_identity_for_sid(window: usize, expected_sid: &[u8]) -> Option<(usize,
 }
 
 fn select_request_parent_window(
+    browser_process_id: u32,
     requested: Option<(usize, u32)>,
     foreground: Option<(usize, u32)>,
 ) -> Option<usize> {
+    let requested = requested.filter(|(_, process_id)| *process_id == browser_process_id);
+    let foreground = foreground.filter(|(_, process_id)| *process_id == browser_process_id);
     match (requested, foreground) {
         (Some((_, requested_process)), Some((foreground_window, foreground_process)))
             if requested_process == foreground_process =>
@@ -1329,7 +1386,7 @@ mod tests {
     use super::*;
     use crate::resident_ipc::read_frame;
     use vaultkern_runtime_protocol::{
-        EntryAttachmentContentDto, PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
+        EntryAttachmentContentDto, HandshakeDto, PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
     };
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
@@ -1360,17 +1417,17 @@ mod tests {
     #[test]
     fn request_parent_tracks_the_foreground_window_in_the_same_browser_process() {
         assert_eq!(
-            select_request_parent_window(Some((0x1000, 41)), Some((0x2000, 41))),
+            select_request_parent_window(41, Some((0x1000, 41)), Some((0x2000, 41))),
             Some(0x2000)
         );
         assert_eq!(
-            select_request_parent_window(Some((0x1000, 41)), Some((0x3000, 99))),
+            select_request_parent_window(41, Some((0x1000, 41)), Some((0x3000, 99))),
             Some(0x1000)
         );
         assert_eq!(
-            select_request_parent_window(None, Some((0x4000, 99))),
-            Some(0x4000),
-            "an authenticated foreground browser is the prompt owner when MV3 supplies no window"
+            select_request_parent_window(41, None, Some((0x4000, 99))),
+            None,
+            "an unrelated foreground browser must not own an MV3 service-worker prompt"
         );
     }
 
@@ -1380,9 +1437,7 @@ mod tests {
         let request = pending
             .register("monitor-start-failure")
             .expect("register request");
-        request
-            .execution_started_token()
-            .store(true, Ordering::Release);
+        assert!(request.begin_execution());
 
         let error =
             claim_response_monitor_failure(&request).expect("monitor failure claims the response");
@@ -1469,9 +1524,21 @@ mod tests {
         let handler_deadline_mutation_committed = deadline_mutation_committed.clone();
         let consumed_blob_length = Arc::new(AtomicUsize::new(0));
         let handler_consumed_blob_length = consumed_blob_length.clone();
+        let connection_authorizations = Arc::new(AtomicUsize::new(0));
+        let handler_connection_authorizations = connection_authorizations.clone();
         let server = start_windows_resident_ipc_server_with_authenticator(
             Arc::new(
-                move |message, cancelled, execution_started, _parent_window| match message.command {
+                move |message, cancelled, _parent_window| match message.command {
+                    RuntimeCommand::Handshake {
+                        protocol_version,
+                        capabilities,
+                    } => {
+                        handler_connection_authorizations.fetch_add(1, Ordering::AcqRel);
+                        RuntimeResponse::Handshake(HandshakeDto {
+                            protocol_version,
+                            capabilities,
+                        })
+                    }
                     RuntimeCommand::GetSessionState => locked_session_response(),
                     RuntimeCommand::AddEntryAttachment {
                         name,
@@ -1509,7 +1576,6 @@ mod tests {
                     RuntimeCommand::SaveVault { vault_id }
                         if vault_id == "commit-after-dispatch" =>
                     {
-                        execution_started.store(true, Ordering::Release);
                         handler_mutation_started.store(true, Ordering::Release);
                         std::thread::sleep(Duration::from_millis(50));
                         RuntimeResponse::Saved
@@ -1517,7 +1583,6 @@ mod tests {
                     RuntimeCommand::SaveVault { vault_id }
                         if vault_id == "commit-after-deadline" =>
                     {
-                        execution_started.store(true, Ordering::Release);
                         handler_deadline_mutation_started.store(true, Ordering::Release);
                         std::thread::sleep(Duration::from_millis(750));
                         handler_deadline_mutation_committed.store(true, Ordering::Release);
@@ -1561,7 +1626,8 @@ mod tests {
         );
         verify_pipe_server_sid_only(&pipe, &identity.sid)
             .expect("verify resident IPC server SID for transport test");
-        perform_client_handshake(&pipe, EXTENSION_ORIGIN, None).expect("negotiate resident IPC");
+        perform_client_handshake(&pipe, EXTENSION_ORIGIN, std::process::id(), None)
+            .expect("negotiate resident IPC");
         let pipe = Arc::new(pipe);
         let mut writer = PipeWriter(pipe.clone());
         let mut reader = PipeReader(pipe);
@@ -1595,6 +1661,11 @@ mod tests {
             } => assert_eq!(request_id, "native-runtime-handshake-1"),
             _ => panic!("expected correlated runtime protocol handshake"),
         }
+        assert_eq!(
+            connection_authorizations.load(Ordering::Acquire),
+            1,
+            "the authenticated connection must perform one Hello authorization; the protocol handshake must only negotiate capabilities"
+        );
 
         write_frame(
             &mut writer,
@@ -1700,13 +1771,23 @@ mod tests {
             ),
         )
         .expect("send resident IPC request with an oversized response");
-        assert_request_error(
-            read_frame(&mut reader)
-                .expect("read oversized response error")
-                .expect("oversized response error before EOF"),
-            "native-oversized-response-1",
-            "response_too_large",
-        );
+        match read_frame(&mut reader)
+            .expect("read large resident response")
+            .expect("large resident response before EOF")
+        {
+            ResidentIpcFrame::Response {
+                request_id,
+                message:
+                    RuntimeResponse::EntryAttachmentContent(EntryAttachmentContentDto {
+                        data_base64,
+                        ..
+                    }),
+            } => {
+                assert_eq!(request_id, "native-oversized-response-1");
+                assert_eq!(data_base64.as_str().len(), MAX_NATIVE_RESPONSE_BYTES);
+            }
+            _ => panic!("expected resident pipe to preserve the large response for shim chunking"),
+        }
 
         write_frame(
             &mut writer,

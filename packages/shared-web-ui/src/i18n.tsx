@@ -213,6 +213,7 @@ type TranslationKey =
   | "Failed to load fill candidates"
   | "Failed to load entry detail"
   | "Failed to load database settings"
+  | "Failed to select vault"
   | "Failed to unlock vault"
   | "Failed to load popup data"
   | "Failed to load site candidates"
@@ -444,6 +445,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Failed to load fill candidates": "加载填充候选失败",
   "Failed to load entry detail": "加载条目详情失败",
   "Failed to load database settings": "加载数据库设置失败",
+  "Failed to select vault": "选择数据库失败",
   "Failed to unlock vault": "解锁数据库失败",
   "Failed to load popup data": "加载弹窗数据失败",
   "Failed to load site candidates": "加载站点候选失败",

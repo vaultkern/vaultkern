@@ -222,6 +222,8 @@ pub enum RuntimeCommand {
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_id: Option<String>,
         title: SensitiveString,
         username: SensitiveString,
         password: SensitiveString,

@@ -175,7 +175,7 @@ describe("createNativeMessagingBridge", () => {
     expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
-  it("ignores native responses whose request id does not match the active request", async () => {
+  it("rejects a native response whose request id does not match the active request", async () => {
     const port = createPort();
     const connectNative = vi.fn(() => port);
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -191,11 +191,81 @@ describe("createNativeMessagingBridge", () => {
 
     expect(firstRequestId).toEqual(expect.any(String));
 
+    const result = expect(first).rejects.toMatchObject({
+      code: "native_unknown",
+      message: "native response request ID does not match the active request"
+    });
     port.emitMessage({ requestId: "different-request", type: "second_response" });
-    await Promise.resolve();
-    port.emitMessage({ requestId: firstRequestId, type: "first_response" });
 
-    await expect(first).resolves.toEqual({ type: "first_response" });
+    await result;
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
+  });
+
+  it("reassembles a bounded sequence of correlated native response chunks", async () => {
+    const port = createPort();
+    const bridge = createNativeMessagingBridge(
+      vi.fn(() => port),
+      "com.vaultkern.runtime"
+    );
+    const request = bridge.send({
+      version: 1,
+      command: { type: "list_entries", vault_id: "vault-1" }
+    });
+    const requestId = postedRequestId(port);
+    expect(requestId).toEqual(expect.any(String));
+    const serialized = JSON.stringify({
+      requestId,
+      type: "entry_list",
+      entries: [{ id: "entry-1", title: "Large vault" }]
+    });
+    const split = Math.floor(serialized.length / 2);
+
+    port.emitRawMessage({
+      type: "native_response_chunk",
+      requestId,
+      chunkIndex: 0,
+      chunkCount: 2,
+      data: serialized.slice(0, split)
+    });
+    port.emitRawMessage({
+      type: "native_response_chunk",
+      requestId,
+      chunkIndex: 1,
+      chunkCount: 2,
+      data: serialized.slice(split)
+    });
+
+    await expect(request).resolves.toEqual({
+      type: "entry_list",
+      entries: [{ id: "entry-1", title: "Large vault" }]
+    });
+  });
+
+  it("rejects an out-of-order native response chunk and disconnects the port", async () => {
+    const port = createPort();
+    const bridge = createNativeMessagingBridge(
+      vi.fn(() => port),
+      "com.vaultkern.runtime"
+    );
+    const request = bridge.send({
+      version: 1,
+      command: { type: "list_entries", vault_id: "vault-1" }
+    });
+    const requestId = postedRequestId(port);
+
+    port.emitRawMessage({
+      type: "native_response_chunk",
+      requestId,
+      chunkIndex: 1,
+      chunkCount: 2,
+      data: "{}"
+    });
+
+    await expect(request).rejects.toMatchObject({
+      code: "native_unknown",
+      message: "native response chunk sequence is invalid"
+    });
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
   });
 
   it("rejects an uncorrelated native error and the invalid connection", async () => {

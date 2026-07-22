@@ -19,7 +19,8 @@ const client = new RuntimeClient(createTauriTransport(invoke));
 const settingsStore = createDesktopSettingsStore(
   () => invoke("load_desktop_settings"),
   (desired) => invoke("save_desktop_settings", { desired }),
-  (credentials) => invoke("queue_quick_unlock_enrollment", { credentials }),
+  (credentials, expectedVaultRefId) =>
+    invoke("queue_quick_unlock_enrollment", { credentials, expectedVaultRefId }),
   () => invoke("load_desktop_reconciliation_error"),
   (listener) =>
     listen<string | null>("vaultkern-reconciliation-error", (event) =>

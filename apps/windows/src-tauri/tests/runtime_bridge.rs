@@ -643,15 +643,25 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
             "key_file_path": null
         }
     }));
+    let vault_ref_id = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "get_session_state" }
+    }))["currentVaultRefId"]
+        .as_str()
+        .expect("current vault reference")
+        .to_owned();
 
     assert!(
         bridge
             .reconcile_quick_unlock(
                 true,
-                Some(QuickUnlockReconciliationCredentials::from_protocol_input(
-                    Some("demo-password".into()),
-                    None,
-                )),
+                Some(
+                    QuickUnlockReconciliationCredentials::from_protocol_input(
+                        Some("demo-password".into()),
+                        None,
+                    )
+                    .bound_to_vault_ref(&vault_ref_id)
+                ),
             )
             .unwrap()
     );
@@ -766,6 +776,13 @@ fn cold_platform_operation_quick_unlocks_and_returns_the_authoritative_credentia
             "key_file_path": null
         }
     }));
+    let vault_ref_id = bridge.request(json!({
+        "version": 1,
+        "command": { "type": "get_session_state" }
+    }))["currentVaultRefId"]
+        .as_str()
+        .expect("current vault reference")
+        .to_owned();
     let registration_operation = vec![3; 16];
     bridge
         .prepare_platform_passkey_operation(registration_operation.clone(), None)
@@ -791,10 +808,13 @@ fn cold_platform_operation_quick_unlocks_and_returns_the_authoritative_credentia
     bridge
         .reconcile_quick_unlock(
             true,
-            Some(QuickUnlockReconciliationCredentials::from_protocol_input(
-                Some("demo-password".into()),
-                None,
-            )),
+            Some(
+                QuickUnlockReconciliationCredentials::from_protocol_input(
+                    Some("demo-password".into()),
+                    None,
+                )
+                .bound_to_vault_ref(&vault_ref_id),
+            ),
         )
         .unwrap();
     bridge.request(json!({

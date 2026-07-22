@@ -81,9 +81,9 @@ it("forwards manual quick-unlock enrollment only as input to the native reconcil
     keyFilePath: "demo.keyx"
   };
 
-  await store.queueQuickUnlockEnrollment?.(credentials);
+  await store.queueQuickUnlockEnrollment?.(credentials, "vault-ref-1");
 
-  expect(queueEnrollment).toHaveBeenCalledWith(credentials);
+  expect(queueEnrollment).toHaveBeenCalledWith(credentials, "vault-ref-1");
 });
 
 it("exposes persisted and live native reconciliation failures", async () => {

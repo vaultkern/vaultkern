@@ -31,11 +31,13 @@ afterEach(() => {
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
 
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 it("clears quick-unlock credentials as soon as enrollment takes ownership", async () => {
@@ -519,7 +521,7 @@ it("hands quick-unlock credentials to the native owner without waiting behind re
   expect(queueQuickUnlockEnrollment).toHaveBeenCalledWith({
     password: "demo-password",
     keyFilePath: ""
-  });
+  }, "vault-ref-1");
 });
 
 it("renders recent vaults and unlocks the current selection without a path field", async () => {
@@ -601,7 +603,15 @@ it("renders recent vaults and unlocks the current selection without a path field
   expect(await screen.findByText("Work")).toBeInTheDocument();
   expect(screen.queryByLabelText("Vault Path")).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: /Personal/ }));
+  const personalVault = screen.getByRole("button", { name: /Personal/ });
+  fireEvent.click(personalVault);
+  await waitFor(() => expect(client.setCurrentVault).toHaveBeenCalledWith("vault-ref-1"));
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: /Personal/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    )
+  );
   fireEvent.change(screen.getByLabelText("Master Password"), {
     target: { value: "demo-password" }
   });
@@ -2349,6 +2359,73 @@ it("shows progress while unlocking a recent vault", async () => {
   expect(await screen.findByText("No entries available.")).toBeInTheDocument();
 });
 
+it("does not let a stale unlock failure contaminate a newer resident session", async () => {
+  const unlock = createDeferred<{
+    unlocked: boolean;
+    activeVaultId: string;
+    currentVaultRefId: string;
+  }>();
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listRecentVaults: vi.fn(async () => [
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local" as const,
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ]),
+    unlockCurrentVault: vi.fn(() => unlock.promise)
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(async (listener) => {
+        publishSessionState = listener;
+        return () => undefined;
+      })}
+    />
+  );
+
+  await screen.findByText("Personal");
+  fireEvent.change(screen.getByLabelText("Master Password"), {
+    target: { value: "old-session-password" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+  expect(await screen.findByRole("button", { name: "Unlocking..." })).toBeDisabled();
+
+  act(() => {
+    publishSessionState({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+  });
+  unlock.reject(new Error("stale unlock failure"));
+  await act(async () => {
+    await unlock.promise.catch(() => undefined);
+    await Promise.resolve();
+  });
+
+  expect(screen.queryByText("stale unlock failure")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Unlock Vault" })).toBeEnabled();
+});
+
 it("loads database settings and preserves a conflict-copy warning after saving", async () => {
   const client = {
     ...createVaultSelectionMethods(),
@@ -3513,6 +3590,91 @@ it("retries a failed passkey save without clearing the passkey again", async () 
 
   await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
   expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+});
+
+it("stabilizes an unknown passkey mutation before allowing navigation", async () => {
+  const operationId = "11111111-1111-4111-8111-111111111111";
+  const originalDetail = {
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "GitHub",
+    username: "alice",
+    password: "secret",
+    url: "https://github.com",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    passkey: {
+      username: "alice@example.com",
+      credentialId: "credential-old",
+      generatedUserId: null,
+      relyingParty: "example.com",
+      userHandle: null,
+      backupEligible: true,
+      backupState: false
+    },
+    customFields: [],
+    attachments: []
+  };
+  const clearEntryPasskey = vi.fn(async () => {
+    throw Object.assign(new Error("passkey mutation outcome is unknown"), {
+      code: "native_timeout",
+      operationId
+    });
+  });
+  const retryMutationSave = vi.fn(async () => ({
+    type: "save_vault_result" as const,
+    status: "saved" as const
+  }));
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "GitHub",
+        username: "alice",
+        url: "https://github.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi
+      .fn()
+      .mockResolvedValueOnce(originalDetail)
+      .mockResolvedValue({ ...originalDetail, passkey: null }),
+    clearEntryPasskey,
+    retryMutationSave
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "GitHub" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Clear passkey" }));
+
+  expect(
+    await screen.findByText("passkey mutation outcome is unknown")
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() =>
+    expect(retryMutationSave).toHaveBeenCalledWith("vault-1", operationId)
+  );
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText("No passkey.")).toBeInTheDocument();
 });
 
 it("renders localized passkey reveal labels without English password fragments", () => {
@@ -4686,6 +4848,93 @@ it("shows remote cache warning and retries source sync", async () => {
   expect(screen.queryByText("cached note")).not.toBeInTheDocument();
 });
 
+it("does not apply a completed source retry to a replacement resident vault", async () => {
+  const retry = createDeferred<{
+    type: "vault_source_status";
+    sourceKind: string;
+    remoteState: "online";
+    lastSyncAt: number;
+    cachedAt: number;
+    lastError: null;
+  }>();
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+    sourceStatus?: {
+      sourceKind: string;
+      remoteState: "cache";
+      lastSyncAt: null;
+      cachedAt: number;
+      lastError: string;
+    };
+  }) => void;
+  const listEntries = vi.fn(async () => []);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-a",
+      currentVaultRefId: "vault-ref-a",
+      sourceStatus: {
+        sourceKind: "onedrive",
+        remoteState: "cache" as const,
+        lastSyncAt: null,
+        cachedAt: 1776500030,
+        lastError: "offline"
+      }
+    })),
+    listEntries,
+    retryVaultSourceSync: vi.fn(() => retry.promise)
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(async (listener) => {
+        publishSessionState = listener;
+        return () => undefined;
+      })}
+    />
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Retry sync" }));
+  await waitFor(() => {
+    expect(client.retryVaultSourceSync).toHaveBeenCalledWith("vault-a");
+  });
+
+  act(() => {
+    publishSessionState({
+      unlocked: true,
+      activeVaultId: "vault-b",
+      currentVaultRefId: "vault-ref-b"
+    });
+  });
+  await waitFor(() => {
+    expect(listEntries).toHaveBeenCalledWith("vault-b");
+  });
+  const vaultBLoadsBeforeStaleCompletion = listEntries.mock.calls.filter(
+    ([vaultId]) => vaultId === "vault-b"
+  ).length;
+
+  await act(async () => {
+    retry.resolve({
+      type: "vault_source_status",
+      sourceKind: "onedrive",
+      remoteState: "online",
+      lastSyncAt: 1776500060,
+      cachedAt: 1776500030,
+      lastError: null
+    });
+    await retry.promise;
+  });
+
+  expect(screen.queryByText("Remote sync restored.")).not.toBeInTheDocument();
+  expect(
+    listEntries.mock.calls.filter(([vaultId]) => vaultId === "vault-b")
+  ).toHaveLength(vaultBLoadsBeforeStaleCompletion);
+});
+
 it("rebases an unsaved entry draft after source sync", async () => {
   let sourceRestored = false;
   const initialDetail = {
@@ -5149,10 +5398,188 @@ it("retries a failed create save without creating the entry again", async () => 
   expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
 
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
 
   await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
   expect(createEntry).toHaveBeenCalledTimes(1);
+});
+
+it("reuses the runtime logical operation after a create outcome stays unknown", async () => {
+  const operationId = "4f83153d-e91c-44f7-8395-02b603100e5a";
+  const ambiguous = Object.assign(new Error("native request timed out"), {
+    code: "native_timeout",
+    operationId
+  });
+  const createEntry = vi
+    .fn()
+    .mockRejectedValueOnce(ambiguous)
+    .mockResolvedValueOnce({
+      type: "entry_detail" as const,
+      id: operationId,
+      title: "Created once",
+      username: "",
+      password: "",
+      url: "",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    });
+  const saveVault = vi.fn(async () => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
+    createEntry,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(await screen.findByRole("button", { name: "New Entry" }));
+  fireEvent.change(await screen.findByLabelText("Title"), {
+    target: { value: "Created once" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(await screen.findByText("native request timed out")).toBeInTheDocument();
+  expect(screen.getByLabelText("Title")).toHaveAttribute("readonly");
+  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+  expect(
+    await screen.findByText(
+      "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+    )
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() => expect(createEntry).toHaveBeenCalledTimes(2));
+  expect(createEntry.mock.calls[0]).toHaveLength(2);
+  expect(createEntry.mock.calls[1]?.[2]).toBe(operationId);
+  expect(saveVault).toHaveBeenCalledTimes(1);
+});
+
+it("does not let an ambiguous mutation from vault A become pending work in vault B", async () => {
+  const vaultACreate = createDeferred<{
+    type: "entry_detail";
+    id: string;
+    title: string;
+    username: string;
+    password: string;
+    url: string;
+    notes: string;
+    totp: null;
+    totpUri: null;
+    customFields: never[];
+  }>();
+  const operationId = "951249b2-7802-4999-b9a8-9285b0355efd";
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const createEntry = vi
+    .fn()
+    .mockImplementationOnce(() => vaultACreate.promise)
+    .mockResolvedValueOnce({
+      type: "entry_detail" as const,
+      id: "entry-b",
+      title: "Vault B entry",
+      username: "",
+      password: "",
+      url: "",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-a",
+      currentVaultRefId: "vault-ref-a"
+    })),
+    listGroups: vi.fn(async (vaultId: string) => ({
+      type: "group_tree" as const,
+      root: {
+        id: `group-${vaultId}`,
+        title: vaultId,
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => []),
+    getEntryDetail: vi.fn(),
+    createEntry,
+    saveVault: vi.fn(async () => undefined)
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(async (listener) => {
+        publishSessionState = listener;
+        return () => undefined;
+      })}
+    />
+  );
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "New Entry" }));
+  fireEvent.change(await screen.findByLabelText("Title"), {
+    target: { value: "Vault A entry" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  await waitFor(() => expect(createEntry).toHaveBeenCalledTimes(1));
+
+  act(() => {
+    publishSessionState({
+      unlocked: true,
+      activeVaultId: "vault-b",
+      currentVaultRefId: "vault-ref-b"
+    });
+  });
+  await waitFor(() => expect(client.listGroups).toHaveBeenCalledWith("vault-b"));
+
+  await act(async () => {
+    vaultACreate.reject(
+      Object.assign(new Error("vault A request timed out"), {
+        code: "native_timeout",
+        operationId
+      })
+    );
+    await Promise.resolve();
+  });
+
+  fireEvent.click(screen.getByRole("button", { name: "New Entry" }));
+  expect(screen.queryByText("You have unsaved changes")).not.toBeInTheDocument();
+  fireEvent.change(await screen.findByLabelText("Title"), {
+    target: { value: "Vault B entry" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => expect(createEntry).toHaveBeenCalledTimes(2));
+  expect(createEntry.mock.calls[1]).toHaveLength(2);
+  expect(createEntry.mock.calls[1]?.[0]).toBe("vault-b");
 });
 
 it("retries a failed delete save without deleting the entry again", async () => {
@@ -5223,6 +5650,78 @@ it("retries a failed delete save without deleting the entry again", async () => 
   await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
   expect(deleteEntry).toHaveBeenCalledTimes(1);
   expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+});
+
+it("reuses an unknown delete operation before allowing navigation", async () => {
+  const operationId = "5d924f4e-8af2-4515-99ba-bf616b16c976";
+  const ambiguous = Object.assign(new Error("native request timed out"), {
+    code: "native_timeout",
+    operationId
+  });
+  const deleteEntry = vi
+    .fn()
+    .mockRejectedValueOnce(ambiguous)
+    .mockResolvedValueOnce(undefined);
+  const saveVault = vi.fn(async () => undefined);
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      type: "entry_detail",
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: [],
+      attachments: []
+    }),
+    deleteEntry,
+    saveVault
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete Entry" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
+  expect(await screen.findByText("native request timed out")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "Statistics", hidden: true }));
+  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  await waitFor(() => expect(deleteEntry).toHaveBeenCalledTimes(2));
+  expect(deleteEntry.mock.calls[0]).toHaveLength(2);
+  expect(deleteEntry.mock.calls[1]?.[2]).toBe(operationId);
+  expect(saveVault).toHaveBeenCalledTimes(1);
 });
 
 it("generates a password into the entry editor only after explicit use", async () => {

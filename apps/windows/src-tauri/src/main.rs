@@ -136,12 +136,16 @@ struct QuickUnlockEnrollmentCredentialsDto {
 #[tauri::command]
 fn queue_quick_unlock_enrollment(
     credentials: QuickUnlockEnrollmentCredentialsDto,
+    expected_vault_ref_id: String,
     bridge: State<'_, RuntimeBridge>,
 ) -> Result<(), String> {
-    bridge.queue_quick_unlock_enrollment(QuickUnlockReconciliationCredentials::from_protocol_input(
-        credentials.password,
-        credentials.key_file_path,
-    ))
+    bridge.queue_quick_unlock_enrollment(
+        QuickUnlockReconciliationCredentials::from_protocol_input(
+            credentials.password,
+            credentials.key_file_path,
+        ),
+        expected_vault_ref_id,
+    )
 }
 
 #[cfg(windows)]
@@ -232,16 +236,9 @@ fn main() {
             plugin_bridge.schedule_reconciliation();
 
             let ipc_bridge = plugin_bridge.clone();
-            let ipc_handler = Arc::new(
-                move |message, cancelled, execution_started, parent_window| {
-                    ipc_bridge.request_browser_cancellable(
-                        message,
-                        cancelled,
-                        execution_started,
-                        parent_window,
-                    )
-                },
-            );
+            let ipc_handler = Arc::new(move |message, cancelled, parent_window| {
+                ipc_bridge.request_browser_cancellable(message, cancelled, parent_window)
+            });
             let ipc_server =
                 start_windows_resident_ipc_server(ipc_handler).map_err(std::io::Error::other)?;
 

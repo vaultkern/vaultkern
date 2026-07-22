@@ -508,25 +508,29 @@ pub mod windows_setup {
     use std::ptr;
     use std::slice;
 
-    use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, LocalFree};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HANDLE, LocalFree,
+    };
     use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
     };
     use windows_sys::Win32::Security::{
         ACL, DACL_SECURITY_INFORMATION, EqualSid, GetSecurityDescriptorControl,
-        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, OWNER_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
-        SECURITY_ATTRIBUTES,
+        GetSecurityDescriptorDacl, GetSecurityDescriptorOwner, GetTokenInformation,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+        PSID, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser,
     };
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::System::Registry::{
         HKEY, REG_OPTION_NON_VOLATILE, REG_SAM_FLAGS, REG_SZ, RegCloseKey, RegCreateKeyExW,
         RegFlushKey, RegGetKeySecurity, RegSetKeySecurity, RegSetValueExW,
     };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
     use windows_sys::Win32::UI::Shell::{FOLDERID_ProgramFiles, SHGetKnownFolderPath};
     use winreg::RegKey;
     use winreg::enums::{
-        HKEY_CURRENT_USER, KEY_ALL_ACCESS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
+        HKEY_CURRENT_USER, HKEY_USERS, KEY_ALL_ACCESS, KEY_READ, KEY_WOW64_32KEY, KEY_WOW64_64KEY,
     };
 
     use crate::{
@@ -559,6 +563,18 @@ pub mod windows_setup {
             if !self.0.is_null() {
                 unsafe {
                     RegCloseKey(self.0);
+                }
+            }
+        }
+    }
+
+    struct HandleGuard(HANDLE);
+
+    impl Drop for HandleGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                unsafe {
+                    CloseHandle(self.0);
                 }
             }
         }
@@ -621,9 +637,64 @@ pub mod windows_setup {
         })
     }
 
-    pub fn register_browser(config: &BrowserSetupConfig) -> Result<(), String> {
-        if config.extension_id().trim().is_empty() {
-            return Err("extension id is required".into());
+    pub fn current_user_sid_string() -> Result<String, String> {
+        let mut token = ptr::null_mut();
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let token = HandleGuard(token);
+        let mut required = 0;
+        unsafe {
+            GetTokenInformation(token.0, TokenUser, ptr::null_mut(), 0, &mut required);
+        }
+        if required < size_of::<TOKEN_USER>() as u32 {
+            return Err("Windows did not return a valid user token".into());
+        }
+        let words = (required as usize).div_ceil(size_of::<usize>());
+        let mut storage = vec![0_usize; words];
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                storage.as_mut_ptr().cast(),
+                required,
+                &mut required,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let user = unsafe { &*storage.as_ptr().cast::<TOKEN_USER>() };
+        let mut sid_string = ptr::null_mut();
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &mut sid_string) } == 0 {
+            return Err(io::Error::last_os_error().to_string());
+        }
+        let mut length = 0;
+        while unsafe { *sid_string.add(length) } != 0 {
+            length += 1;
+        }
+        let result = String::from_utf16(unsafe { slice::from_raw_parts(sid_string, length) })
+            .map_err(|error| error.to_string());
+        unsafe {
+            LocalFree(sid_string.cast());
+        }
+        result
+    }
+
+    pub fn register_browser_for_user(
+        config: &BrowserSetupConfig,
+        target_user_sid: &str,
+    ) -> Result<(), String> {
+        validate_target_user_sid(target_user_sid)?;
+        if config.extension_id().len() != 32
+            || !config
+                .extension_id()
+                .bytes()
+                .all(|byte| (b'a'..=b'p').contains(&byte))
+        {
+            return Err(
+                "extension id must contain exactly 32 lowercase letters from a through p".into(),
+            );
         }
         if built_in_extension_id().is_some_and(|extension_id| extension_id != config.extension_id())
         {
@@ -635,25 +706,19 @@ pub mod windows_setup {
         let manifest_path = config.manifest_path();
         atomic_write_file(&manifest_path, config.expected_manifest().as_bytes())
             .map_err(|error| error.to_string())?;
-        write_registry_manifest_path(config.browser(), &manifest_path)?;
+        write_registry_manifest_path_for_user(config.browser(), target_user_sid, &manifest_path)?;
         Ok(())
     }
 
-    pub fn unregister_browser(browser: BrowserKind) -> Result<(), String> {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-        let key_path = registry_subkey(browser);
+    pub fn unregister_browser_for_user(
+        browser: BrowserKind,
+        target_user_sid: &str,
+    ) -> Result<(), String> {
+        validate_target_user_sid(target_user_sid)?;
+        let users = RegKey::predef(HKEY_USERS);
+        let key_path = user_registry_subkey(target_user_sid, browser);
         for view in REGISTRY_VIEWS {
-            match hkcu.delete_subkey_with_flags(key_path, view) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
-            }
-        }
-
-        if let Ok(program_files) = program_files_dir() {
-            let manifest_path =
-                BrowserSetupConfig::new(browser, "", PathBuf::new(), program_files).manifest_path();
-            match fs::remove_file(&manifest_path) {
+            match users.delete_subkey_with_flags(&key_path, view) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error.to_string()),
@@ -732,22 +797,20 @@ pub mod windows_setup {
         Ok((Some(first_path.clone()), both_views_match))
     }
 
-    fn write_registry_manifest_path(
+    fn write_registry_manifest_path_for_user(
         browser: BrowserKind,
+        target_user_sid: &str,
         manifest_path: &Path,
     ) -> Result<(), String> {
-        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        validate_target_user_sid(target_user_sid)?;
+        let key_path = user_registry_subkey(target_user_sid, browser);
         let value = manifest_path
             .as_os_str()
             .encode_wide()
             .chain(Some(0))
             .collect::<Vec<_>>();
         for view in REGISTRY_VIEWS {
-            let key = create_protected_registration_key(
-                hkcu.raw_handle(),
-                registry_subkey(browser),
-                view,
-            )?;
+            let key = create_protected_registration_key(HKEY_USERS, &key_path, view)?;
             let result = unsafe {
                 RegSetValueExW(
                     key.0,
@@ -954,6 +1017,22 @@ pub mod windows_setup {
         }
     }
 
+    fn user_registry_subkey(target_user_sid: &str, browser: BrowserKind) -> String {
+        format!(r"{}\{}", target_user_sid, registry_subkey(browser))
+    }
+
+    fn validate_target_user_sid(target_user_sid: &str) -> Result<(), String> {
+        if !target_user_sid.starts_with("S-1-")
+            || target_user_sid.len() > 184
+            || !target_user_sid
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || byte == b'-' || byte == b'S')
+        {
+            return Err("invalid target Windows user SID".into());
+        }
+        Ok(())
+    }
+
     fn detail_for_status(status: RegistrationStatus) -> String {
         match status {
             RegistrationStatus::Registered => "Native host registration is ready.".into(),
@@ -1110,11 +1189,11 @@ mod tests {
     }
 
     #[test]
-    fn native_setup_requires_elevation_before_it_can_publish_browser_registration() {
+    fn native_setup_starts_as_the_interactive_user_before_requesting_elevation() {
         let manifest = include_str!("../windows/app.manifest");
 
-        assert!(manifest.contains(r#"requestedExecutionLevel level="requireAdministrator""#));
-        assert!(!manifest.contains(r#"requestedExecutionLevel level="asInvoker""#));
+        assert!(manifest.contains(r#"requestedExecutionLevel level="asInvoker""#));
+        assert!(!manifest.contains(r#"requestedExecutionLevel level="requireAdministrator""#));
     }
 
     #[test]
@@ -1346,10 +1425,10 @@ mod tests {
     }
 
     #[test]
-    fn windows_application_manifest_requires_uac_for_protected_registration() {
+    fn windows_application_manifest_preserves_the_launching_user_identity() {
         let manifest = read_package_file("windows/app.manifest");
 
-        assert!(manifest.contains(r#"requestedExecutionLevel level="requireAdministrator""#));
+        assert!(manifest.contains(r#"requestedExecutionLevel level="asInvoker""#));
         assert!(manifest.contains(r#"uiAccess="false""#));
     }
 
@@ -1400,6 +1479,21 @@ mod tests {
         assert!(script.contains(r#""${sign_tool}" sign"#));
         assert!(script.contains(r#""${sign_tool}" verify"#));
         assert!(script.contains("runtime signing certificate thumbprint is required"));
+        assert!(script.contains("setup_sign_path"));
+        assert!(script.contains(r#""${sign_tool}" sign"#));
+        assert!(script.contains(r#""${sign_tool}" verify /pa /all "${setup_sign_path}""#));
+    }
+
+    #[test]
+    fn windows_gui_elevates_only_the_machine_and_protected_registry_commit() {
+        let main_rs = read_package_file("src/main.rs");
+        let lib_rs = read_package_file("src/lib.rs");
+
+        assert!(main_rs.contains("--elevated-register"));
+        assert!(main_rs.contains("current_user_sid_string"));
+        assert!(main_rs.contains("run_elevated_action"));
+        assert!(lib_rs.contains("HKEY_USERS"));
+        assert!(lib_rs.contains("register_browser_for_user"));
     }
 
     #[test]

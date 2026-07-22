@@ -23,6 +23,12 @@ type PendingRequest = {
   resolve: (response: unknown) => void;
   reject: (error: Error) => void;
   timeoutId: ReturnType<typeof setTimeout> | null;
+  chunks: {
+    count: number;
+    nextIndex: number;
+    totalCharacters: number;
+    parts: string[];
+  } | null;
 };
 
 type NativeBridgeEvent = {
@@ -113,6 +119,8 @@ function timeoutError() {
 }
 
 const NATIVE_RESPONSE_GRACE_MS = 1_000;
+const MAX_NATIVE_RESPONSE_CHUNKS = 256;
+const MAX_CHUNKED_RESPONSE_CHARACTERS = 64 * 1024 * 1024;
 
 function commandTypeFromMessage(message: unknown) {
   if (
@@ -157,6 +165,36 @@ function stripResponseRequestId(response: unknown) {
 
   const { requestId: _requestId, ...rest } = response as Record<string, unknown>;
   return rest;
+}
+
+function nativeResponseChunk(response: unknown) {
+  if (
+    typeof response !== "object" ||
+    response === null ||
+    (response as { type?: unknown }).type !== "native_response_chunk"
+  ) {
+    return null;
+  }
+  const chunk = response as {
+    requestId?: unknown;
+    chunkIndex?: unknown;
+    chunkCount?: unknown;
+    data?: unknown;
+  };
+  if (
+    typeof chunk.requestId !== "string" ||
+    !Number.isInteger(chunk.chunkIndex) ||
+    !Number.isInteger(chunk.chunkCount) ||
+    typeof chunk.data !== "string"
+  ) {
+    return false;
+  }
+  return {
+    requestId: chunk.requestId,
+    chunkIndex: chunk.chunkIndex as number,
+    chunkCount: chunk.chunkCount as number,
+    data: chunk.data
+  };
 }
 
 function isStartupCommand(message: unknown) {
@@ -211,6 +249,7 @@ function shouldCancelActivePreload(
 // This list only grants enough UI time for the runtime's interactive gate.
 // The Rust runtime owns and exhaustively enforces the authorization policy.
 const FRESH_VERIFICATION_COMMANDS = new Set([
+  "handshake",
   "add_local_vault_reference",
   "begin_one_drive_login",
   "complete_pending_one_drive_login",
@@ -413,22 +452,74 @@ export function createNativeMessagingBridge(
     }
 
     const request = activeRequest;
+    const chunk = nativeResponseChunk(response);
+    if (chunk === false) {
+      rejectProtocolConnection(attachedPort, "native response chunk is malformed");
+      return;
+    }
+    if (chunk) {
+      if (
+        chunk.requestId !== request.requestId ||
+        chunk.chunkCount < 2 ||
+        chunk.chunkCount > MAX_NATIVE_RESPONSE_CHUNKS ||
+        chunk.chunkIndex < 0 ||
+        chunk.chunkIndex >= chunk.chunkCount
+      ) {
+        rejectProtocolConnection(attachedPort, "native response chunk sequence is invalid");
+        return;
+      }
+      if (chunk.chunkIndex === 0) {
+        if (request.chunks !== null) {
+          rejectProtocolConnection(attachedPort, "native response chunk sequence restarted");
+          return;
+        }
+        request.chunks = {
+          count: chunk.chunkCount,
+          nextIndex: 0,
+          totalCharacters: 0,
+          parts: []
+        };
+      }
+      const chunks = request.chunks;
+      if (
+        !chunks ||
+        chunks.count !== chunk.chunkCount ||
+        chunks.nextIndex !== chunk.chunkIndex ||
+        chunks.totalCharacters + chunk.data.length >
+          MAX_CHUNKED_RESPONSE_CHARACTERS
+      ) {
+        rejectProtocolConnection(attachedPort, "native response chunk sequence is invalid");
+        return;
+      }
+      chunks.parts.push(chunk.data);
+      chunks.totalCharacters += chunk.data.length;
+      chunks.nextIndex += 1;
+      if (chunks.nextIndex !== chunks.count) {
+        return;
+      }
+      let assembled: unknown;
+      try {
+        assembled = JSON.parse(chunks.parts.join(""));
+      } catch {
+        rejectProtocolConnection(attachedPort, "native response chunks are not valid JSON");
+        return;
+      }
+      request.chunks = null;
+      onNativeMessage(attachedPort, assembled);
+      return;
+    }
+    if (request.chunks !== null) {
+      rejectProtocolConnection(attachedPort, "native response interrupted a chunk sequence");
+      return;
+    }
     const responseRequestId = requestIdFromResponse(response);
     if (responseRequestId !== request.requestId) {
-      if (responseRequestId === null) {
-        const error = new NativeMessagingError(
-          "native_unknown",
-          "native response is missing its request ID"
-        );
-        const requestPort = port;
-        detachPort();
-        rejectAll(error);
-        try {
-          requestPort?.disconnect();
-        } catch {
-          // The protocol-invalid connection is already detached.
-        }
-      }
+      rejectProtocolConnection(
+        attachedPort,
+        responseRequestId === null
+          ? "native response is missing its request ID"
+          : "native response request ID does not match the active request"
+      );
       return;
     }
     emitEvent({
@@ -439,6 +530,20 @@ export function createNativeMessagingBridge(
     clearRequestTimeout(request);
     request.resolve(stripResponseRequestId(response));
     flushQueue();
+  }
+
+  function rejectProtocolConnection(attachedPort: NativePort, message: string) {
+    if (port !== attachedPort) {
+      return;
+    }
+    const error = new NativeMessagingError("native_unknown", message);
+    detachPort();
+    rejectAll(error);
+    try {
+      attachedPort.disconnect();
+    } catch {
+      // The protocol-invalid connection is already detached.
+    }
   }
 
   function onNativeDisconnect(attachedPort: NativePort) {
@@ -548,7 +653,8 @@ export function createNativeMessagingBridge(
           requestId,
           resolve,
           reject,
-          timeoutId: null
+          timeoutId: null,
+          chunks: null
         });
         flushQueue();
       });

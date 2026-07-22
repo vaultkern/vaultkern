@@ -14,7 +14,9 @@ mod sync;
 mod unlock;
 mod vault_reference_store;
 
-pub use command_loop::{install_redacted_panic_hook, run_browser_stdio_loop, run_stdio_loop};
+pub use command_loop::{
+    encode_zeroizing_json, install_redacted_panic_hook, run_browser_stdio_loop, run_stdio_loop,
+};
 pub use native_host::render_manifest;
 pub use passkey::{
     PlatformPasskeyAssertionInput, PlatformPasskeyAssertionOutput, PlatformPasskeyCredential,

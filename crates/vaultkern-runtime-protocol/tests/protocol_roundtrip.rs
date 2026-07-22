@@ -667,6 +667,7 @@ fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
     let command = RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-1".into(),
+        entry_id: None,
         title: "title".into(),
         username: "username".into(),
         password: "command-password-secret".into(),
@@ -1133,6 +1134,7 @@ fn protocol_roundtrips_entry_mutation_commands() {
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-root".into(),
+        entry_id: Some("11111111-1111-4111-8111-111111111111".into()),
         title: "Example".into(),
         username: "alice".into(),
         password: "secret".into(),

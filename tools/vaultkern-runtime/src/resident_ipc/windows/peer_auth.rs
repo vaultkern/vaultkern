@@ -142,7 +142,7 @@ pub(super) fn authenticate_native_shim_process(process_id: u32) -> Result<()> {
     authenticate_matching_signers(package_signer, shim_signer)
 }
 
-pub(super) fn authenticate_native_messaging_channel() -> Result<()> {
+pub(super) fn authenticate_native_messaging_channel() -> Result<u32> {
     let stdin = std_handle(STD_INPUT_HANDLE, "stdin")?;
     let stdout = std_handle(STD_OUTPUT_HANDLE, "stdout")?;
     let (stdin_client_process_id, stdout_server_process_id) =
@@ -155,7 +155,8 @@ pub(super) fn authenticate_native_messaging_channel() -> Result<()> {
         actor,
     };
     let trusted_browser_paths = trusted_browser_executable_paths()?;
-    authenticate_native_messaging_channel_identity(&identity, &trusted_browser_paths)
+    authenticate_native_messaging_channel_identity(&identity, &trusted_browser_paths)?;
+    Ok(stdin_client_process_id)
 }
 
 pub(super) fn authenticate_browser_process(process_id: u32) -> Result<()> {

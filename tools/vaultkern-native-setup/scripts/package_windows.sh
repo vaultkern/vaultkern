@@ -64,4 +64,16 @@ cp \
   "${repo_root}/target/${target_triple}/release/vaultkern-native-setup.exe" \
   "${output_dir}/VaultKernNativeSetup.exe"
 
+setup_path="${output_dir}/VaultKernNativeSetup.exe"
+setup_sign_path="${setup_path}"
+if [[ "${sign_tool}" == *.exe ]] && command -v wslpath >/dev/null 2>&1; then
+  setup_sign_path="$(wslpath -w "${setup_path}")"
+fi
+if [[ -n "${timestamp_url}" ]]; then
+  "${sign_tool}" sign /sha1 "${signing_thumbprint}" /fd SHA256 /tr "${timestamp_url}" /td SHA256 "${setup_sign_path}"
+else
+  "${sign_tool}" sign /sha1 "${signing_thumbprint}" /fd SHA256 "${setup_sign_path}"
+fi
+"${sign_tool}" verify /pa /all "${setup_sign_path}"
+
 printf 'Packaged VaultKern Native Setup at %s\n' "${output_dir}"

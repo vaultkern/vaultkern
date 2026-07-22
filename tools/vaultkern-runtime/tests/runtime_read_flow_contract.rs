@@ -227,15 +227,22 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
     runtime
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
+    let vault_ref_id = runtime
+        .session_state()
+        .current_vault_ref_id
+        .expect("current vault reference");
 
     assert!(
         runtime
             .reconcile_quick_unlock(
                 true,
-                Some(QuickUnlockReconciliationCredentials::from_protocol_input(
-                    Some("demo-password".into()),
-                    None,
-                )),
+                Some(
+                    QuickUnlockReconciliationCredentials::from_protocol_input(
+                        Some("demo-password".into()),
+                        None,
+                    )
+                    .bound_to_vault_ref(&vault_ref_id)
+                ),
             )
             .unwrap()
     );
@@ -780,6 +787,7 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -846,6 +854,68 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         })
         .unwrap();
     assert_eq!(deleted, RuntimeResponse::Saved);
+}
+
+#[test]
+fn runtime_replays_a_create_with_the_same_planned_entry_id_without_duplication() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let bytes = core
+        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+    let root_id = runtime.list_groups(&handle.vault_id).unwrap().root.id;
+    let entry_id = "11111111-1111-4111-8111-111111111111";
+
+    for _ in 0..2 {
+        let response = runtime
+            .handle(RuntimeCommand::CreateEntry {
+                vault_id: handle.vault_id.clone(),
+                parent_group_id: root_id.clone(),
+                entry_id: Some(entry_id.into()),
+                title: "Original".into(),
+                username: "alice".into(),
+                password: "secret".into(),
+                url: "https://example.com".into(),
+                notes: String::new().into(),
+                totp_uri: None,
+            })
+            .unwrap();
+        let RuntimeResponse::EntryDetail(detail) = response else {
+            panic!("expected entry detail");
+        };
+        assert_eq!(detail.id, entry_id);
+        assert_eq!(detail.title, "Original");
+    }
+
+    let collision = runtime.handle(RuntimeCommand::CreateEntry {
+        vault_id: handle.vault_id.clone(),
+        parent_group_id: root_id,
+        entry_id: Some(entry_id.into()),
+        title: "must not overwrite the committed entry".into(),
+        username: "alice".into(),
+        password: "secret".into(),
+        url: "https://example.com".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    });
+    assert!(
+        collision
+            .unwrap_err()
+            .to_string()
+            .contains("planned entry id collision")
+    );
+
+    let entries = runtime.list_entries(&handle.vault_id).unwrap();
+    assert_eq!(entries.len(), 1);
 }
 
 #[test]
@@ -4510,6 +4580,7 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -4752,6 +4823,7 @@ fn runtime_updates_entry_modified_time_after_manager_mutations() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: vault.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Created".into(),
             username: "alice".into(),
             password: "secret".into(),
