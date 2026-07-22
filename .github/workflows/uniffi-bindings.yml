@@ -100,6 +100,7 @@ jobs:
             "$GITHUB_WORKSPACE/crates/vaultkern-uniffi/tests/swift/VaultKernSmoke.swift" \
             -o "$output/VaultKernSmoke"
 
+          TMPDIR="$state" \
           XDG_STATE_HOME="$state" \
           DYLD_LIBRARY_PATH="$output:$native" \
             "$output/VaultKernSmoke" "$fixture" vaultkern-external-fixture
