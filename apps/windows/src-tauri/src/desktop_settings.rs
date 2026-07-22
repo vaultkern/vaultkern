@@ -16,6 +16,25 @@ pub struct DesktopDesiredState {
     pub idle_lock_minutes: u64,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct SettingsReconciliationStatus {
+    error: Arc<Mutex<Option<String>>>,
+}
+
+impl SettingsReconciliationStatus {
+    pub fn record(&self, result: Result<(), String>) {
+        let next_error = result.err();
+        *self.error.lock().unwrap_or_else(|error| error.into_inner()) = next_error;
+    }
+
+    pub fn error(&self) -> Option<String> {
+        self.error
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+}
+
 #[derive(Debug)]
 pub struct DesktopSettingsStoreError {
     operation: &'static str,

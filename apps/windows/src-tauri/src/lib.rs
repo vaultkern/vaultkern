@@ -3,7 +3,10 @@ mod desktop_settings;
 mod plugin_operation_state;
 mod runtime_bridge;
 
-pub use desktop_settings::{DesktopDesiredState, DesktopSettingsStore, DesktopSettingsStoreError};
+pub use desktop_settings::{
+    DesktopDesiredState, DesktopSettingsStore, DesktopSettingsStoreError,
+    SettingsReconciliationStatus,
+};
 pub use runtime_bridge::{RuntimeBridge, SettingsReconciliationRequest};
 
 pub fn launch_requests_visible_window(arguments: &[String]) -> bool {

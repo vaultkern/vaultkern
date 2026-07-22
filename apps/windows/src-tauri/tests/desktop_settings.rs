@@ -1,5 +1,5 @@
 use serde_json::json;
-use vaultkern_windows::DesktopSettingsStore;
+use vaultkern_windows::{DesktopSettingsStore, SettingsReconciliationStatus};
 
 #[test]
 fn native_settings_are_available_before_the_webview_starts() {
@@ -39,4 +39,19 @@ fn a_failed_native_settings_save_preserves_the_previous_generation() {
 
     assert!(!error.to_string().is_empty());
     assert_eq!(store.load().unwrap(), previous);
+}
+
+#[test]
+fn reconciliation_status_survives_until_a_later_success_clears_it() {
+    let status = SettingsReconciliationStatus::default();
+    let observer = status.clone();
+
+    status.record(Err("provider registration failed".to_owned()));
+    assert_eq!(
+        observer.error().as_deref(),
+        Some("provider registration failed")
+    );
+
+    status.record(Ok(()));
+    assert_eq!(observer.error(), None);
 }

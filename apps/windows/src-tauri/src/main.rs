@@ -7,7 +7,7 @@ use serde_json::Value;
 #[cfg(windows)]
 use std::sync::Arc;
 #[cfg(windows)]
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 #[cfg(windows)]
 use vaultkern_runtime::QuickUnlockReconciliationCredentials;
 #[cfg(windows)]
@@ -17,7 +17,7 @@ use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse, Se
 #[cfg(windows)]
 use vaultkern_windows::{
     DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, SettingsReconciliationRequest,
-    launch_requests_visible_window,
+    SettingsReconciliationStatus, launch_requests_visible_window,
 };
 
 #[cfg(windows)]
@@ -104,6 +104,14 @@ fn load_desktop_settings(settings: State<'_, Arc<DesktopSettingsStore>>) -> Resu
 
 #[cfg(windows)]
 #[tauri::command]
+fn load_desktop_reconciliation_error(
+    status: State<'_, SettingsReconciliationStatus>,
+) -> Option<String> {
+    status.error()
+}
+
+#[cfg(windows)]
+#[tauri::command]
 fn save_desktop_settings(
     desired: Value,
     settings: State<'_, Arc<DesktopSettingsStore>>,
@@ -179,17 +187,44 @@ fn main() {
             let reconciliation_settings = Arc::clone(&settings);
             let reconciliation_plugin = Arc::clone(&plugin);
             let reconciliation_bridge = plugin_bridge.clone();
+            let reconciliation_status = SettingsReconciliationStatus::default();
+            let worker_reconciliation_status = reconciliation_status.clone();
+            let reconciliation_app = app.handle().clone();
             std::thread::Builder::new()
                 .name("vaultkern-settings-reconciliation".to_owned())
                 .spawn(move || {
                     while let Ok(request) = reconciliation_requests.recv() {
-                        if let Err(error) = reconcile_desktop_settings(
+                        let result = reconcile_desktop_settings(
                             &reconciliation_settings,
                             &reconciliation_bridge,
                             &reconciliation_plugin,
                             request,
+                        );
+                        worker_reconciliation_status.record(result.clone());
+                        if let Err(error) = reconciliation_app.emit(
+                            "vaultkern-reconciliation-error",
+                            worker_reconciliation_status.error(),
                         ) {
+                            eprintln!("failed to publish reconciliation status: {error}");
+                        }
+                        if let Err(error) = result {
                             eprintln!("post-commit settings reconciliation failed: {error}");
+                        }
+                    }
+                })
+                .map_err(std::io::Error::other)?;
+            let (session_states, session_state_notifications) = std::sync::mpsc::channel();
+            plugin_bridge
+                .set_session_state_notifier(session_states)
+                .map_err(std::io::Error::other)?;
+            let session_state_app = app.handle().clone();
+            std::thread::Builder::new()
+                .name("vaultkern-session-state-events".to_owned())
+                .spawn(move || {
+                    while let Ok(state) = session_state_notifications.recv() {
+                        if let Err(error) = session_state_app.emit("vaultkern-session-state", state)
+                        {
+                            eprintln!("failed to publish resident session state: {error}");
                         }
                     }
                 })
@@ -211,6 +246,7 @@ fn main() {
                 start_windows_resident_ipc_server(ipc_handler).map_err(std::io::Error::other)?;
 
             app.manage(settings);
+            app.manage(reconciliation_status);
             app.manage(plugin);
             app.manage(ipc_server);
             if show_window_on_start {
@@ -235,6 +271,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             runtime_send,
             load_desktop_settings,
+            load_desktop_reconciliation_error,
             save_desktop_settings,
             queue_quick_unlock_enrollment
         ])

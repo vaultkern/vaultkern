@@ -2586,6 +2586,10 @@ impl Runtime {
             .is_some_and(|loaded| loaded.vault.is_some())
     }
 
+    pub fn has_active_platform_passkey_operations(&self) -> bool {
+        !self.platform_passkey_operations.is_empty()
+    }
+
     pub fn prepare_platform_passkey_operation(
         &mut self,
         operation_id: Vec<u8>,

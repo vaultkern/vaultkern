@@ -476,18 +476,23 @@ fn dispatch_request(
             }
         });
     if response_spawn.is_err() {
-        request.cancellation_token().store(true, Ordering::Release);
-        if request.claim_response() {
+        if let Some(error) = claim_response_monitor_failure(&request) {
             let _ = send_frame(
                 &writer,
                 &ResidentIpcFrame::Error {
                     request_id: Some(request_id),
-                    code: "runtime_unavailable".into(),
-                    message: "failed to monitor resident IPC request".into(),
+                    code: error.code,
+                    message: error.message,
                 },
             );
         }
     }
+}
+
+fn claim_response_monitor_failure(request: &PendingRequest) -> Option<ErrorDto> {
+    request
+        .claim_deadline_response()
+        .map(request_deadline_error)
 }
 
 fn perform_client_handshake(
@@ -1367,6 +1372,23 @@ mod tests {
             Some(0x4000),
             "an authenticated foreground browser is the prompt owner when MV3 supplies no window"
         );
+    }
+
+    #[test]
+    fn response_monitor_start_failure_reports_unknown_after_execution_started() {
+        let pending = PendingRequests::default();
+        let request = pending
+            .register("monitor-start-failure")
+            .expect("register request");
+        request
+            .execution_started_token()
+            .store(true, Ordering::Release);
+
+        let error =
+            claim_response_monitor_failure(&request).expect("monitor failure claims the response");
+
+        assert_eq!(error.code, "request_outcome_unknown");
+        assert!(request.cancelled());
     }
 
     #[test]

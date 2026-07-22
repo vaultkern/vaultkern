@@ -13,6 +13,7 @@ import {
   DEFAULT_EXTENSION_SETTINGS,
   I18nProvider,
   normalizeBrowserExtensionSettings,
+  sortRecentVaultsForRetention,
   translate
 } from "@vaultkern/shared-web-ui";
 import type { ExtensionSettingsStore } from "@vaultkern/shared-web-ui";
@@ -185,9 +186,7 @@ interface FillEntryOptions {
 }
 
 function limitRecentVaults(vaults: VaultReference[], limit: number) {
-  return [...vaults]
-    .sort((left, right) => (right.lastUsedAt ?? 0) - (left.lastUsedAt ?? 0))
-    .slice(0, limit);
+  return sortRecentVaultsForRetention(vaults).slice(0, limit);
 }
 
 function passkeyCredentialOptionsFromUnknown(
@@ -1495,7 +1494,12 @@ export function PopupApp({
     if (nextSession.currentVaultRefId) {
       startCurrentVaultPreload();
     }
-    setRecentVaults(await client.listRecentVaults());
+    setRecentVaults(
+      limitRecentVaults(
+        await client.listRecentVaults(),
+        extensionSettingsRef.current.recentVaultLimit
+      )
+    );
     setPassword("");
     setKeyFilePath("");
     setUnlockError(null);

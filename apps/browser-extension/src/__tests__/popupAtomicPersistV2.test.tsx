@@ -2,6 +2,7 @@ import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_EXTENSION_SETTINGS } from "@vaultkern/shared-web-ui";
 
 import {
   dismissPendingAutofillSubmission,
@@ -380,6 +381,89 @@ describe("popup pending autofill V2 transport", () => {
       { frameId: 0 }
     );
     expect(deliveredFrameIds).toEqual([0]);
+  });
+});
+
+it("reapplies current-first recent-vault retention after selecting a vault", async () => {
+  const initialVaults = [
+    {
+      vaultRefId: "vault-ref-a",
+      displayName: "Alpha",
+      sourceKind: "local",
+      sourceSummary: "alpha.kdbx",
+      lastUsedAt: 100,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: true
+    },
+    {
+      vaultRefId: "vault-ref-b",
+      displayName: "Beta",
+      sourceKind: "local",
+      sourceSummary: "beta.kdbx",
+      lastUsedAt: 200,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: false
+    }
+  ];
+  const selectedVaults = [
+    { ...initialVaults[0], isCurrent: false },
+    { ...initialVaults[1], lastUsedAt: 100, isCurrent: true },
+    {
+      vaultRefId: "vault-ref-c",
+      displayName: "Gamma",
+      sourceKind: "local",
+      sourceSummary: "gamma.kdbx",
+      lastUsedAt: 300,
+      availability: "ready",
+      supportsQuickUnlock: false,
+      isCurrent: false
+    }
+  ];
+  const locked = {
+    unlocked: false,
+    activeVaultId: null,
+    currentVaultRefId: "vault-ref-a"
+  };
+  const client = popupClient({
+    getSessionState: vi.fn(async () => locked),
+    listRecentVaults: vi
+      .fn()
+      .mockResolvedValueOnce(initialVaults)
+      .mockResolvedValue(selectedVaults),
+    setCurrentVault: vi.fn(async () => ({
+      ...locked,
+      currentVaultRefId: "vault-ref-b"
+    }))
+  });
+
+  render(
+    <PopupApp
+      client={client}
+      activeSite={async () => "example.com"}
+      findCandidates={async () => []}
+      fillEntry={async () => undefined}
+      extensionSettingsStore={{
+        surface: "browser",
+        load: async () => ({
+          ...DEFAULT_EXTENSION_SETTINGS,
+          recentVaultLimit: 2
+        }),
+        save: async () => undefined
+      }}
+    />
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: /Beta/ }));
+
+  await waitFor(() => {
+    expect(screen.getByRole("button", { name: /Beta/ })).toHaveAttribute(
+      "aria-pressed",
+      "true"
+    );
+    expect(screen.getByRole("button", { name: /Gamma/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /Alpha/ })).not.toBeInTheDocument();
   });
 });
 

@@ -77,6 +77,52 @@ it("clears quick-unlock credentials as soon as enrollment takes ownership", asyn
   enrollment.resolve();
 });
 
+it("clears quick-unlock credentials when the resident session changes", async () => {
+  const { rerender } = render(
+    <I18nProvider language="en">
+      <ExtensionSettingsPanel
+        settings={{
+          ...DEFAULT_EXTENSION_SETTINGS,
+          quickUnlockEnabled: true
+        }}
+        saving={false}
+        error={null}
+        quickUnlockEnabled
+        quickUnlockVaultUnlocked
+        quickUnlockCredentialResetKey={0}
+        onSave={vi.fn()}
+      />
+    </I18nProvider>
+  );
+
+  fireEvent.change(screen.getByLabelText("Quick Unlock Master Password"), {
+    target: { value: "resident-secret" }
+  });
+  fireEvent.change(screen.getByLabelText("Quick Unlock Key File Path"), {
+    target: { value: "C:\\keys\\resident.keyx" }
+  });
+
+  rerender(
+    <I18nProvider language="en">
+      <ExtensionSettingsPanel
+        settings={{
+          ...DEFAULT_EXTENSION_SETTINGS,
+          quickUnlockEnabled: true
+        }}
+        saving={false}
+        error={null}
+        quickUnlockEnabled
+        quickUnlockVaultUnlocked
+        quickUnlockCredentialResetKey={1}
+        onSave={vi.fn()}
+      />
+    </I18nProvider>
+  );
+
+  expect(screen.getByLabelText("Quick Unlock Master Password")).toHaveValue("");
+  expect(screen.getByLabelText("Quick Unlock Key File Path")).toHaveValue("");
+});
+
 function committedDatabaseSettings(
   settings: DatabaseSettings,
   saveResult: DatabaseSettingsCommitResult["saveResult"] = {
@@ -592,6 +638,263 @@ it("renders recent vaults and unlocks the current selection without a path field
   await waitFor(() => expect(passwordInput).toHaveAttribute("type", "text"));
 });
 
+it("removes rendered secrets when the resident session is invalidated by another client", async () => {
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const subscribeSessionState = vi.fn(async (listener: typeof publishSessionState) => {
+    publishSessionState = listener;
+    return () => undefined;
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Demo Vault",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "resident-secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={subscribeSessionState}
+    />
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  expect(await screen.findByDisplayValue("resident-secret")).toBeInTheDocument();
+  await waitFor(() => expect(subscribeSessionState).toHaveBeenCalledTimes(1));
+
+  act(() => {
+    publishSessionState({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+  });
+
+  expect(screen.queryByDisplayValue("resident-secret")).not.toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+});
+
+it("does not let an initial session read overwrite a newer resident invalidation", async () => {
+  const initialSession = createDeferred<{
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }>();
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const subscribeSessionState = vi.fn(async (listener: typeof publishSessionState) => {
+    publishSessionState = listener;
+    return () => undefined;
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(() => initialSession.promise),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={subscribeSessionState}
+    />
+  );
+
+  await waitFor(() => expect(subscribeSessionState).toHaveBeenCalledTimes(1));
+  act(() => {
+    publishSessionState({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+  });
+  initialSession.resolve({
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1"
+  });
+  await act(async () => {
+    await initialSession.promise;
+    await Promise.resolve();
+  });
+
+  expect(screen.getByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
+  expect(client.listGroups).not.toHaveBeenCalled();
+});
+
+it("clears typed unlock credentials on a same-state resident lock event", async () => {
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listRecentVaults: vi.fn(async () => [
+      {
+        vaultRefId: "vault-ref-1",
+        displayName: "Personal",
+        sourceKind: "local" as const,
+        sourceSummary: "personal.kdbx",
+        lastUsedAt: 1776500000,
+        availability: "ready" as const,
+        supportsQuickUnlock: false,
+        isCurrent: true
+      }
+    ])
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(async (listener) => {
+        publishSessionState = listener;
+        return () => undefined;
+      })}
+    />
+  );
+
+  const password = await screen.findByLabelText("Master Password");
+  const keyFilePath = screen.getByLabelText("Key File Path");
+  fireEvent.change(password, { target: { value: "resident-secret" } });
+  fireEvent.change(keyFilePath, { target: { value: "C:\\keys\\resident.keyx" } });
+
+  act(() => {
+    publishSessionState({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: "vault-ref-1"
+    });
+  });
+
+  expect(screen.getByLabelText("Master Password")).toHaveValue("");
+  expect(screen.getByLabelText("Key File Path")).toHaveValue("");
+});
+
+it("fails closed when resident session notifications cannot be subscribed", async () => {
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    })),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Demo Vault",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ])
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(async () => {
+        throw new Error("resident session notifications unavailable");
+      })}
+    />
+  );
+
+  expect(
+    await screen.findByText("resident session notifications unavailable")
+  ).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Example" })).not.toBeInTheDocument();
+});
+
+it("fails closed when the post-subscription session refresh cannot close the event gap", async () => {
+  const subscriptionReady = createDeferred<() => void>();
+  const getSessionState = vi.fn(async () => {
+    throw new Error("resident session refresh unavailable");
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState,
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Demo Vault",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(
+    <App
+      client={client}
+      subscribeSessionState={vi.fn(() => subscriptionReady.promise)}
+    />
+  );
+
+  expect(await screen.findByText("Loading...")).toBeInTheDocument();
+  expect(getSessionState).not.toHaveBeenCalled();
+  subscriptionReady.resolve(() => undefined);
+
+  expect(
+    await screen.findByText("resident session refresh unavailable")
+  ).toBeInTheDocument();
+  expect(screen.queryByText("No entries available.")).not.toBeInTheDocument();
+});
+
 it("unlocks the current recent vault with Windows Hello when quick unlock is enabled", async () => {
   const client = {
     ...createVaultSelectionMethods(),
@@ -771,6 +1074,78 @@ it("opens Windows settings while locked and saves only Windows-owned preferences
     });
   });
   expect(screen.getByRole("heading", { name: "Windows 设置" })).toBeInTheDocument();
+});
+
+it("shows native reconciliation failures without turning settings persistence into a failure", async () => {
+  let publishReconciliationError!: (error: string | null) => void;
+  const settingsStore = Object.assign(createSettingsStore(), {
+    nativeReconciliationOwned: true,
+    loadReconciliationError: vi.fn(async () => "provider registration failed"),
+    subscribeReconciliationError: vi.fn(
+      async (listener: (error: string | null) => void) => {
+        publishReconciliationError = listener;
+        return () => undefined;
+      }
+    )
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    })),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  await screen.findByRole("heading", { name: "Unlock your vault" });
+  fireEvent.click(screen.getByRole("button", { name: "Windows Settings" }));
+  expect(await screen.findByText("provider registration failed")).toBeInTheDocument();
+
+  act(() => publishReconciliationError(null));
+  await waitFor(() => {
+    expect(screen.queryByText("provider registration failed")).not.toBeInTheDocument();
+  });
+});
+
+it("keeps a reconciliation subscription failure visible after a null status refresh", async () => {
+  const reconciliationStatus = createDeferred<string | null>();
+  const settingsStore = Object.assign(createSettingsStore(), {
+    nativeReconciliationOwned: true,
+    loadReconciliationError: vi.fn(() => reconciliationStatus.promise),
+    subscribeReconciliationError: vi.fn(async () => {
+      throw new Error("reconciliation event stream unavailable");
+    })
+  });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => ({
+      unlocked: false,
+      activeVaultId: null,
+      currentVaultRefId: null
+    })),
+    listRecentVaults: vi.fn(async () => [])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  await screen.findByRole("heading", { name: "Unlock your vault" });
+  fireEvent.click(screen.getByRole("button", { name: "Windows Settings" }));
+  expect(
+    await screen.findByText("reconciliation event stream unavailable")
+  ).toBeInTheDocument();
+
+  reconciliationStatus.resolve(null);
+  await act(async () => {
+    await reconciliationStatus.promise;
+    await Promise.resolve();
+  });
+
+  expect(
+    screen.getByText("reconciliation event stream unavailable")
+  ).toBeInTheDocument();
 });
 
 it("keeps the vault session usable when desired settings cannot be read", async () => {
@@ -1720,6 +2095,84 @@ it("applies the recent database limit without deleting resident vault references
   expect(await screen.findByText("Two")).toBeInTheDocument();
   expect(screen.queryByText("Three")).not.toBeInTheDocument();
   expect(client.deleteRecentVaultIfNotCurrent).not.toHaveBeenCalled();
+});
+
+it("does not let an older recent-vault projection overwrite a newer reload", async () => {
+  const delayedProjectionSettings = createDeferred<ExtensionSettings>();
+  const desired = {
+    ...DEFAULT_EXTENSION_SETTINGS,
+    recentVaultLimit: 1
+  };
+  let settingsLoads = 0;
+  const settingsStore: ExtensionSettingsStore = {
+    load: vi.fn(() => {
+      settingsLoads += 1;
+      return settingsLoads === 3
+        ? delayedProjectionSettings.promise
+        : Promise.resolve(desired);
+    }),
+    save: vi.fn(async () => undefined)
+  };
+  const oldVaults = [
+    {
+      vaultRefId: "vault-ref-old",
+      displayName: "Old projection",
+      sourceKind: "local" as const,
+      sourceSummary: "old.kdbx",
+      lastUsedAt: 1,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const newVaults = [
+    {
+      vaultRefId: "vault-ref-new",
+      displayName: "New projection",
+      sourceKind: "local" as const,
+      sourceSummary: "new.kdbx",
+      lastUsedAt: 2,
+      availability: "ready" as const,
+      supportsQuickUnlock: false,
+      isCurrent: true
+    }
+  ];
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi
+      .fn()
+      .mockResolvedValueOnce({
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-old"
+      })
+      .mockResolvedValue({
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-new"
+      }),
+    listRecentVaults: vi
+      .fn()
+      .mockResolvedValueOnce(oldVaults)
+      .mockResolvedValue(newVaults),
+    addLocalVaultReference: vi.fn(async () => newVaults[0])
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} extensionSettingsStore={settingsStore} />);
+
+  await waitFor(() => expect(settingsStore.load).toHaveBeenCalledTimes(3));
+  fireEvent.click(screen.getByRole("button", { name: "Manage vaults" }));
+  fireEvent.click(screen.getByRole("button", { name: "Local File" }));
+  expect(await screen.findByText("New projection")).toBeInTheDocument();
+
+  delayedProjectionSettings.resolve(desired);
+  await act(async () => {
+    await delayedProjectionSettings.promise;
+    await Promise.resolve();
+  });
+
+  expect(screen.getByText("New projection")).toBeInTheDocument();
+  expect(screen.queryByText("Old projection")).not.toBeInTheDocument();
 });
 
 it("reports foreground activity to the resident instead of owning the idle deadline", async () => {

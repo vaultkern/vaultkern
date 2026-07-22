@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -9,12 +10,16 @@ use vaultkern_runtime::{
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
     QuickUnlockReconciliationCredentials, Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession,
 };
-use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse};
+use vaultkern_runtime_protocol::{
+    ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+    SessionStateDto,
+};
 
 #[derive(Clone)]
 pub struct RuntimeBridge {
     requests: Sender<RuntimeRequest>,
     reconciliation_notifier: Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
+    session_state_notifier: Arc<Mutex<Option<Sender<SessionStateDto>>>>,
     desktop_protocol_session: Arc<Mutex<RuntimeProtocolSession>>,
 }
 
@@ -97,6 +102,58 @@ struct ResidentIdleLock {
     last_activity: Instant,
 }
 
+#[derive(Default)]
+struct ResidentMutationState {
+    unsaved_vault_ids: BTreeSet<String>,
+    pending_save_receipts: BTreeMap<String, RuntimeResponse>,
+}
+
+impl ResidentMutationState {
+    #[cfg(test)]
+    fn note_dispatch(&mut self, command: &RuntimeCommand) {
+        if let Some(vault_id) = command_unsaved_vault_id(command) {
+            self.unsaved_vault_ids.insert(vault_id.to_owned());
+        }
+    }
+
+    #[cfg(test)]
+    fn note_response(&mut self, command: &RuntimeCommand, response: &RuntimeResponse) {
+        if matches!(response, RuntimeResponse::Error(_)) {
+            return;
+        }
+        self.note_dispatch(command);
+        if response_recoverably_persists_active_vault(response)
+            && let Some(vault_id) = command_persists_vault_id(command)
+        {
+            self.unsaved_vault_ids.remove(vault_id);
+        }
+    }
+
+    fn preflight_error(&self, command: &RuntimeCommand) -> Option<RuntimeResponse> {
+        (!self.unsaved_vault_ids.is_empty() && command_can_discard_unsaved_changes(command)).then(
+            || {
+                error_response(
+                    "unsaved_changes",
+                    "save the active vault before locking or changing the resident session",
+                )
+            },
+        )
+    }
+
+    fn record_inline_save(&mut self, vault_id: String, response: RuntimeResponse) {
+        if response_recoverably_persists_active_vault(&response) {
+            self.unsaved_vault_ids.remove(&vault_id);
+        } else {
+            self.unsaved_vault_ids.insert(vault_id.clone());
+        }
+        self.pending_save_receipts.insert(vault_id, response);
+    }
+
+    fn take_save_receipt(&mut self, vault_id: &str) -> Option<RuntimeResponse> {
+        self.pending_save_receipts.remove(vault_id)
+    }
+}
+
 impl ResidentIdleLock {
     fn new() -> Self {
         Self {
@@ -105,16 +162,21 @@ impl ResidentIdleLock {
         }
     }
 
-    fn wait_duration(&self, unlocked: bool) -> Option<Duration> {
-        if !unlocked {
+    fn wait_duration(
+        &self,
+        unlocked: bool,
+        platform_passkey_operation_active: bool,
+    ) -> Option<Duration> {
+        if !unlocked || platform_passkey_operation_active {
             return None;
         }
         self.timeout
             .map(|timeout| (self.last_activity + timeout).saturating_duration_since(Instant::now()))
     }
 
-    fn deadline_reached(&self, unlocked: bool) -> bool {
+    fn deadline_reached(&self, unlocked: bool, platform_passkey_operation_active: bool) -> bool {
         unlocked
+            && !platform_passkey_operation_active
             && self
                 .timeout
                 .is_some_and(|timeout| self.last_activity.elapsed() >= timeout)
@@ -145,23 +207,59 @@ impl RuntimeBridge {
 
     fn spawn(factory: impl FnOnce() -> Runtime + Send + 'static) -> Self {
         let (requests, receiver) = mpsc::channel::<RuntimeRequest>();
+        let reconciliation_notifier = Arc::new(Mutex::new(None));
+        let session_state_notifier = Arc::new(Mutex::new(None));
+        let worker_reconciliation_notifier = Arc::clone(&reconciliation_notifier);
+        let worker_session_state_notifier = Arc::clone(&session_state_notifier);
         std::thread::Builder::new()
             .name("vaultkern-runtime".to_owned())
             .spawn(move || {
                 let mut runtime = factory();
                 let mut idle_lock = ResidentIdleLock::new();
+                let mut mutation_state = ResidentMutationState::default();
                 loop {
                     let unlocked = runtime.platform_passkey_is_unlocked();
-                    if idle_lock.deadline_reached(unlocked) {
+                    let platform_passkey_operation_active =
+                        runtime.has_active_platform_passkey_operations();
+                    if idle_lock.deadline_reached(
+                        unlocked,
+                        platform_passkey_operation_active,
+                    ) {
+                        if !persist_unsaved_before_idle_lock(
+                            &mut runtime,
+                            &mut mutation_state,
+                            &worker_reconciliation_notifier,
+                        ) {
+                            idle_lock.record_activity();
+                            continue;
+                        }
                         runtime.lock_session();
+                        publish_session_state(
+                            &worker_session_state_notifier,
+                            runtime.session_state(),
+                        );
                         idle_lock.record_activity();
                         continue;
                     }
-                    let request = match idle_lock.wait_duration(unlocked) {
+                    let request = match idle_lock
+                        .wait_duration(unlocked, platform_passkey_operation_active)
+                    {
                         Some(wait) => match receiver.recv_timeout(wait) {
                             Ok(request) => request,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
+                                if !persist_unsaved_before_idle_lock(
+                                    &mut runtime,
+                                    &mut mutation_state,
+                                    &worker_reconciliation_notifier,
+                                ) {
+                                    idle_lock.record_activity();
+                                    continue;
+                                }
                                 runtime.lock_session();
+                                publish_session_state(
+                                    &worker_session_state_notifier,
+                                    runtime.session_state(),
+                                );
                                 idle_lock.record_activity();
                                 continue;
                             }
@@ -202,6 +300,10 @@ impl RuntimeBridge {
                             parent_window,
                             response,
                         } => {
+                            let publishes_session_state =
+                                command_can_change_session_state(&command);
+                            let pending_save_vault_id =
+                                save_command_vault_id(&command).map(ToOwned::to_owned);
                             let records_activity = matches!(
                                 &command,
                                 RuntimeCommand::RecordUserActivity
@@ -215,7 +317,29 @@ impl RuntimeBridge {
                             let (value, quick_unlock_credentials) =
                                 if cancelled.load(Ordering::Acquire) {
                                     (cancelled_response(), None)
+                                } else if let Some(receipt) = pending_save_vault_id
+                                    .as_deref()
+                                    .and_then(|vault_id| {
+                                        mutation_state.take_save_receipt(vault_id)
+                                    })
+                                {
+                                    (receipt, None)
+                                } else if let Some(error) =
+                                    platform_passkey_operation_preflight_error(
+                                        runtime.has_active_platform_passkey_operations(),
+                                        &command,
+                                    )
+                                {
+                                    (error, None)
+                                } else if let Some(error) =
+                                    mutation_state.preflight_error(&command)
+                                {
+                                    (error, None)
                                 } else {
+                                    let unsaved_vault_id =
+                                        command_unsaved_vault_id(&command).map(ToOwned::to_owned);
+                                    let persisted_vault_id =
+                                        command_persists_vault_id(&command).map(ToOwned::to_owned);
                                     let previous_parent = browser_client.then(|| {
                                         runtime.replace_parent_window_handle(parent_window)
                                     });
@@ -231,7 +355,7 @@ impl RuntimeBridge {
                                     if let Some(previous_parent) = previous_parent {
                                         runtime.set_parent_window_handle(previous_parent);
                                     }
-                                    match result {
+                                    let outcome = match result {
                                         Ok((response, credentials)) => (response, credentials),
                                         Err(error)
                                             if error.to_string()
@@ -246,12 +370,56 @@ impl RuntimeBridge {
                                             ),
                                             None,
                                         ),
+                                    };
+                                    if !matches!(&outcome.0, RuntimeResponse::Error(_)) {
+                                        if let Some(vault_id) = unsaved_vault_id {
+                                            mutation_state
+                                                .unsaved_vault_ids
+                                                .insert(vault_id.clone());
+                                            let inline_save = match runtime
+                                                .handle_with_quick_unlock_handoff(
+                                                    RuntimeCommand::SaveVault {
+                                                        vault_id: vault_id.clone(),
+                                                    },
+                                                )
+                                            {
+                                                Ok((response, _)) => response,
+                                                Err(error) => error_response(
+                                                    "runtime_error",
+                                                    format!("{error:#}"),
+                                                ),
+                                            };
+                                            let inline_save_committed =
+                                                response_commits_active_vault(&inline_save);
+                                            mutation_state
+                                                .record_inline_save(vault_id, inline_save);
+                                            if inline_save_committed {
+                                                notify_reconciliation_slot(
+                                                    &worker_reconciliation_notifier,
+                                                );
+                                            }
+                                        }
+                                        if response_recoverably_persists_active_vault(&outcome.0)
+                                            && let Some(vault_id) = persisted_vault_id
+                                        {
+                                            mutation_state.unsaved_vault_ids.remove(&vault_id);
+                                            mutation_state.pending_save_receipts.remove(&vault_id);
+                                        }
                                     }
+                                    outcome
                                 };
                             if records_activity
                                 && !matches!(&value, RuntimeResponse::Error(_))
                             {
                                 idle_lock.record_activity();
+                            }
+                            if publishes_session_state
+                                && !matches!(&value, RuntimeResponse::Error(_))
+                            {
+                                publish_session_state(
+                                    &worker_session_state_notifier,
+                                    runtime.session_state(),
+                                );
                             }
                             let _ = response.send(RuntimeProtocolResponse {
                                 response: value,
@@ -267,20 +435,35 @@ impl RuntimeBridge {
                             parent_window,
                             response,
                         } => {
+                            let previous_state = runtime.session_state();
                             let result = runtime_result(|| {
                                 runtime
                                     .prepare_platform_passkey_operation(operation_id, parent_window)
                             });
-                            if result
-                                .as_ref()
-                                .is_ok_and(|(_, freshly_unlocked)| *freshly_unlocked)
-                            {
+                            if result.is_ok() {
                                 idle_lock.record_activity();
+                            }
+                            if result.is_ok() {
+                                let next_state = runtime.session_state();
+                                if next_state != previous_state {
+                                    publish_session_state(
+                                        &worker_session_state_notifier,
+                                        next_state,
+                                    );
+                                }
                             }
                             let _ = response.send(result);
                         }
                         RuntimeRequest::EndPlatformPasskeyOperation { operation_id } => {
+                            let previous_state = runtime.session_state();
                             runtime.end_platform_passkey_operation(&operation_id);
+                            let next_state = runtime.session_state();
+                            if next_state != previous_state {
+                                publish_session_state(
+                                    &worker_session_state_notifier,
+                                    next_state,
+                                );
+                            }
                         }
                         RuntimeRequest::ReconcileQuickUnlock {
                             enabled,
@@ -356,7 +539,8 @@ impl RuntimeBridge {
 
         Self {
             requests,
-            reconciliation_notifier: Arc::new(Mutex::new(None)),
+            reconciliation_notifier,
+            session_state_notifier,
             desktop_protocol_session: Arc::new(Mutex::new(RuntimeProtocolSession::resident_app())),
         }
     }
@@ -702,6 +886,18 @@ impl RuntimeBridge {
         Ok(())
     }
 
+    pub fn set_session_state_notifier(
+        &self,
+        notifier: Sender<SessionStateDto>,
+    ) -> Result<(), String> {
+        let mut slot = self
+            .session_state_notifier
+            .lock()
+            .map_err(|_| "session-state notifier is unavailable".to_owned())?;
+        *slot = Some(notifier);
+        Ok(())
+    }
+
     pub fn schedule_reconciliation(&self) {
         self.notify_reconciliation();
     }
@@ -756,6 +952,179 @@ impl RuntimeBridge {
     }
 }
 
+fn publish_session_state(
+    notifier: &Arc<Mutex<Option<Sender<SessionStateDto>>>>,
+    state: SessionStateDto,
+) {
+    let sender = notifier.lock().ok().and_then(|slot| slot.clone());
+    if sender.is_some_and(|sender| sender.send(state).is_err())
+        && let Ok(mut slot) = notifier.lock()
+    {
+        *slot = None;
+    }
+}
+
+fn notify_reconciliation_slot(
+    notifier: &Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
+) {
+    let sender = notifier.lock().ok().and_then(|slot| slot.clone());
+    if let Some(sender) = sender {
+        let request = SettingsReconciliationRequest {
+            quick_unlock_credentials: None,
+            quick_unlock_completion: None,
+        };
+        match sender.try_send(request) {
+            Ok(()) | Err(TrySendError::Full(_)) => {}
+            Err(TrySendError::Disconnected(_)) => {
+                if let Ok(mut slot) = notifier.lock() {
+                    *slot = None;
+                }
+            }
+        }
+    }
+}
+
+fn persist_unsaved_before_idle_lock(
+    runtime: &mut Runtime,
+    mutation_state: &mut ResidentMutationState,
+    reconciliation_notifier: &Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
+) -> bool {
+    if mutation_state.unsaved_vault_ids.is_empty() {
+        return true;
+    }
+    let mut committed_active_vault = false;
+    for vault_id in mutation_state
+        .unsaved_vault_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>()
+    {
+        let response = match runtime.handle_with_quick_unlock_handoff(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        }) {
+            Ok((response, _)) => response,
+            Err(_) => return false,
+        };
+        if !response_recoverably_persists_active_vault(&response) {
+            return false;
+        }
+        committed_active_vault |= response_commits_active_vault(&response);
+        mutation_state.unsaved_vault_ids.remove(&vault_id);
+        mutation_state.pending_save_receipts.remove(&vault_id);
+    }
+    if committed_active_vault {
+        notify_reconciliation_slot(reconciliation_notifier);
+    }
+    true
+}
+
+fn command_unsaved_vault_id(command: &RuntimeCommand) -> Option<&str> {
+    match command {
+        RuntimeCommand::CreateEntry { vault_id, .. }
+        | RuntimeCommand::UpdateEntryFields { vault_id, .. }
+        | RuntimeCommand::CompareAndUpdateEntryFields { vault_id, .. }
+        | RuntimeCommand::ClearEntryTotp { vault_id, .. }
+        | RuntimeCommand::SetEntryPasskey { vault_id, .. }
+        | RuntimeCommand::ClearEntryPasskey { vault_id, .. }
+        | RuntimeCommand::DeleteEntry { vault_id, .. }
+        | RuntimeCommand::AddEntryAttachment { vault_id, .. }
+        | RuntimeCommand::UpdateEntryAttachmentMetadata { vault_id, .. }
+        | RuntimeCommand::ReplaceEntryAttachmentContent { vault_id, .. }
+        | RuntimeCommand::DeleteEntryAttachment { vault_id, .. }
+        | RuntimeCommand::UpdateEntry { vault_id, .. } => Some(vault_id),
+        _ => None,
+    }
+}
+
+fn command_persists_vault_id(command: &RuntimeCommand) -> Option<&str> {
+    match command {
+        RuntimeCommand::SaveVault { vault_id }
+        | RuntimeCommand::UpdateDatabaseSettings { vault_id, .. }
+        | RuntimeCommand::PersistAutofillMutation { vault_id, .. }
+        | RuntimeCommand::SavePasskeyRegistration { vault_id, .. } => Some(vault_id),
+        _ => None,
+    }
+}
+
+fn save_command_vault_id(command: &RuntimeCommand) -> Option<&str> {
+    match command {
+        RuntimeCommand::SaveVault { vault_id } => Some(vault_id),
+        _ => None,
+    }
+}
+
+fn command_can_discard_unsaved_changes(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::PreloadCurrentVault
+            | RuntimeCommand::RetryVaultSourceSync { .. }
+            | RuntimeCommand::AddLocalVaultReference { .. }
+            | RuntimeCommand::AddOneDriveVaultReference { .. }
+            | RuntimeCommand::SetCurrentVault { .. }
+            | RuntimeCommand::DeleteVaultReference { .. }
+            | RuntimeCommand::UnlockCurrentVaultWithPassword { .. }
+            | RuntimeCommand::UnlockCurrentVault { .. }
+            | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+            | RuntimeCommand::OpenLocalVault { .. }
+            | RuntimeCommand::LockSession
+            | RuntimeCommand::UnlockWithPassword { .. }
+            | RuntimeCommand::UnlockVault { .. }
+    )
+}
+
+fn platform_passkey_operation_preflight_error(
+    operation_active: bool,
+    command: &RuntimeCommand,
+) -> Option<RuntimeResponse> {
+    (operation_active && command_can_discard_unsaved_changes(command)).then(|| {
+        error_response(
+            "platform_operation_active",
+            "finish the active Windows passkey operation before changing the resident session",
+        )
+    })
+}
+
+fn command_can_change_session_state(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::AddLocalVaultReference { .. }
+            | RuntimeCommand::AddOneDriveVaultReference { .. }
+            | RuntimeCommand::SetCurrentVault { .. }
+            | RuntimeCommand::DeleteVaultReference { .. }
+            | RuntimeCommand::UnlockCurrentVaultWithPassword { .. }
+            | RuntimeCommand::UnlockCurrentVault { .. }
+            | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+            | RuntimeCommand::OpenLocalVault { .. }
+            | RuntimeCommand::LockSession
+            | RuntimeCommand::UnlockWithPassword { .. }
+            | RuntimeCommand::UnlockVault { .. }
+    )
+}
+
+fn response_recoverably_persists_active_vault(response: &RuntimeResponse) -> bool {
+    match response {
+        RuntimeResponse::SaveVaultResult(result) => recoverable_save_status(&result.status),
+        RuntimeResponse::DatabaseSettingsCommitResult(result) => {
+            recoverable_save_status(&result.save_result.status)
+        }
+        RuntimeResponse::AutofillPersistResult(result) => matches!(
+            &result.outcome,
+            vaultkern_runtime_protocol::AutofillPersistOutcomeDto::Durable { .. }
+        ),
+        _ => false,
+    }
+}
+
+fn recoverable_save_status(status: &SaveVaultStatusDto) -> bool {
+    matches!(
+        status,
+        SaveVaultStatusDto::Saved
+            | SaveVaultStatusDto::Merged
+            | SaveVaultStatusDto::SavedToCache
+            | SaveVaultStatusDto::ConflictCopy
+    )
+}
+
 fn command_unlocks_vault(command: &RuntimeCommand) -> bool {
     matches!(
         command,
@@ -808,8 +1177,8 @@ fn response_schedules_reconciliation(
 #[cfg(test)]
 mod tests {
     use super::{
-        ResidentIdleLock, RuntimeBridge, RuntimeRequest, reconciliation_reasons,
-        response_schedules_reconciliation,
+        ResidentIdleLock, ResidentMutationState, RuntimeBridge, RuntimeRequest,
+        reconciliation_reasons, response_schedules_reconciliation,
     };
     use serde_json::json;
     use std::sync::Arc;
@@ -817,7 +1186,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use vaultkern_runtime_protocol::{
-        ProtocolEnvelope, RuntimeCommand, RuntimeResponse, VaultSourceStatusDto,
+        ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto,
+        VaultSourceStatusDto,
     };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
@@ -861,8 +1231,22 @@ mod tests {
         idle_lock.set_timeout(Some(Duration::from_millis(1)));
         idle_lock.last_activity = Instant::now() - Duration::from_secs(1);
 
-        assert!(idle_lock.deadline_reached(true));
-        assert!(!idle_lock.deadline_reached(false));
+        assert!(idle_lock.deadline_reached(true, false));
+        assert!(!idle_lock.deadline_reached(false, false));
+    }
+
+    #[test]
+    fn an_active_platform_passkey_operation_defers_the_idle_deadline() {
+        let mut idle_lock = ResidentIdleLock::new();
+        idle_lock.set_timeout(Some(Duration::from_millis(1)));
+        idle_lock.last_activity = Instant::now() - Duration::from_secs(1);
+
+        assert!(!idle_lock.deadline_reached(true, true));
+        assert_eq!(idle_lock.wait_duration(true, true), None);
+        assert!(
+            super::platform_passkey_operation_preflight_error(true, &RuntimeCommand::LockSession,)
+                .is_some()
+        );
     }
 
     #[test]
@@ -954,6 +1338,170 @@ mod tests {
         let response = request.join().expect("mutation response");
         assert!(committed.load(Ordering::Acquire));
         assert_eq!(response["type"], "test_mutation_committed");
+    }
+
+    #[test]
+    fn session_state_changes_are_published_to_the_resident_ui() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let (notifier, notifications) = mpsc::channel();
+        bridge
+            .set_session_state_notifier(notifier)
+            .expect("install session-state notifier");
+
+        let response = bridge.request(json!({
+            "version": 1,
+            "command": { "type": "lock_session" }
+        }));
+
+        assert_eq!(response["type"], "session_state");
+        let published = notifications
+            .recv_timeout(Duration::from_secs(1))
+            .expect("resident UI receives the changed state");
+        assert!(!published.unlocked);
+    }
+
+    #[test]
+    fn unsaved_mutations_block_destructive_session_changes_until_recoverable_save() {
+        let mut state = ResidentMutationState::default();
+        let mutation = RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        };
+        state.note_dispatch(&mutation);
+
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::LockSession)
+                .is_some()
+        );
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::SetCurrentVault {
+                    vault_ref_id: "vault-ref-2".into(),
+                })
+                .is_some()
+        );
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::RetryVaultSourceSync {
+                    vault_id: "vault-1".into(),
+                })
+                .is_some()
+        );
+
+        state.note_response(
+            &RuntimeCommand::SaveVault {
+                vault_id: "vault-2".into(),
+            },
+            &RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::ConflictCopy,
+                merge_summary: None,
+                conflict_copy_path: Some("vault-2.conflict.kdbx".into()),
+            }),
+        );
+
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::LockSession)
+                .is_some()
+        );
+
+        state.note_response(
+            &RuntimeCommand::SaveVault {
+                vault_id: "vault-1".into(),
+            },
+            &RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::ConflictCopy,
+                merge_summary: None,
+                conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
+            }),
+        );
+
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::LockSession)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn inline_mutation_save_is_replayed_to_the_followup_save_request() {
+        let mut state = ResidentMutationState::default();
+        state.note_dispatch(&RuntimeCommand::ClearEntryTotp {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        });
+        state.record_inline_save(
+            "vault-1".into(),
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                merge_summary: None,
+                conflict_copy_path: None,
+            }),
+        );
+
+        assert!(
+            state
+                .preflight_error(&RuntimeCommand::LockSession)
+                .is_none()
+        );
+        let receipt = state
+            .take_save_receipt("vault-1")
+            .expect("follow-up save receives the inline result");
+        assert!(matches!(
+            receipt,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::Merged,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn conflict_copy_recovers_edits_without_reconciling_live_vault_metadata() {
+        let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+            status: SaveVaultStatusDto::ConflictCopy,
+            merge_summary: None,
+            conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
+        });
+
+        assert!(super::response_recoverably_persists_active_vault(&response));
+        assert!(!super::response_commits_active_vault(&response));
+    }
+
+    #[test]
+    fn atomic_persistence_commands_supersede_an_older_inline_save_receipt() {
+        assert_eq!(
+            super::command_persists_vault_id(&RuntimeCommand::PersistAutofillMutation {
+                transaction_id: "transaction-1".into(),
+                operation_id: "operation-1".into(),
+                vault_id: "vault-1".into(),
+                plan: vaultkern_runtime_protocol::AutofillPersistPlanDto::Create {
+                    parent_group_id: "group-1".into(),
+                    expected_matching_entry_ids: Vec::new(),
+                    planned_entry_id: "entry-1".into(),
+                    desired_fields: vaultkern_runtime_protocol::EntryFieldsDto {
+                        title: "Title".into(),
+                        username: "alice".into(),
+                        password: "secret".into(),
+                        url: "https://example.com".into(),
+                        notes: "".into(),
+                        totp_uri: None,
+                        custom_fields: Vec::new(),
+                    },
+                },
+            }),
+            Some("vault-1")
+        );
+        assert_eq!(
+            super::command_persists_vault_id(&RuntimeCommand::SavePasskeyRegistration {
+                ceremony_token: "ceremony-1".into(),
+                expected_phase:
+                    vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: "vault-1".into(),
+            }),
+            Some("vault-1")
+        );
     }
 
     #[test]

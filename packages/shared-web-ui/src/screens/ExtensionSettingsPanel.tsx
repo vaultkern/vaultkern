@@ -17,6 +17,7 @@ interface ExtensionSettingsPanelProps {
   quickUnlockVaultUnlocked?: boolean;
   quickUnlockBusy?: boolean;
   quickUnlockError?: string | null;
+  quickUnlockCredentialResetKey?: number;
   reconciliationError?: string | null;
   onEnrollQuickUnlock?(credentials: UnlockCredentials): Promise<void>;
   onSave(settings: ExtensionSettings): void;
@@ -34,6 +35,7 @@ export function ExtensionSettingsPanel({
   quickUnlockVaultUnlocked = false,
   quickUnlockBusy = false,
   quickUnlockError = null,
+  quickUnlockCredentialResetKey = 0,
   reconciliationError = null,
   onEnrollQuickUnlock,
   onSave,
@@ -59,6 +61,11 @@ export function ExtensionSettingsPanel({
       setQuickUnlockKeyFilePath("");
     }
   }, [quickUnlockEnrolled]);
+
+  useLayoutEffect(() => {
+    setQuickUnlockPassword("");
+    setQuickUnlockKeyFilePath("");
+  }, [quickUnlockCredentialResetKey]);
 
   useLayoutEffect(() => {
     const nextSettings = settingsFromDraft(

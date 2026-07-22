@@ -1,4 +1,5 @@
 export { App } from "./App";
+export type { SessionStateLike, SessionStateSubscriber } from "./App";
 export { archiveTheme } from "./designTokens";
 export { errorMessage } from "./error";
 export { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";

@@ -85,3 +85,30 @@ it("forwards manual quick-unlock enrollment only as input to the native reconcil
 
   expect(queueEnrollment).toHaveBeenCalledWith(credentials);
 });
+
+it("exposes persisted and live native reconciliation failures", async () => {
+  const unsubscribe = vi.fn();
+  const subscribe = vi.fn(
+    async (listener: (error: string | null) => void) => {
+      listener(null);
+      return unsubscribe;
+    }
+  );
+  const store = createDesktopSettingsStore(
+    async () => DEFAULT_EXTENSION_SETTINGS,
+    async () => undefined,
+    async () => undefined,
+    async () => "provider registration failed",
+    subscribe
+  );
+  const observed = vi.fn();
+
+  await expect(store.loadReconciliationError?.()).resolves.toBe(
+    "provider registration failed"
+  );
+  const stop = await store.subscribeReconciliationError?.(observed);
+  expect(observed).toHaveBeenCalledWith(null);
+
+  stop?.();
+  expect(unsubscribe).toHaveBeenCalledTimes(1);
+});

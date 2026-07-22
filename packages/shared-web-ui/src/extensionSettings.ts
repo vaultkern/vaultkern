@@ -33,6 +33,10 @@ export function sortRecentVaultsForRetention<T extends RecentVaultRetentionRecor
 export interface ExtensionSettingsStore {
   surface?: SettingsSurface;
   nativeReconciliationOwned?: boolean;
+  loadReconciliationError?(): Promise<string | null>;
+  subscribeReconciliationError?(
+    listener: (error: string | null) => void
+  ): Promise<() => void>;
   queueQuickUnlockEnrollment?(credentials: {
     password?: string | null;
     keyFilePath?: string | null;
