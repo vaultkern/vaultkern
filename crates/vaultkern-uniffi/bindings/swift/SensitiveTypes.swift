@@ -3,7 +3,8 @@ import Foundation
 /// Clearable text storage for secret-bearing UniFFI DTO fields.
 ///
 /// `reveal()` necessarily creates a Swift String for rendering or an FFI call;
-/// callers should keep that value short-lived and call `close()` on this owner.
+/// storage adapters should prefer `copyUTF8Data()`. Callers must keep either
+/// representation short-lived and call `close()` on this owner.
 public final class VaultKernSensitiveString: @unchecked Sendable,
     CustomStringConvertible, Equatable, Hashable
 {
@@ -14,10 +15,20 @@ public final class VaultKernSensitiveString: @unchecked Sendable,
         storage = Data(value.utf8)
     }
 
+    public init(utf8Data value: Data) {
+        storage = Self.deepCopy(value)
+    }
+
     public func reveal() -> String {
         lock.lock()
         defer { lock.unlock() }
         return String(decoding: storage, as: UTF8.self)
+    }
+
+    public func copyUTF8Data() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return Self.deepCopy(storage)
     }
 
     public func close() {
@@ -37,6 +48,19 @@ public final class VaultKernSensitiveString: @unchecked Sendable,
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(ObjectIdentifier(self))
+    }
+
+    private static func deepCopy(_ value: Data) -> Data {
+        var copy = Data(count: value.count)
+        copy.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
+            value.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                guard let destinationAddress = destination.baseAddress,
+                    let sourceAddress = source.baseAddress
+                else { return }
+                destinationAddress.copyMemory(from: sourceAddress, byteCount: source.count)
+            }
+        }
+        return copy
     }
 }
 
@@ -71,7 +95,7 @@ public final class VaultKernSensitiveBytes: @unchecked Sendable, CustomStringCon
         copy.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
             value.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
                 guard let destinationAddress = destination.baseAddress,
-                      let sourceAddress = source.baseAddress
+                    let sourceAddress = source.baseAddress
                 else { return }
                 destinationAddress.copyMemory(from: sourceAddress, byteCount: source.count)
             }
