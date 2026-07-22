@@ -1897,7 +1897,13 @@ internal object uniffiCallbackInterfaceOneDriveTokenAdapter {
                 uniffiObj.`loadRefreshToken`(
                 )
             }
-            val writeReturn = { value: SensitiveString? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value)) }
+            val writeReturn = { value: SensitiveString? ->
+                try {
+                    uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value))
+                } finally {
+                    value?.close()
+                }
+            }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -2477,7 +2483,13 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
                     FfiConverterString.lift(`key`),
                 )
             }
-            val writeReturn = { value: SensitiveBytes? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value)) }
+            val writeReturn = { value: SensitiveBytes? ->
+                try {
+                    uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value))
+                } finally {
+                    value?.close()
+                }
+            }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
