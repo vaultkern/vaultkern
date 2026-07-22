@@ -23,11 +23,8 @@ type TranslationKey =
   | "Needs repair in manager"
   | "Extension Settings"
   | "Local extension preferences. These are not stored in the KDBX database."
-  | "Browser Extension Settings"
   | "Windows Settings"
-  | "Local browser extension preferences. These are not stored in the KDBX database."
   | "Local Windows app preferences. These are not stored in the KDBX database."
-  | "Save Extension Settings"
   | "Save Windows Settings"
   | "Saving..."
   | "Database Settings"
@@ -146,7 +143,6 @@ type TranslationKey =
   | "Name"
   | "Replace"
   | "Download"
-  | "Open the Windows app to download this large attachment."
   | "History Detail"
   | "Back to entries"
   | "Vault Setup"
@@ -222,6 +218,8 @@ type TranslationKey =
   | "Unlocked"
   | "Locked"
   | "Open Manager"
+  | "Open VaultKern"
+  | "VaultKern Settings"
   | "Lock"
   | "Search"
   | "Search records"
@@ -254,11 +252,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Needs repair in manager": "需要在管理器中修复",
   "Extension Settings": "插件设置",
   "Local extension preferences. These are not stored in the KDBX database.": "本地插件偏好设置，不会保存到 KDBX 数据库。",
-  "Browser Extension Settings": "浏览器插件设置",
   "Windows Settings": "Windows 设置",
-  "Local browser extension preferences. These are not stored in the KDBX database.": "本地浏览器插件偏好设置，不会保存到 KDBX 数据库。",
   "Local Windows app preferences. These are not stored in the KDBX database.": "本地 Windows 应用偏好设置，不会保存到 KDBX 数据库。",
-  "Save Extension Settings": "保存插件设置",
   "Save Windows Settings": "保存 Windows 设置",
   "Saving...": "保存中...",
   "Database Settings": "数据库设置",
@@ -377,8 +372,6 @@ const ZH_CN: Record<TranslationKey, string> = {
   Name: "名称",
   Replace: "替换",
   Download: "下载",
-  "Open the Windows app to download this large attachment.":
-    "请在 Windows 应用中下载这个大附件。",
   "History Detail": "历史详情",
   "Back to entries": "返回条目",
   "Vault Setup": "数据库设置向导",
@@ -454,6 +447,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   Unlocked: "已解锁",
   Locked: "已锁定",
   "Open Manager": "打开管理器",
+  "Open VaultKern": "打开 VaultKern",
+  "VaultKern Settings": "VaultKern 设置",
   Lock: "锁定",
   Search: "搜索",
   "Search records": "搜索记录",

@@ -9,6 +9,28 @@ afterEach(() => {
 });
 
 describe("resident native host recovery help", () => {
+  it("explains that automatic resident activation already failed", () => {
+    const error = Object.assign(new Error("resident unavailable"), {
+      code: "resident_unavailable"
+    });
+
+    render(renderNativeHostHelp(error));
+
+    expect(screen.getByText(/could not start VaultKern automatically/i)).toBeInTheDocument();
+  });
+
+  it("points Windows repairs at the protected native-host install", () => {
+    const error = Object.assign(new Error("native host missing"), {
+      code: "native_host_missing"
+    });
+
+    render(renderNativeHostHelp(error));
+
+    expect(
+      screen.getByText(/%ProgramFiles%\\VaultKern\\Browser Integration\\vaultkern-runtime\.exe/)
+    ).toBeInTheDocument();
+  });
+
   it.each(["resident_authentication_failed", "resident_connection_failed"])(
     "explains how to recover from %s",
     (code) => {

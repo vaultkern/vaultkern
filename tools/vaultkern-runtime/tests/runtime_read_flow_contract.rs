@@ -194,7 +194,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
         fill,
         RuntimeResponse::FillCandidates(vaultkern_runtime_protocol::FillCandidateListDto {
             entries: vec![vaultkern_runtime_protocol::EntrySummaryDto {
-                id: entry_id,
+                id: entry_id.clone(),
                 title: "Example".into(),
                 username: "alice".into(),
                 url: "https://app.example.com/login".into(),
@@ -203,6 +203,80 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
             }],
         })
     );
+
+    let credential = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://example.com/dashboard".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        credential,
+        RuntimeResponse::AutofillCredential(vaultkern_runtime_protocol::AutofillCredentialDto {
+            id: entry_id.clone(),
+            username: "alice".into(),
+            password: "secret".into(),
+            totp: Some("287082".into()),
+        })
+    );
+
+    let scoped_fields = runtime
+        .handle(RuntimeCommand::GetAutofillEntryFields {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://example.com/dashboard".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::AutofillEntryFields(scoped_fields) = scoped_fields else {
+        panic!("expected candidate-scoped autofill fields");
+    };
+    assert_eq!(scoped_fields.id, entry_id);
+    assert_eq!(scoped_fields.fields.username, "alice");
+    assert_eq!(scoped_fields.fields.password, "secret");
+    assert_eq!(scoped_fields.fields.notes, "runtime contract");
+    assert_eq!(scoped_fields.fields.custom_fields.len(), 1);
+
+    let create_context = runtime
+        .handle(RuntimeCommand::GetAutofillCreateContext {
+            vault_id: handle.vault_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        create_context,
+        RuntimeResponse::AutofillCreateContext(
+            vaultkern_runtime_protocol::AutofillCreateContextDto {
+                root_group_id: root_id,
+            }
+        )
+    );
+
+    let sibling_origin = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://attacker.example.net/login".into(),
+        })
+        .unwrap();
+    assert!(matches!(sibling_origin, RuntimeResponse::Error(_)));
+    let sibling_fields = runtime
+        .handle(RuntimeCommand::GetAutofillEntryFields {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://attacker.example.net/login".into(),
+        })
+        .unwrap();
+    assert!(matches!(sibling_fields, RuntimeResponse::Error(_)));
+
+    runtime.handle(RuntimeCommand::LockSession).unwrap();
+    let locked = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id,
+            entry_id,
+            url: "https://example.com/dashboard".into(),
+        })
+        .unwrap();
+    assert!(matches!(locked, RuntimeResponse::Error(_)));
 }
 
 #[test]

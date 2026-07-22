@@ -3,12 +3,11 @@ import type { CSSProperties } from "react";
 import type { UnlockCredentials } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
-import type { ExtensionSettings, SettingsSurface } from "../extensionSettings";
+import type { ExtensionSettings } from "../extensionSettings";
 import { useText } from "../i18n";
 
 interface ExtensionSettingsPanelProps {
   settings: ExtensionSettings;
-  surface?: SettingsSurface;
   saving: boolean;
   error: string | null;
   quickUnlockSupported?: boolean;
@@ -26,7 +25,6 @@ interface ExtensionSettingsPanelProps {
 
 export function ExtensionSettingsPanel({
   settings,
-  surface = "windows",
   saving,
   error,
   quickUnlockSupported = true,
@@ -46,10 +44,6 @@ export function ExtensionSettingsPanel({
   const [quickUnlockPassword, setQuickUnlockPassword] = useState("");
   const [quickUnlockKeyFilePath, setQuickUnlockKeyFilePath] = useState("");
   const quickUnlockAvailable = quickUnlockSupported !== false;
-  const providerEnabled =
-    surface === "browser"
-      ? draft.browserPasskeyProxyEnabled
-      : draft.windowsPasskeyProviderEnabled;
 
   useEffect(() => {
     setDraft(toDraft(settings));
@@ -93,24 +87,14 @@ export function ExtensionSettingsPanel({
       <div style={titleRowStyle}>
         <div>
           <h2 style={headingStyle}>
-            {text(surface === "browser" ? "Browser Extension Settings" : "Windows Settings")}
+            {text("Windows Settings")}
           </h2>
           <p style={descriptionStyle}>
-            {text(
-              surface === "browser"
-                ? "Local browser extension preferences. These are not stored in the KDBX database."
-                : "Local Windows app preferences. These are not stored in the KDBX database."
-            )}
+            {text("Local Windows app preferences. These are not stored in the KDBX database.")}
           </p>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving
-            ? text("Saving...")
-            : text(
-                surface === "browser"
-                  ? "Save Extension Settings"
-                  : "Save Windows Settings"
-              )}
+          {saving ? text("Saving...") : text("Save Windows Settings")}
         </button>
       </div>
 
@@ -132,22 +116,20 @@ export function ExtensionSettingsPanel({
             style={inputStyle}
           />
         </label>
-        {surface === "windows" ? (
-          <label style={fieldStyle}>
-            {text("Idle Lock Minutes")}
-            <input
-              aria-label={text("Idle Lock Minutes")}
-              type="number"
-              min={0}
-              max={240}
-              value={draft.idleLockMinutes}
-              onChange={(event) =>
-                setDraft({ ...draft, idleLockMinutes: event.target.value })
-              }
-              style={inputStyle}
-            />
-          </label>
-        ) : null}
+        <label style={fieldStyle}>
+          {text("Idle Lock Minutes")}
+          <input
+            aria-label={text("Idle Lock Minutes")}
+            type="number"
+            min={0}
+            max={240}
+            value={draft.idleLockMinutes}
+            onChange={(event) =>
+              setDraft({ ...draft, idleLockMinutes: event.target.value })
+            }
+            style={inputStyle}
+          />
+        </label>
         <label style={fieldStyle}>
           {text("Clear Clipboard Seconds")}
           <input
@@ -183,34 +165,38 @@ export function ExtensionSettingsPanel({
         </div>
         <label style={checkboxFieldStyle}>
           <input
-            aria-label={text(
-              surface === "browser"
-                ? "Browser passkey proxy"
-                : "Windows passkey provider"
-            )}
+            aria-label={text("Windows passkey provider")}
             type="checkbox"
-            checked={providerEnabled}
+            checked={draft.windowsPasskeyProviderEnabled}
             onChange={(event) =>
-              setDraft(
-                surface === "browser"
-                  ? {
-                      ...draft,
-                      browserPasskeyProxyEnabled: event.target.checked
-                    }
-                  : {
-                      ...draft,
-                      windowsPasskeyProviderEnabled: event.target.checked
-                    }
-              )
+              setDraft({
+                ...draft,
+                windowsPasskeyProviderEnabled: event.target.checked,
+                browserPasskeyProxyEnabled: event.target.checked
+                  ? false
+                  : draft.browserPasskeyProxyEnabled
+              })
             }
           />
-          {text(
-            surface === "browser"
-              ? "Browser passkey proxy"
-              : "Windows passkey provider"
-          )}
+          {text("Windows passkey provider")}
         </label>
-        {surface === "browser" ? (
+        <label style={checkboxFieldStyle}>
+          <input
+            aria-label={text("Browser passkey proxy")}
+            type="checkbox"
+            checked={draft.browserPasskeyProxyEnabled}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                browserPasskeyProxyEnabled: event.target.checked,
+                windowsPasskeyProviderEnabled: event.target.checked
+                  ? false
+                  : draft.windowsPasskeyProviderEnabled
+              })
+            }
+          />
+          {text("Browser passkey proxy")}
+        </label>
         <label style={checkboxFieldStyle}>
           <input
             aria-label={text("Page-load autofill")}
@@ -225,9 +211,7 @@ export function ExtensionSettingsPanel({
           />
           {text("Page-load autofill")}
         </label>
-        ) : null}
       </div>
-      {surface === "windows" ? (
       <label style={toggleRowStyle}>
         <input
           aria-label={text("Quick Unlock")}
@@ -240,9 +224,7 @@ export function ExtensionSettingsPanel({
         />
         <span>{text("Quick Unlock")}</span>
       </label>
-      ) : null}
-      {surface === "windows" &&
-      quickUnlockAvailable &&
+      {quickUnlockAvailable &&
       quickUnlockEnabled &&
       draft.quickUnlockEnabled &&
       !quickUnlockEnrolled ? (

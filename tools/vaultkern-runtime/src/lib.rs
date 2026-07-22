@@ -23,5 +23,13 @@ pub use passkey::{
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
 };
 pub use protocol_session::{RuntimeProtocolDispatch, RuntimeProtocolSession};
-pub use runtime::{QuickUnlockReconciliationCredentials, Runtime};
+pub use providers::biometric::BiometricProvider;
+pub use providers::onedrive_token_store::OneDriveRefreshTokenStore;
+pub use providers::secure_storage::{SecureStorageError, SecureStorageProvider};
+pub use runtime::{
+    ExternalKdfDisposition, ExternalKdfFailure, QuickUnlockOutcome,
+    QuickUnlockReconciliationCredentials, ResidentKdfPolicy, ResidentRuntimeConfig, Runtime,
+    classify_external_kdf_error,
+};
 pub use state_paths::is_supported_browser_origin;
+pub use vaultkern_core::ExternalKdfConfirmation;

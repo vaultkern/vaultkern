@@ -1,6 +1,6 @@
 import { RuntimeClient } from "@vaultkern/runtime-web-client";
+import type { ResidentAppRoute } from "@vaultkern/runtime-web-client";
 
-import { createChromeExtensionSettingsStore } from "./extensionSettings";
 import { renderNativeHostHelp } from "./nativeHostHelp";
 import { PopupApp } from "./popup/PopupApp";
 import { extensionTransport } from "./runtimeBridge";
@@ -10,13 +10,14 @@ import {
   type PendingAutofillTransaction
 } from "./autofill/pendingSubmission";
 import { PENDING_AUTOFILL_TRANSACTION_TTL_MS } from "./autofill/pendingSubmissionStore";
+import { createResidentBrowserSettingsStore } from "./residentBrowserSettings";
 import {
   createManualFillCapability,
   type ManualFillCapability
 } from "./autofill/fillAuthorizationDescriptor";
 
 const client = new RuntimeClient(extensionTransport);
-const extensionSettingsStore = createChromeExtensionSettingsStore();
+const extensionSettingsStore = createResidentBrowserSettingsStore(client);
 
 async function getActiveTab() {
   const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
@@ -122,8 +123,17 @@ export async function fillSelectedEntry(
   if (!(await fillTargetCanReceiveSecrets(tab.id, targetUrl))) {
     return;
   }
-  const detail = await client.getEntryDetail(vaultId, entryId);
+  const detail = await client.getAutofillCredential(vaultId, entryId, targetUrl);
   if (detail.id !== entryId) {
+    return;
+  }
+  let currentSession;
+  try {
+    currentSession = await client.getSessionState();
+  } catch {
+    return;
+  }
+  if (!currentSession.unlocked || currentSession.activeVaultId !== vaultId) {
     return;
   }
   if (!(await fillTargetCanReceiveSecrets(tab.id, targetUrl))) {
@@ -438,8 +448,7 @@ function webAuthnPromptSiteLabel() {
 
 type WebAuthnPromptCompleteOptions = {
   credentialId?: string;
-  method?: "master_password" | "quick_unlock";
-  password?: string;
+  method?: "quick_unlock";
 };
 
 function responseKeepsWebAuthnPromptOpen(response: unknown) {
@@ -494,9 +503,6 @@ async function notifyWebAuthnPromptComplete(
   }
   if (options.method) {
     message.method = options.method;
-  }
-  if (options.password) {
-    message.password = options.password;
   }
   const nonce = promptParams?.get("nonce");
   if (nonce) {
@@ -570,7 +576,7 @@ async function sendWebAuthnPromptMessage(
 
 function notifyUnlockComplete(
   _session: unknown,
-  options?: { method: "master_password" | "quick_unlock"; password?: string }
+  options?: { method: "quick_unlock" }
 ) {
   void notifyWebAuthnPromptComplete("vaultkern_unlock_complete", "unlock", options);
 }
@@ -588,13 +594,17 @@ function notifyPresenceComplete(
 
 async function notifyUserVerificationComplete(
   _session: unknown,
-  options: { method: "master_password" | "quick_unlock"; password?: string }
+  options: { method: "quick_unlock" }
 ) {
   await sendWebAuthnPromptMessage(
     "vaultkern_user_verification_complete",
     "verify",
     options
   );
+}
+
+async function openResidentApp(route: ResidentAppRoute) {
+  await client.activateResidentApp(route);
 }
 
 export function PopupShell() {
@@ -610,6 +620,7 @@ export function PopupShell() {
       planPendingAutofillSubmission={planPendingAutofillSubmission}
       dismissPendingAutofillSubmission={dismissPendingAutofillSubmission}
       executePendingAutofillMutation={executePendingAutofillMutation}
+      openResidentApp={openResidentApp}
       onUnlockComplete={notifyUnlockComplete}
       onWebAuthnPresenceComplete={notifyPresenceComplete}
       onWebAuthnUserVerificationComplete={notifyUserVerificationComplete}

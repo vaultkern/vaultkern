@@ -12,7 +12,7 @@ pub use runtime_bridge::{RuntimeBridge, SettingsReconciliationRequest};
 pub fn launch_requests_visible_window(arguments: &[String]) -> bool {
     !arguments
         .iter()
-        .any(|argument| argument == "-PluginActivated")
+        .any(|argument| argument == "-PluginActivated" || argument == "-BrowserActivated")
 }
 
 #[cfg(any(windows, test))]
@@ -36,6 +36,10 @@ mod tests {
         assert!(launch_requests_visible_window(&[
             "vaultkern-windows.exe".into(),
             "--webview-debug-port=9222".into(),
+        ]));
+        assert!(!launch_requests_visible_window(&[
+            "vaultkern-windows.exe".into(),
+            "-BrowserActivated".into(),
         ]));
     }
 
@@ -76,6 +80,7 @@ mod tests {
         for command in [
             "allow-runtime-send",
             "allow-load-desktop-settings",
+            "allow-load-desktop-reconciliation-error",
             "allow-save-desktop-settings",
             "allow-queue-quick-unlock-enrollment",
         ] {
@@ -88,6 +93,7 @@ mod tests {
 
         let build = include_str!("../build.rs");
         assert!(build.contains("\"queue_quick_unlock_enrollment\""));
+        assert!(build.contains("\"load_desktop_reconciliation_error\""));
         assert!(!build.contains("\"reconcile_settings\""));
     }
 
@@ -157,6 +163,23 @@ mod tests {
             save.find("settings.save(&desired)").unwrap()
                 < save.find("bridge.schedule_reconciliation()").unwrap(),
             "desired state must commit before reconciliation is scheduled"
+        );
+    }
+
+    #[test]
+    fn browser_activation_shows_the_resident_window_and_forwards_only_a_fixed_route() {
+        let main = include_str!("main.rs");
+
+        assert!(main.contains("set_resident_activation_notifier"));
+        assert!(main.contains("vaultkern-open-route"));
+        let activation_loop = main
+            .find("while let Ok(route) = resident_activation_requests.recv()")
+            .expect("resident activation loop");
+        let activation = &main[activation_loop..];
+        assert!(
+            activation.find("show_main_window").unwrap()
+                < activation.find("vaultkern-open-route").unwrap(),
+            "the window must be visible before its fixed route is delivered"
         );
     }
 }

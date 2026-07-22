@@ -3,7 +3,8 @@ import { expect, it, vi } from "vitest";
 import {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
-  normalizeExtensionSettings
+  normalizeExtensionSettings,
+  normalizeWindowsAppSettings
 } from "../extensionSettings";
 
 it("normalizes missing extension settings to defaults", () => {
@@ -20,6 +21,20 @@ it("keeps page-load autofill disabled unless the user explicitly enables it", ()
     })
   ).toMatchObject({
     autofillOnPageLoadEnabled: true
+  });
+});
+
+it("keeps browser integration desired state in the resident Windows settings", () => {
+  expect(
+    normalizeWindowsAppSettings({
+      autofillOnPageLoadEnabled: true,
+      browserPasskeyProxyEnabled: true,
+      windowsPasskeyProviderEnabled: false
+    })
+  ).toMatchObject({
+    autofillOnPageLoadEnabled: true,
+    browserPasskeyProxyEnabled: true,
+    windowsPasskeyProviderEnabled: false
   });
 });
 

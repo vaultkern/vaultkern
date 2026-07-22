@@ -465,6 +465,130 @@ describe("RuntimeClient", () => {
     );
   });
 
+  it("requests only an origin-scoped autofill credential for browser filling", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "autofill_credential",
+        id: "entry-1",
+        username: "user@example.com",
+        password: "secret",
+        totp: "123456"
+      })
+    };
+
+    const client = new RuntimeClient(transport);
+    const credential = await client.getAutofillCredential(
+      "vault-1",
+      "entry-1",
+      "https://example.com/login"
+    );
+
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: {
+        type: "get_autofill_credential",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        url: "https://example.com/login"
+      }
+    });
+    expect(credential).toEqual({
+      type: "autofill_credential",
+      id: "entry-1",
+      username: "user@example.com",
+      password: "secret",
+      totp: "123456"
+    });
+  });
+
+  it("requests candidate-scoped fields and the root create context for login saving", async () => {
+    const transport = {
+      send: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: "autofill_entry_fields",
+          id: "entry-1",
+          fields: {
+            title: "Example",
+            username: "alice",
+            password: "old-secret",
+            url: "https://example.com/login",
+            notes: "kept",
+            totpUri: null,
+            customFields: []
+          }
+        })
+        .mockResolvedValueOnce({
+          type: "autofill_create_context",
+          rootGroupId: "group-root"
+        })
+    };
+    const client = new RuntimeClient(transport);
+
+    await client.getAutofillEntryFields(
+      "vault-1",
+      "entry-1",
+      "https://example.com/login"
+    );
+    await client.getAutofillCreateContext("vault-1");
+
+    expect(transport.send).toHaveBeenNthCalledWith(1, {
+      version: 1,
+      command: {
+        type: "get_autofill_entry_fields",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        url: "https://example.com/login"
+      }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(2, {
+      version: 1,
+      command: {
+        type: "get_autofill_create_context",
+        vault_id: "vault-1"
+      }
+    });
+  });
+
+  it("requests resident app activation with a fixed route", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({ type: "resident_app_activated" })
+    };
+
+    const client = new RuntimeClient(transport);
+    await client.activateResidentApp("settings");
+
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: {
+        type: "activate_resident_app",
+        route: "settings"
+      }
+    });
+  });
+
+  it("reads browser integration desired state from the resident app", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "browser_integration_settings",
+        language: "zh-CN",
+        autofillOnPageLoadEnabled: true,
+        browserPasskeyProxyEnabled: true
+      })
+    };
+
+    const client = new RuntimeClient(transport);
+    await expect(client.getBrowserIntegrationSettings()).resolves.toMatchObject({
+      language: "zh-CN",
+      autofillOnPageLoadEnabled: true,
+      browserPasskeyProxyEnabled: true
+    });
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 1,
+      command: { type: "get_browser_integration_settings" }
+    });
+  });
+
   it("requests the group tree through the configured transport", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({

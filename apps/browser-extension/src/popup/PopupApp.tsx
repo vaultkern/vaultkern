@@ -2,28 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 
 import type {
-  EntryDetail,
   EntrySummary,
-  GroupTree,
-  SessionState,
-  UnlockCredentials,
-  VaultReference
+  EntryDraft,
+  ResidentAppRoute,
+  SessionState
 } from "@vaultkern/runtime-web-client";
 import {
   DEFAULT_EXTENSION_SETTINGS,
   I18nProvider,
   normalizeBrowserExtensionSettings,
-  sortRecentVaultsForRetention,
   translate
 } from "@vaultkern/shared-web-ui";
 import type { ExtensionSettingsStore } from "@vaultkern/shared-web-ui";
 
-import { PopupRecordCard } from "./PopupRecordCard";
-import { PopupSearch } from "./PopupSearch";
 import { PopupStatusStrip } from "./PopupStatusStrip";
 import { SiteCandidateList } from "./SiteCandidateList";
-import { PopupVaultList } from "./PopupVaultList";
-import { checkedEntryDetail } from "./checkedEntryDetail";
 import { popupErrorMessage, popupTheme } from "./theme";
 import { sameExactHttpOrigin } from "../autofill/originPolicy";
 import {
@@ -41,7 +34,7 @@ type PendingAutofillUpdatePlan = Extract<
 
 type SessionStateLike = Pick<
   SessionState,
-  "unlocked" | "activeVaultId" | "currentVaultRefId" | "supportsBiometricUnlock"
+  "unlocked" | "activeVaultId"
 >;
 
 type PasskeyCredentialOption = {
@@ -51,21 +44,14 @@ type PasskeyCredentialOption = {
 
 export interface PopupClientLike {
   getSessionState(): Promise<SessionStateLike>;
-  listRecentVaults(): Promise<VaultReference[]>;
-  preloadCurrentVault(): Promise<SessionStateLike>;
-  addLocalVaultReference(path?: string): Promise<VaultReference>;
-  setCurrentVault(vaultRefId: string): Promise<SessionStateLike>;
-  lockSession(): Promise<SessionStateLike>;
+  activateResidentApp(route: ResidentAppRoute): Promise<void>;
   recordUserActivity(): Promise<SessionStateLike>;
-  unlockCurrentVaultWithPassword(password: string): Promise<SessionStateLike>;
-  unlockCurrentVault(credentials: UnlockCredentials): Promise<SessionStateLike>;
-  enableQuickUnlockForCurrentVault(
-    credentials: UnlockCredentials
-  ): Promise<SessionStateLike>;
-  unlockCurrentVaultWithQuickUnlock(): Promise<SessionStateLike>;
-  listGroups(vaultId: string): Promise<GroupTree>;
-  listEntries(vaultId: string): Promise<EntrySummary[]>;
-  getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
+  getAutofillEntryFields(
+    vaultId: string,
+    entryId: string,
+    url: string
+  ): Promise<{ id: string; fields: EntryDraft }>;
+  getAutofillCreateContext(vaultId: string): Promise<{ rootGroupId: string }>;
   findExactMatchingEntryIds?(
     vaultId: string,
     fields: PendingAutofillDesiredFields
@@ -82,17 +68,21 @@ class AutofillEntryIdMismatchError extends Error {
   }
 }
 
-async function loadCheckedAutofillEntryDetail(
-  client: Pick<PopupClientLike, "getEntryDetail">,
+async function loadCheckedAutofillEntryFields(
+  client: Pick<PopupClientLike, "getAutofillEntryFields">,
   vaultId: string,
-  requestedEntryId: string
+  requestedEntryId: string,
+  url: string
 ) {
-  const detail = await client.getEntryDetail(vaultId, requestedEntryId);
-  return checkedEntryDetail(
-    detail,
+  const result = await client.getAutofillEntryFields(
+    vaultId,
     requestedEntryId,
-    () => new AutofillEntryIdMismatchError()
+    url
   );
+  if (result.id !== requestedEntryId) {
+    throw new AutofillEntryIdMismatchError();
+  }
+  return result.fields;
 }
 
 function sameCustomFields(
@@ -168,7 +158,6 @@ type AutofillSavePrompt =
   | {
       mode: "save";
       submission: PendingAutofillPromptTransaction;
-      createdDetail?: EntryDetail;
       ambiguous?: true;
     }
   | {
@@ -183,10 +172,6 @@ type AutofillSavePrompt =
 
 interface FillEntryOptions {
   requireSiteCandidate?: boolean;
-}
-
-function limitRecentVaults(vaults: VaultReference[], limit: number) {
-  return sortRecentVaultsForRetention(vaults).slice(0, limit);
 }
 
 function passkeyCredentialOptionsFromUnknown(
@@ -283,6 +268,7 @@ export function PopupApp({
   planPendingAutofillSubmission,
   dismissPendingAutofillSubmission,
   executePendingAutofillMutation,
+  openResidentApp,
   extensionSettingsStore,
   renderRuntimeErrorHelp,
   onUnlockComplete,
@@ -314,11 +300,12 @@ export function PopupApp({
     pending?: PendingAutofillPromptTransaction | null;
     errorMessage?: string;
   }>;
-  extensionSettingsStore?: ExtensionSettingsStore;
+  openResidentApp: (route: ResidentAppRoute) => Promise<void>;
+  extensionSettingsStore?: Pick<ExtensionSettingsStore, "load">;
   renderRuntimeErrorHelp?: (error: unknown) => ReactNode;
   onUnlockComplete?: (
     session: SessionStateLike,
-    options?: { method: "master_password" | "quick_unlock"; password?: string }
+    options?: { method: "quick_unlock" }
   ) => void | Promise<void>;
   onWebAuthnPresenceComplete?: (
     session: SessionStateLike,
@@ -326,18 +313,15 @@ export function PopupApp({
   ) => unknown | Promise<unknown>;
   onWebAuthnUserVerificationComplete?: (
     session: SessionStateLike,
-    options: { method: "master_password" | "quick_unlock"; password?: string }
+    options: { method: "quick_unlock" }
   ) => void | Promise<void>;
 }) {
   const [session, setSession] = useState<SessionStateLike | null>(null);
   const [sessionError, setSessionError] = useState<string | null>(null);
   const [sessionErrorCause, setSessionErrorCause] = useState<unknown>(null);
   const [siteLabel, setSiteLabel] = useState("No active site");
-  const [entries, setEntries] = useState<EntrySummary[]>([]);
   const [candidates, setCandidates] = useState<EntrySummary[]>([]);
   const [entriesError, setEntriesError] = useState<string | null>(null);
-  const [searchValue, setSearchValue] = useState("");
-  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
   const [pendingAutofillSubmission, setPendingAutofillSubmission] =
     useState<PendingAutofillPromptTransaction | null>(null);
   const [autofillSavePrompt, setAutofillSavePrompt] =
@@ -349,19 +333,10 @@ export function PopupApp({
   const savingAutofillPromptRef = useRef(false);
   const [unlockError, setUnlockError] = useState<string | null>(null);
   const [unlockErrorCause, setUnlockErrorCause] = useState<unknown>(null);
-  const [recentVaults, setRecentVaults] = useState<VaultReference[]>([]);
-  const [recentVaultsLoading, setRecentVaultsLoading] = useState(true);
-  const [recentVaultsError, setRecentVaultsError] = useState<string | null>(null);
-  const [password, setPassword] = useState("");
-  const [keyFilePath, setKeyFilePath] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [locking, setLocking] = useState(false);
   const [extensionSettings, setExtensionSettings] = useState(
     DEFAULT_EXTENSION_SETTINGS
   );
-  const extensionSettingsRef = useRef(DEFAULT_EXTENSION_SETTINGS);
-  const currentVaultPreload = useRef<Promise<void> | null>(null);
-  const webAuthnQuickUnlockAttempted = useRef(false);
   const webAuthnUnlockCompletionSent = useRef(false);
   const webAuthnMode =
     typeof window !== "undefined" &&
@@ -379,14 +354,6 @@ export function PopupApp({
     waitingForPasskeyCredentialOptions,
     setWaitingForPasskeyCredentialOptions
   ] = useState(false);
-
-  function currentVaultForSession() {
-    return (
-      recentVaults.find((vault) => vault.vaultRefId === session?.currentVaultRefId) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null
-    );
-  }
 
   function pendingSubmission(
     transaction: PendingAutofillPromptTransaction
@@ -452,26 +419,17 @@ export function PopupApp({
     return submittedUsername !== "" && entry.username === submittedUsername;
   }
 
-  function canQuickUnlockVault(vault: VaultReference | null) {
-    return Boolean(
-      session?.supportsBiometricUnlock &&
-        vault?.supportsQuickUnlock &&
-        vault.availability !== "needs_repair"
-    );
-  }
-
   async function loadExtensionSettingsForPopup() {
     const loadedSettings =
       (await extensionSettingsStore?.load()) ?? DEFAULT_EXTENSION_SETTINGS;
     const normalizedSettings = normalizeBrowserExtensionSettings(loadedSettings);
-    extensionSettingsRef.current = normalizedSettings;
     setExtensionSettings(normalizedSettings);
     return normalizedSettings;
   }
 
   function notifyWebAuthnUnlockCompleteOnce(
     nextSession: SessionStateLike,
-    options?: { method: "master_password" | "quick_unlock"; password?: string }
+    options?: { method: "quick_unlock" }
   ) {
     if (
       !webAuthnUnlockPrompt ||
@@ -488,55 +446,16 @@ export function PopupApp({
     );
   }
 
-  function startCurrentVaultPreload() {
-    if (currentVaultPreload.current) {
-      return currentVaultPreload.current;
-    }
-
-    const preload = client
-      .preloadCurrentVault()
-      .then(() => undefined)
-      .finally(() => {
-        if (currentVaultPreload.current === preload) {
-          currentVaultPreload.current = null;
-        }
-      });
-
-    currentVaultPreload.current = preload;
-    void preload.catch(() => undefined);
-    return preload;
-  }
-
   useEffect(() => {
     let cancelled = false;
 
     loadExtensionSettingsForPopup()
-      .then((normalizedSettings) =>
-        client.listRecentVaults().then((vaults) => ({
-          normalizedSettings,
-          vaults
-        }))
-      )
-      .then(({ normalizedSettings, vaults }) => {
-        if (!cancelled) {
-          setRecentVaults(limitRecentVaults(vaults, normalizedSettings.recentVaultLimit));
-          setRecentVaultsError(null);
-        }
-      })
       .catch((loadError) => {
         if (!cancelled) {
-          setRecentVaults([]);
-          setRecentVaultsError(
-            popupErrorMessage(
-              loadError,
-              translate(extensionSettings.language, "Failed to load popup data")
-            )
+          setSessionError(
+            popupErrorMessage(loadError, "Failed to load extension preferences")
           );
-        }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setRecentVaultsLoading(false);
+          setSessionErrorCause(loadError);
         }
       });
 
@@ -572,14 +491,6 @@ export function PopupApp({
       cancelled = true;
     };
   }, [activeSite, client, extensionSettingsStore]);
-
-  useEffect(() => {
-    if (!session?.currentVaultRefId || session.unlocked || recentVaultsLoading) {
-      return;
-    }
-
-    startCurrentVaultPreload();
-  }, [recentVaultsLoading, session?.currentVaultRefId, session?.unlocked]);
 
   useEffect(() => {
     setSelectedPasskeyCredentialId((currentCredentialId) => {
@@ -700,54 +611,36 @@ export function PopupApp({
 
   useEffect(() => {
     if (webAuthnCeremonyPrompt) {
-      setEntries([]);
       setCandidates([]);
-      setSelectedEntryId(null);
       return;
     }
 
     if (!session?.unlocked || !session.activeVaultId) {
-      setEntries([]);
       setCandidates([]);
-      setSelectedEntryId(null);
       return;
     }
 
     let cancelled = false;
-    Promise.allSettled([
-      client.listEntries(session.activeVaultId),
-      findCandidates(session.activeVaultId)
-    ]).then(([entriesResult, candidatesResult]) => {
-      if (cancelled) {
-        return;
-      }
-
-      const loadedEntries =
-        entriesResult.status === "fulfilled" ? entriesResult.value : [];
-      const loadedCandidates =
-        candidatesResult.status === "fulfilled" ? candidatesResult.value : [];
-
-      setEntries(loadedEntries);
-      setCandidates(loadedCandidates);
-
-      const nextError =
-        entriesResult.status === "rejected"
-          ? popupErrorMessage(
-              entriesResult.reason,
-              translate(extensionSettings.language, "Failed to load popup data")
-            )
-          : candidatesResult.status === "rejected"
-            ? popupErrorMessage(
-                candidatesResult.reason,
-                translate(extensionSettings.language, "Failed to load site candidates")
-              )
-            : null;
-
-      setEntriesError(nextError);
-
-      const nextSelectedId = loadedCandidates[0]?.id ?? null;
-      setSelectedEntryId(nextSelectedId);
-    });
+    findCandidates(session.activeVaultId)
+      .then((loadedCandidates) => {
+        if (cancelled) {
+          return;
+        }
+        setCandidates(loadedCandidates);
+        setEntriesError(null);
+      })
+      .catch((loadError) => {
+        if (cancelled) {
+          return;
+        }
+        setCandidates([]);
+        setEntriesError(
+          popupErrorMessage(
+            loadError,
+            translate(extensionSettings.language, "Failed to load site candidates")
+          )
+        );
+      });
 
     return () => {
       cancelled = true;
@@ -969,87 +862,6 @@ export function PopupApp({
     session?.activeVaultId
   ]);
 
-  async function handleUnlock() {
-    if (submitting) {
-      return;
-    }
-
-    setSubmitting(true);
-    setUnlockError(null);
-    setUnlockErrorCause(null);
-
-    try {
-      const preload =
-        currentVaultPreload.current ??
-        (session?.currentVaultRefId && !unlockError
-          ? startCurrentVaultPreload()
-          : null);
-      if (preload) {
-        await preload;
-      }
-      const unlockPassword = password;
-      const nextSession = await client.unlockCurrentVault({
-        password,
-        keyFilePath
-      });
-      setSession(nextSession);
-      setPassword("");
-      setKeyFilePath("");
-      notifyWebAuthnUnlockCompleteOnce(
-        nextSession,
-        unlockPassword !== ""
-          ? { method: "master_password", password: unlockPassword }
-          : undefined
-      );
-    } catch (unlockFailure) {
-      setUnlockError(
-        popupErrorMessage(
-          unlockFailure,
-          translate(extensionSettings.language, "Failed to unlock vault")
-        )
-      );
-      setUnlockErrorCause(unlockFailure);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
-  async function handleQuickUnlock() {
-    if (submitting) {
-      return;
-    }
-
-    setSubmitting(true);
-    setUnlockError(null);
-    setUnlockErrorCause(null);
-
-    try {
-      const preload =
-        currentVaultPreload.current ??
-        (session?.currentVaultRefId && !unlockError
-          ? startCurrentVaultPreload()
-          : null);
-      if (preload) {
-        await preload;
-      }
-      const nextSession = await client.unlockCurrentVaultWithQuickUnlock();
-      setSession(nextSession);
-      setPassword("");
-      setKeyFilePath("");
-      notifyWebAuthnUnlockCompleteOnce(nextSession, { method: "quick_unlock" });
-    } catch (unlockFailure) {
-      setUnlockError(
-        popupErrorMessage(
-          unlockFailure,
-          translate(extensionSettings.language, "Failed to unlock vault")
-        )
-      );
-      setUnlockErrorCause(unlockFailure);
-    } finally {
-      setSubmitting(false);
-    }
-  }
-
   async function handleWebAuthnPresenceApproval() {
     if (!session?.unlocked || submitting) {
       return;
@@ -1078,18 +890,8 @@ export function PopupApp({
     }
   }
 
-  async function handleWebAuthnUserVerification(
-    method: "master_password" | "quick_unlock"
-  ) {
+  async function handleWebAuthnUserVerification() {
     if (!session?.unlocked || submitting) {
-      return;
-    }
-    if (method === "master_password" && password.trim() === "") {
-      setUnlockError(
-        extensionSettings.language === "zh-CN"
-          ? "请输入主密码"
-          : "Enter your master password"
-      );
       return;
     }
 
@@ -1099,11 +901,9 @@ export function PopupApp({
     try {
       await Promise.resolve(
         onWebAuthnUserVerificationComplete?.(session, {
-          method,
-          ...(method === "master_password" ? { password } : {})
+          method: "quick_unlock"
         })
       );
-      setPassword("");
     } catch (verificationFailure) {
       setUnlockError(
         popupErrorMessage(
@@ -1120,75 +920,54 @@ export function PopupApp({
   }
 
   useEffect(() => {
-    if (
-      !webAuthnUnlockPrompt ||
-      webAuthnQuickUnlockAttempted.current ||
-      submitting ||
-      recentVaultsLoading ||
-      !session ||
-      session.unlocked ||
-      !canQuickUnlockVault(currentVaultForSession())
-    ) {
-      return;
+    if (!webAuthnUnlockPrompt || session?.unlocked) {
+      return undefined;
     }
+    let cancelled = false;
+    let requestPending = false;
+    const timer = window.setInterval(() => {
+      if (requestPending) {
+        return;
+      }
+      requestPending = true;
+      void client
+        .getSessionState()
+        .then((nextSession) => {
+          if (!cancelled && nextSession.unlocked) {
+            setSession(nextSession);
+            notifyWebAuthnUnlockCompleteOnce(nextSession);
+          }
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          requestPending = false;
+        });
+    }, 500);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [client, session?.unlocked, webAuthnUnlockPrompt]);
 
-    webAuthnQuickUnlockAttempted.current = true;
-    void handleQuickUnlock();
-  }, [
-    recentVaults,
-    recentVaultsLoading,
-    session,
-    submitting,
-    webAuthnUnlockPrompt
-  ]);
-
-  useEffect(() => {
-    if (
-      !webAuthnVerifyPrompt ||
-      webAuthnQuickUnlockAttempted.current ||
-      submitting ||
-      recentVaultsLoading ||
-      !session?.unlocked ||
-      !canQuickUnlockVault(currentVaultForSession())
-    ) {
-      return;
+  async function handleOpenResident(route: ResidentAppRoute) {
+    setUnlockError(null);
+    setUnlockErrorCause(null);
+    try {
+      await openResidentApp(route);
+    } catch (activationFailure) {
+      setUnlockError(
+        popupErrorMessage(activationFailure, "Failed to open VaultKern")
+      );
+      setUnlockErrorCause(activationFailure);
     }
-
-    webAuthnQuickUnlockAttempted.current = true;
-    void handleWebAuthnUserVerification("quick_unlock");
-  }, [
-    recentVaults,
-    recentVaultsLoading,
-    session,
-    submitting,
-    webAuthnVerifyPrompt
-  ]);
+  }
 
   async function handleOpenManager() {
-    const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
-    const runtime = chromeApi?.runtime;
-    const tabs = chromeApi?.tabs;
-
-    if (!tabs?.create || !runtime?.getURL) {
-      return;
-    }
-
-    await tabs.create({ url: runtime.getURL("manager.html") });
+    await handleOpenResident("vaults");
   }
 
   async function handleOpenExtensionSettings() {
-    const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
-    const runtime = chromeApi?.runtime;
-    const tabs = chromeApi?.tabs;
-
-    if (tabs?.create && runtime?.getURL) {
-      await tabs.create({ url: runtime.getURL("options.html") });
-      return;
-    }
-
-    if (runtime?.openOptionsPage) {
-      await runtime.openOptionsPage();
-    }
+    await handleOpenResident("settings");
   }
 
   function clearAutofillPromptLocally() {
@@ -1257,19 +1036,8 @@ export function PopupApp({
   }
 
   async function refreshEntriesAfterAutofillSave(vaultId: string) {
-    const [nextEntries, nextCandidates] = await Promise.all([
-      client.listEntries(vaultId),
-      findCandidates(vaultId)
-    ]);
-    setEntries(nextEntries);
+    const nextCandidates = await findCandidates(vaultId);
     setCandidates(nextCandidates);
-  }
-
-  async function loadSelectedEntryDetail() {
-    if (!session?.activeVaultId || !selectedEntryId) {
-      return null;
-    }
-    return client.getEntryDetail(session.activeVaultId, selectedEntryId);
   }
 
   async function handleSavePendingLogin() {
@@ -1299,10 +1067,11 @@ export function PopupApp({
         !transaction.conflict.retryable
       ) {
         if (plan.mode === "update") {
-          const detail = await loadCheckedAutofillEntryDetail(
+          const detail = await loadCheckedAutofillEntryFields(
             client,
             activeVaultId,
-            plan.entryId
+            plan.entryId,
+            plan.desiredFields.url
           );
           const currentFields: PendingAutofillDesiredFields = {
             title: detail.title,
@@ -1349,10 +1118,11 @@ export function PopupApp({
         if (!submission) {
           throw new Error("Pending login save has no recoverable fields");
         }
-        const detail = await loadCheckedAutofillEntryDetail(
+        const detail = await loadCheckedAutofillEntryFields(
           client,
           activeVaultId,
-          autofillSavePrompt.entry.id
+          autofillSavePrompt.entry.id,
+          submission.url
         );
         if (
           typeof submission.newPassword === "string" &&
@@ -1393,7 +1163,7 @@ export function PopupApp({
         if (!submission) {
           throw new Error("Pending login save has no recoverable fields");
         }
-        const groupTree = await client.listGroups(activeVaultId);
+        const createContext = await client.getAutofillCreateContext(activeVaultId);
         const desiredFields: PendingAutofillDesiredFields = {
           title: titleForPendingSubmission(transaction),
           username: submission.username,
@@ -1412,7 +1182,7 @@ export function PopupApp({
         );
         const nextPlan: PendingAutofillPlanInput = {
           mode: "create",
-          parentGroupId: groupTree.root.id,
+          parentGroupId: createContext.rootGroupId,
           expectedMatchingEntryIds,
           desiredFields
         };
@@ -1471,56 +1241,6 @@ export function PopupApp({
     }
   }
 
-  async function handleLock() {
-    setLocking(true);
-
-    try {
-      const nextSession = await client.lockSession();
-      setSession(nextSession);
-      setEntriesError(null);
-      setUnlockError(null);
-      setUnlockErrorCause(null);
-      setPassword("");
-      setKeyFilePath("");
-    } finally {
-      setLocking(false);
-    }
-  }
-
-  async function handleSelectVault(vaultRefId: string) {
-    const nextSession = await client.setCurrentVault(vaultRefId);
-    setSession(nextSession);
-    currentVaultPreload.current = null;
-    if (nextSession.currentVaultRefId) {
-      startCurrentVaultPreload();
-    }
-    setRecentVaults(
-      limitRecentVaults(
-        await client.listRecentVaults(),
-        extensionSettingsRef.current.recentVaultLimit
-      )
-    );
-    setPassword("");
-    setKeyFilePath("");
-    setUnlockError(null);
-    setUnlockErrorCause(null);
-  }
-
-  const filteredEntries = searchValue.trim()
-    ? entries.filter((entry) =>
-        [entry.title, entry.username, entry.url].some((field) =>
-          field.toLowerCase().includes(searchValue.trim().toLowerCase())
-        )
-      )
-    : [];
-  const selectedEntry = selectedEntryId
-    ? candidates.find((entry) => entry.id === selectedEntryId) ??
-      entries.find((entry) => entry.id === selectedEntryId) ??
-      null
-    : null;
-  const selectedEntryIsSiteCandidate = selectedEntryId
-    ? candidates.some((entry) => entry.id === selectedEntryId)
-    : false;
 
   if (!session) {
     if (sessionError) {
@@ -1536,11 +1256,6 @@ export function PopupApp({
   }
 
   if (!session.unlocked) {
-    const text = (key: Parameters<typeof translate>[1]) =>
-      translate(extensionSettings.language, key);
-    const currentVault = currentVaultForSession();
-    const needsRepair = currentVault?.availability === "needs_repair";
-    const canUnlockCurrentVault = Boolean(currentVault || session.currentVaultRefId);
     const passkeyPromptTitle =
       extensionSettings.language === "zh-CN"
         ? "通行密钥请求等待中"
@@ -1553,7 +1268,10 @@ export function PopupApp({
         : extensionSettings.language === "zh-CN"
           ? `请解锁数据库以继续 ${siteLabel} 的通行密钥请求。`
           : `Unlock your vault to continue the passkey request for ${siteLabel}.`;
-    const canQuickUnlock = canQuickUnlockVault(currentVault);
+    const lockedBody =
+      extensionSettings.language === "zh-CN"
+        ? "数据库由 VaultKern 客户端持有。请在客户端完成解锁。"
+        : "Your vault is held by the VaultKern app. Unlock it there to continue.";
 
     return (
       <I18nProvider language={extensionSettings.language}>
@@ -1569,104 +1287,35 @@ export function PopupApp({
             <span>{passkeyPromptBody}</span>
           </section>
         ) : null}
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            void handleUnlock();
-          }}
-          style={{ display: "grid", gap: popupTheme.spacing.md }}
-        >
-          {recentVaults.length > 0 ? (
-            <PopupVaultList
-              recentVaults={recentVaults}
-              currentVaultRefId={session.currentVaultRefId}
-              onSelectVault={handleSelectVault}
-              disabled={submitting}
-            />
-          ) : recentVaultsLoading ? (
-            <div style={messagePanelStyle}>Loading...</div>
-          ) : recentVaultsError ? (
-            <div role="alert" style={messagePanelStyle}>
-              {recentVaultsError}
-            </div>
-          ) : (
-            <div style={messagePanelStyle}>
-              {text("No recent vaults")}
-            </div>
-          )}
-          {needsRepair ? (
-            <div role="alert" style={messagePanelStyle}>
-              {text("Needs repair in manager")}
-            </div>
-          ) : null}
-          <label style={labelStyle}>
-            {text("Master Password")}
-            <input
-              aria-label={text("Master Password")}
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  void handleUnlock();
-                }
-              }}
-              disabled={submitting || !canUnlockCurrentVault || needsRepair}
-              style={fieldStyle}
-            />
-          </label>
-          <label style={labelStyle}>
-            {text("Key File Path")}
-            <input
-              aria-label={text("Key File Path")}
-              type="text"
-              value={keyFilePath}
-              onChange={(event) => setKeyFilePath(event.target.value)}
-              disabled={submitting || !canUnlockCurrentVault || needsRepair}
-              style={fieldStyle}
-            />
-          </label>
+        <div style={messagePanelStyle}>{lockedBody}</div>
+        <div style={{ display: "grid", gap: popupTheme.spacing.sm }}>
           <button
-            type="submit"
-            disabled={submitting || !canUnlockCurrentVault || needsRepair}
+            type="button"
+            onClick={() => {
+              void handleOpenResident("unlock");
+            }}
             style={primaryActionStyle}
           >
-            {submitting ? text("Unlocking...") : text("Unlock Vault")}
+            {extensionSettings.language === "zh-CN" ? "打开 VaultKern" : "Open VaultKern"}
           </button>
-          {canQuickUnlock ? (
-            <button
-              type="button"
-              onClick={() => {
-                void handleQuickUnlock();
-              }}
-              disabled={submitting}
-              style={primaryActionStyle}
-            >
-              {text("Unlock with Windows Hello")}
-            </button>
-          ) : null}
           <button
             type="button"
             onClick={handleOpenManager}
-            disabled={submitting}
             style={secondaryActionStyle}
           >
-            {text("Manage vaults")}
+            {extensionSettings.language === "zh-CN" ? "管理数据库" : "Manage Vaults"}
           </button>
           {unlockError ? <div role="alert">{unlockError}</div> : null}
           {unlockError && renderRuntimeErrorHelp
             ? renderRuntimeErrorHelp(unlockErrorCause)
             : null}
-        </form>
+        </div>
       </div>
       </I18nProvider>
     );
   }
 
   if (webAuthnVerifyPrompt) {
-    const currentVault = currentVaultForSession();
-    const canQuickUnlock = canQuickUnlockVault(currentVault);
     const passkeyPromptTitle =
       extensionSettings.language === "zh-CN"
         ? "验证通行密钥请求"
@@ -1674,11 +1323,11 @@ export function PopupApp({
     const passkeyPromptBody =
       siteLabel === "No active site"
         ? extensionSettings.language === "zh-CN"
-          ? "请验证主密码以继续当前网站的通行密钥请求。"
-          : "Verify your master password to continue this passkey request."
+          ? "请使用 Windows Hello 验证以继续当前网站的通行密钥请求。"
+          : "Verify with Windows Hello to continue this passkey request."
         : extensionSettings.language === "zh-CN"
-          ? `请验证主密码以继续 ${siteLabel} 的通行密钥请求。`
-          : `Verify your master password to continue the passkey request for ${siteLabel}.`;
+          ? `请使用 Windows Hello 验证以继续 ${siteLabel} 的通行密钥请求。`
+          : `Verify with Windows Hello to continue the passkey request for ${siteLabel}.`;
 
     return (
       <I18nProvider language={extensionSettings.language}>
@@ -1686,61 +1335,34 @@ export function PopupApp({
         <PopupStatusStrip
           siteLabel={siteLabel}
           unlocked
-          onLock={undefined}
           onOpenManager={undefined}
         />
         <section style={passkeyPromptStyle} aria-live="polite">
           <strong>{passkeyPromptTitle}</strong>
           <span>{passkeyPromptBody}</span>
         </section>
-        <form
-          onSubmit={(event) => {
-            event.preventDefault();
-            void handleWebAuthnUserVerification("master_password");
-          }}
-          style={{ display: "grid", gap: popupTheme.spacing.md }}
-        >
-          <label style={labelStyle}>
-            {extensionSettings.language === "zh-CN" ? "主密码" : "Master Password"}
-            <input
-              aria-label={
-                extensionSettings.language === "zh-CN" ? "主密码" : "Master Password"
-              }
-              type="password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              disabled={submitting}
-              style={fieldStyle}
-            />
-          </label>
-          <button type="submit" disabled={submitting} style={primaryActionStyle}>
+        <div style={{ display: "grid", gap: popupTheme.spacing.md }}>
+          <button
+            type="button"
+            onClick={() => {
+              void handleWebAuthnUserVerification();
+            }}
+            disabled={submitting}
+            style={primaryActionStyle}
+          >
             {submitting
               ? extensionSettings.language === "zh-CN"
                 ? "验证中..."
                 : "Verifying..."
               : extensionSettings.language === "zh-CN"
-                ? "验证并继续"
-                : "Verify and continue"}
-          </button>
-          {canQuickUnlock ? (
-            <button
-              type="button"
-              onClick={() => {
-                void handleWebAuthnUserVerification("quick_unlock");
-              }}
-              disabled={submitting}
-              style={primaryActionStyle}
-            >
-              {extensionSettings.language === "zh-CN"
                 ? "使用 Windows Hello 验证"
                 : "Verify with Windows Hello"}
-            </button>
-          ) : null}
+          </button>
           {unlockError ? <div role="alert">{unlockError}</div> : null}
           {unlockError && renderRuntimeErrorHelp
             ? renderRuntimeErrorHelp(unlockErrorCause)
             : null}
-        </form>
+        </div>
       </div>
       </I18nProvider>
     );
@@ -1773,7 +1395,6 @@ export function PopupApp({
         <PopupStatusStrip
           siteLabel={siteLabel}
           unlocked
-          onLock={undefined}
           onOpenManager={undefined}
         />
         <section style={passkeyPromptStyle} aria-live="polite">
@@ -1828,7 +1449,6 @@ export function PopupApp({
       <PopupStatusStrip
         siteLabel={siteLabel}
         unlocked
-        onLock={locking ? undefined : handleLock}
         onOpenManager={handleOpenManager}
         onOpenExtensionSettings={handleOpenExtensionSettings}
       />
@@ -1910,26 +1530,6 @@ export function PopupApp({
             requireSiteCandidate: true
           })
         }
-        onSelectEntry={setSelectedEntryId}
-      />
-      <PopupSearch
-        searchValue={searchValue}
-        onSearchChange={setSearchValue}
-        results={filteredEntries}
-        selectedEntryId={selectedEntryId}
-        onSelectEntry={setSelectedEntryId}
-      />
-      <PopupRecordCard
-        entry={selectedEntry}
-        loadDetail={loadSelectedEntryDetail}
-        clearClipboardSeconds={extensionSettings.clearClipboardSeconds}
-        onFill={() =>
-          selectedEntryId
-            ? fillEntry(session.activeVaultId ?? "", selectedEntryId, {
-                requireSiteCandidate: selectedEntryIsSiteCandidate
-              })
-            : Promise.resolve()
-        }
       />
     </div>
     </I18nProvider>
@@ -1950,23 +1550,6 @@ const shellStyle = {
   boxSizing: "border-box" as const,
   overflowX: "hidden" as const,
   overflowY: "auto" as const
-};
-
-const labelStyle = {
-  display: "grid",
-  gap: popupTheme.spacing.xs,
-  fontFamily: popupTheme.font.body
-};
-
-const fieldStyle = {
-  width: "100%",
-  borderRadius: popupTheme.radius.field,
-  border: `1px solid ${popupTheme.colors.line}`,
-  padding: `${popupTheme.spacing.sm} ${popupTheme.spacing.md}`,
-  background: popupTheme.colors.surface,
-  color: popupTheme.colors.text,
-  fontFamily: popupTheme.font.body,
-  boxSizing: "border-box" as const
 };
 
 const primaryActionStyle = {

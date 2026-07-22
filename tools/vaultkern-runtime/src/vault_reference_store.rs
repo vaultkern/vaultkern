@@ -82,7 +82,7 @@ impl VaultReferenceStore {
         Self::new_at(extension_state_dir(extension_id).join("vault-references.json"))
     }
 
-    fn new_at(path: PathBuf) -> Self {
+    pub(crate) fn new_at(path: PathBuf) -> Self {
         let data = read_store_data(&path).unwrap_or_default();
 
         Self {

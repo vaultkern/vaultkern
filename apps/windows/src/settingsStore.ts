@@ -17,7 +17,6 @@ export function createDesktopSettingsStore(
   ) => Promise<() => void> = async () => () => undefined
 ): ExtensionSettingsStore {
   return {
-    surface: "windows",
     nativeReconciliationOwned: true,
     async queueQuickUnlockEnrollment(credentials, expectedVaultRefId) {
       await queueQuickUnlockEnrollment(credentials, expectedVaultRefId);

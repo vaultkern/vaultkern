@@ -211,29 +211,81 @@ pub(crate) fn enroll_unlock_blob(
         .context("failed to store unlock blob atomically")
 }
 
+#[cfg(test)]
 pub(crate) fn unlock_from_blob(
     storage: &dyn SecureStorageProvider,
     storage_key: &str,
     file_bytes: &[u8],
     allow_kdf: bool,
 ) -> Result<UnlockAttempt> {
-    unlock_from_blob_with_cache_policy(storage, storage_key, file_bytes, allow_kdf, true)
+    let policy = if allow_kdf {
+        ExternalKdfPolicy::Desktop
+    } else {
+        ExternalKdfPolicy::Extension
+    };
+    unlock_from_blob_with_policy(
+        storage,
+        storage_key,
+        file_bytes,
+        &policy,
+        ExternalKdfConfirmation::Unconfirmed,
+    )
 }
 
+pub(crate) fn unlock_from_blob_with_policy(
+    storage: &dyn SecureStorageProvider,
+    storage_key: &str,
+    file_bytes: &[u8],
+    policy: &ExternalKdfPolicy,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<UnlockAttempt> {
+    unlock_from_blob_with_cache_policy(storage, storage_key, file_bytes, policy, confirmation, true)
+}
+
+#[cfg(test)]
 pub(crate) fn unlock_historical_snapshot_from_blob(
     storage: &dyn SecureStorageProvider,
     storage_key: &str,
     file_bytes: &[u8],
     allow_kdf: bool,
 ) -> Result<UnlockAttempt> {
-    unlock_from_blob_with_cache_policy(storage, storage_key, file_bytes, allow_kdf, false)
+    let policy = if allow_kdf {
+        ExternalKdfPolicy::Desktop
+    } else {
+        ExternalKdfPolicy::Extension
+    };
+    unlock_historical_snapshot_from_blob_with_policy(
+        storage,
+        storage_key,
+        file_bytes,
+        &policy,
+        ExternalKdfConfirmation::Unconfirmed,
+    )
+}
+
+pub(crate) fn unlock_historical_snapshot_from_blob_with_policy(
+    storage: &dyn SecureStorageProvider,
+    storage_key: &str,
+    file_bytes: &[u8],
+    policy: &ExternalKdfPolicy,
+    confirmation: ExternalKdfConfirmation,
+) -> Result<UnlockAttempt> {
+    unlock_from_blob_with_cache_policy(
+        storage,
+        storage_key,
+        file_bytes,
+        policy,
+        confirmation,
+        false,
+    )
 }
 
 fn unlock_from_blob_with_cache_policy(
     storage: &dyn SecureStorageProvider,
     storage_key: &str,
     file_bytes: &[u8],
-    allow_kdf: bool,
+    policy: &ExternalKdfPolicy,
+    confirmation: ExternalKdfConfirmation,
     refresh_cached_transformed_key: bool,
 ) -> Result<UnlockAttempt> {
     let encoded = match storage.load(storage_key) {
@@ -282,15 +334,15 @@ fn unlock_from_blob_with_cache_policy(
         Err(error) => return Err(error.into()),
     }
 
-    if !allow_kdf {
+    if *policy == ExternalKdfPolicy::Extension {
         return Ok(UnlockAttempt::OpenAppRequired);
     }
 
     let refreshed = derive_transformed_key_with_policy(
         file_bytes,
         &blob.master_credential().to_composite_key(),
-        &ExternalKdfPolicy::Desktop,
-        ExternalKdfConfirmation::Unconfirmed,
+        policy,
+        confirmation,
     )?;
     let vault = match load_kdbx_with_transformed_key(file_bytes, &refreshed) {
         Ok(vault) => vault,

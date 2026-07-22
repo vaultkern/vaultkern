@@ -2,6 +2,8 @@
 const APP_COMMANDS: &[&str] = &[
     "runtime_send",
     "load_desktop_settings",
+    "load_desktop_reconciliation_error",
+    "take_pending_resident_route",
     "save_desktop_settings",
     "queue_quick_unlock_enrollment",
 ];

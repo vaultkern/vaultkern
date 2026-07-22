@@ -90,6 +90,12 @@ impl From<String> for SensitiveString {
     }
 }
 
+impl From<Zeroizing<String>> for SensitiveString {
+    fn from(value: Zeroizing<String>) -> Self {
+        Self(value)
+    }
+}
+
 impl From<&str> for SensitiveString {
     fn from(value: &str) -> Self {
         value.to_owned().into()
@@ -139,6 +145,14 @@ impl ProtocolEnvelope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidentAppRouteDto {
+    Unlock,
+    Vaults,
+    Settings,
+}
+
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeCommand {
@@ -147,6 +161,10 @@ pub enum RuntimeCommand {
         capabilities: Vec<String>,
     },
     GetSessionState,
+    GetBrowserIntegrationSettings,
+    ActivateResidentApp {
+        route: ResidentAppRouteDto,
+    },
     ListRecentVaults,
     PreloadCurrentVault,
     AddLocalVaultReference {
@@ -441,6 +459,19 @@ pub enum RuntimeCommand {
         vault_id: String,
         url: String,
     },
+    GetAutofillCredential {
+        vault_id: String,
+        entry_id: String,
+        url: String,
+    },
+    GetAutofillEntryFields {
+        vault_id: String,
+        entry_id: String,
+        url: String,
+    },
+    GetAutofillCreateContext {
+        vault_id: String,
+    },
     FindExactMatchingEntryIds {
         vault_id: String,
         fields: EntryFieldsDto,
@@ -460,6 +491,7 @@ impl ZeroizeOnDrop for RuntimeCommand {}
 pub enum RuntimeResponse {
     Handshake(HandshakeDto),
     SessionState(SessionStateDto),
+    BrowserIntegrationSettings(BrowserIntegrationSettingsDto),
     VaultReferenceList(VaultReferenceListDto),
     VaultReference(VaultReferenceDto),
     OneDriveAuthSession(OneDriveAuthSessionDto),
@@ -474,6 +506,9 @@ pub enum RuntimeResponse {
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
     FillCandidates(FillCandidateListDto),
+    AutofillCredential(AutofillCredentialDto),
+    AutofillEntryFields(AutofillEntryFieldsDto),
+    AutofillCreateContext(AutofillCreateContextDto),
     EntryIdList(EntryIdListDto),
     PasskeyAssertion(PasskeyAssertionDto),
     PasskeyRegistration(PasskeyRegistrationDto),
@@ -492,6 +527,7 @@ pub enum RuntimeResponse {
     Saved,
     SaveVaultResult(SaveVaultResultDto),
     AutofillPersistResult(AutofillPersistResultDto),
+    ResidentAppActivated,
     Error(ErrorDto),
 }
 
@@ -508,6 +544,14 @@ impl ZeroizeOnDrop for RuntimeResponse {}
 pub struct HandshakeDto {
     pub protocol_version: u32,
     pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserIntegrationSettingsDto {
+    pub language: String,
+    pub autofill_on_page_load_enabled: bool,
+    pub browser_passkey_proxy_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -818,6 +862,60 @@ impl Zeroize for EntryDetailDto {
 }
 
 impl ZeroizeOnDrop for EntryDetailDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillCredentialDto {
+    pub id: String,
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub totp: Option<SensitiveString>,
+}
+
+impl fmt::Debug for AutofillCredentialDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillCredentialDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillCredentialDto {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.totp.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AutofillCredentialDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillEntryFieldsDto {
+    pub id: String,
+    pub fields: EntryFieldsDto,
+}
+
+impl fmt::Debug for AutofillEntryFieldsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillEntryFieldsDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillEntryFieldsDto {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.fields.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AutofillEntryFieldsDto {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillCreateContextDto {
+    pub root_group_id: String,
+}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -36,10 +36,8 @@ impl RuntimeProtocolSession {
             [
                 "runtime-core",
                 "browser-extension",
-                "database-settings",
-                "one-drive",
+                "browser-autofill",
                 "passkey-ceremonies",
-                "quick-unlock",
             ],
         )
     }
@@ -102,6 +100,13 @@ impl RuntimeProtocolSession {
             );
         };
 
+        if self.client_capability == "browser-extension" && !browser_command_allowed(&command) {
+            return error(
+                "browser_command_forbidden",
+                "browser clients cannot unlock or manage the vault",
+            );
+        }
+
         for capability in std::iter::once(self.client_capability)
             .chain(required_command_capabilities(&command).into_iter())
         {
@@ -128,6 +133,17 @@ pub(crate) fn required_command_capabilities(command: &RuntimeCommand) -> Vec<&'s
     let mut required = vec!["runtime-core"];
     if matches!(
         command,
+        RuntimeCommand::FindFillCandidates { .. }
+            | RuntimeCommand::GetAutofillCredential { .. }
+            | RuntimeCommand::GetAutofillEntryFields { .. }
+            | RuntimeCommand::GetAutofillCreateContext { .. }
+            | RuntimeCommand::FindExactMatchingEntryIds { .. }
+            | RuntimeCommand::PersistAutofillMutation { .. }
+    ) {
+        required.push("browser-autofill");
+    }
+    if matches!(
+        command,
         RuntimeCommand::BeginOneDriveLogin
             | RuntimeCommand::CompletePendingOneDriveLogin
             | RuntimeCommand::ListOneDriveChildren { .. }
@@ -136,7 +152,57 @@ pub(crate) fn required_command_capabilities(command: &RuntimeCommand) -> Vec<&'s
     ) {
         required.push("one-drive");
     }
+    if command_requires_passkey_capability(command) {
+        required.push("passkey-ceremonies");
+    }
     if matches!(
+        command,
+        RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
+            | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
+            | RuntimeCommand::DisableQuickUnlockForCurrentVault
+    ) {
+        required.push("quick-unlock");
+    }
+    if matches!(
+        command,
+        RuntimeCommand::GetDatabaseSettings { .. } | RuntimeCommand::UpdateDatabaseSettings { .. }
+    ) {
+        required.push("database-settings");
+    }
+    required
+}
+
+fn browser_command_allowed(command: &RuntimeCommand) -> bool {
+    matches!(
+        command,
+        RuntimeCommand::GetSessionState
+            | RuntimeCommand::GetBrowserIntegrationSettings
+            | RuntimeCommand::ActivateResidentApp { .. }
+            | RuntimeCommand::RecordUserActivity
+            | RuntimeCommand::FindFillCandidates { .. }
+            | RuntimeCommand::GetAutofillCredential { .. }
+            | RuntimeCommand::GetAutofillEntryFields { .. }
+            | RuntimeCommand::GetAutofillCreateContext { .. }
+            | RuntimeCommand::FindExactMatchingEntryIds { .. }
+            | RuntimeCommand::PersistAutofillMutation { .. }
+    ) || matches!(
+        command,
+        RuntimeCommand::VerifyPasskeyUser {
+            method: vaultkern_runtime_protocol::PasskeyUserVerificationMethodDto::QuickUnlock,
+            password: None,
+            ..
+        }
+    ) || (command_requires_passkey_capability(command)
+        && !matches!(
+            command,
+            RuntimeCommand::SetEntryPasskey { .. }
+                | RuntimeCommand::ClearEntryPasskey { .. }
+                | RuntimeCommand::VerifyPasskeyUser { .. }
+        ))
+}
+
+fn command_requires_passkey_capability(command: &RuntimeCommand) -> bool {
+    matches!(
         command,
         RuntimeCommand::SetEntryPasskey { .. }
             | RuntimeCommand::ClearEntryPasskey { .. }
@@ -156,22 +222,5 @@ pub(crate) fn required_command_capabilities(command: &RuntimeCommand) -> Vec<&'s
             | RuntimeCommand::CommitPasskeyRegistration { .. }
             | RuntimeCommand::PasskeyCredentialStatus { .. }
             | RuntimeCommand::PasskeyCredentialStatusBatch { .. }
-    ) {
-        required.push("passkey-ceremonies");
-    }
-    if matches!(
-        command,
-        RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
-            | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
-            | RuntimeCommand::DisableQuickUnlockForCurrentVault
-    ) {
-        required.push("quick-unlock");
-    }
-    if matches!(
-        command,
-        RuntimeCommand::GetDatabaseSettings { .. } | RuntimeCommand::UpdateDatabaseSettings { .. }
-    ) {
-        required.push("database-settings");
-    }
-    required
+    )
 }

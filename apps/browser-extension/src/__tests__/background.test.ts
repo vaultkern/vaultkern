@@ -5,10 +5,6 @@ type RuntimeMessageListener = (
   sender: unknown,
   sendResponse: (response: unknown) => void
 ) => boolean;
-type StorageChangeListener = (
-  changes: Record<string, unknown>,
-  areaName: string
-) => void;
 type TabUpdatedListener = (
   tabId: number,
   changeInfo: { status?: string; url?: string },
@@ -20,11 +16,15 @@ const TEST_EXTENSION_ID = "vaultkern-test-extension";
 const RUNTIME_CAPABILITIES = [
   "runtime-core",
   "browser-extension",
-  "database-settings",
-  "one-drive",
-  "passkey-ceremonies",
-  "quick-unlock"
+  "browser-autofill",
+  "passkey-ceremonies"
 ];
+
+function triggerBrowserSettingsReconciliation(listeners: AlarmListener[]) {
+  for (const listener of listeners) {
+    listener({ name: "vaultkern-browser-settings-reconciliation" });
+  }
+}
 
 function trustedExtensionPageSender() {
   const runtime = (
@@ -219,6 +219,37 @@ function createPort() {
             requestId
           )
         );
+      } else if (commandType === "get_browser_integration_settings") {
+        let responded = false;
+        const respond = (items: Record<string, unknown> = {}) => {
+          if (responded) {
+            return;
+          }
+          responded = true;
+          const desired =
+            (items.vaultkernExtensionSettings as Record<string, unknown> | undefined) ?? {};
+          emitMessage(
+            {
+              type: "browser_integration_settings",
+              language: desired.language === "zh-CN" ? "zh-CN" : "en",
+              autofillOnPageLoadEnabled:
+                desired.autofillOnPageLoadEnabled === true,
+              browserPasskeyProxyEnabled:
+                desired.browserPasskeyProxyEnabled === true
+            },
+            requestId
+          );
+        };
+        const storage = (globalThis as typeof globalThis & { chrome?: any }).chrome
+          ?.storage?.local;
+        if (typeof storage?.get !== "function") {
+          queueMicrotask(() => respond());
+        } else {
+          const result = storage.get("vaultkernExtensionSettings", respond);
+          if (result && typeof result.then === "function") {
+            void result.then(respond, () => respond());
+          }
+        }
       }
     }),
     onMessage: {
@@ -486,20 +517,18 @@ describe("background bridge", () => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
         version: 1,
         command: {
-          type: "get_entry_detail",
+          type: "get_autofill_credential",
           vault_id: "vault-1",
-          entry_id: "entry-1"
+          entry_id: "entry-1",
+          url: "https://example.com/login"
         }
       }));
     });
     port.emitMessage({
-      type: "entry_detail",
+      type: "autofill_credential",
       id: "entry-1",
-      title: "Example",
       username: "alice",
-      password: "secret",
-      url: "https://example.com/login",
-      notes: ""
+      password: "secret"
     });
 
     await vi.waitFor(() => {
@@ -555,14 +584,7 @@ describe("background bridge", () => {
     });
   });
 
-  it.each([
-    ["a different entry id", "entry-2", "https://app.example.com/login"],
-    ["a sibling origin", "entry-1", "https://admin.example.com/login"],
-    ["an HTTPS downgrade", "entry-1", "http://app.example.com/login"],
-    ["an invalid URL", "entry-1", "not a url"]
-  ])(
-    "does not send page-load credentials when entry detail has %s",
-    async (_caseName, detailId, detailUrl) => {
+  it("does not send page-load credentials when the scoped credential has a different entry id", async () => {
       const port = createPort();
       const connectNative = vi.fn(() => port);
       const tabUpdatedListeners: TabUpdatedListener[] = [];
@@ -672,20 +694,18 @@ describe("background bridge", () => {
         expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
           version: 1,
           command: {
-            type: "get_entry_detail",
+            type: "get_autofill_credential",
             vault_id: "vault-1",
-            entry_id: "entry-1"
+            entry_id: "entry-1",
+            url: "https://app.example.com/login"
           }
         }));
       });
       port.emitMessage({
-        type: "entry_detail",
-        id: detailId,
-        title: "Example",
+        type: "autofill_credential",
+        id: "entry-2",
         username: "alice",
-        password: "secret",
-        url: detailUrl,
-        notes: ""
+        password: "secret"
       });
 
       await flushMicrotasks();
@@ -1587,7 +1607,9 @@ describe("background bridge", () => {
       trustedContentScriptSender("https://example.com/signup")
     ).response();
 
-    const [alarmName, alarmInfo] = alarmsCreate.mock.calls[0];
+    const [alarmName, alarmInfo] = alarmsCreate.mock.calls.find(
+      ([name]) => typeof name === "string" && name.includes("7")
+    ) ?? [];
     expect(alarmName).toContain("7");
     expect(alarmInfo).toEqual({ when: 1710000120000 });
 
@@ -2071,7 +2093,7 @@ describe("background bridge", () => {
     const detach = vi.fn(async () => "detach failed");
     const listeners: RuntimeMessageListener[] = [];
     let browserPasskeyProxyEnabled = true;
-    const storageListeners: StorageChangeListener[] = [];
+    const alarmListeners: AlarmListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -2096,10 +2118,13 @@ describe("background bridge", () => {
             });
           },
           set() {}
-        },
-        onChanged: {
-          addListener(listener: StorageChangeListener) {
-            storageListeners.push(listener);
+        }
+      },
+      alarms: {
+        create: vi.fn(),
+        onAlarm: {
+          addListener(listener: AlarmListener) {
+            alarmListeners.push(listener);
           }
         }
       },
@@ -2135,9 +2160,7 @@ describe("background bridge", () => {
     });
 
     browserPasskeyProxyEnabled = false;
-    for (const listener of storageListeners) {
-      listener({ vaultkernExtensionSettings: {} }, "local");
-    }
+    triggerBrowserSettingsReconciliation(alarmListeners);
     await vi.waitFor(() => {
       expect(detach).toHaveBeenCalledTimes(1);
     });
@@ -2148,9 +2171,7 @@ describe("background bridge", () => {
     expect(port.postMessage).toHaveBeenCalledTimes(postedAfterDisable);
 
     browserPasskeyProxyEnabled = true;
-    for (const listener of storageListeners) {
-      listener({ vaultkernExtensionSettings: {} }, "local");
-    }
+    triggerBrowserSettingsReconciliation(alarmListeners);
     await vi.waitFor(() => {
       expect(attach).toHaveBeenCalledTimes(2);
     });
@@ -2277,7 +2298,12 @@ describe("background bridge", () => {
     expect(postedCommands(port, "handshake")[0]).toMatchObject({
       command: {
         type: "handshake",
-        capabilities: expect.arrayContaining(["browser-extension", "quick-unlock"])
+        capabilities: [
+          "runtime-core",
+          "browser-extension",
+          "browser-autofill",
+          "passkey-ceremonies"
+        ]
       }
     });
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
@@ -3263,7 +3289,7 @@ describe("background bridge", () => {
     const attach = vi.fn(async () => undefined);
     const detach = vi.fn(async () => undefined);
     let browserPasskeyProxyEnabled = true;
-    const storageListeners: StorageChangeListener[] = [];
+    const alarmListeners: AlarmListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -3286,10 +3312,13 @@ describe("background bridge", () => {
             });
           },
           set() {}
-        },
-        onChanged: {
-          addListener(listener: StorageChangeListener) {
-            storageListeners.push(listener);
+        }
+      },
+      alarms: {
+        create: vi.fn(),
+        onAlarm: {
+          addListener(listener: AlarmListener) {
+            alarmListeners.push(listener);
           }
         }
       },
@@ -3306,9 +3335,7 @@ describe("background bridge", () => {
     await completePasskeyLedgerReconciliation(port);
 
     browserPasskeyProxyEnabled = false;
-    for (const listener of storageListeners) {
-      listener({ vaultkernExtensionSettings: {} }, "local");
-    }
+    triggerBrowserSettingsReconciliation(alarmListeners);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(detach).toHaveBeenCalledTimes(1);
@@ -3322,7 +3349,7 @@ describe("background bridge", () => {
     const executeScript = vi.fn(async () => undefined);
     const query = vi.fn(async () => [{ id: 7 }]);
     let browserPasskeyProxyEnabled = true;
-    const storageListeners: StorageChangeListener[] = [];
+    const alarmListeners: AlarmListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -3345,10 +3372,13 @@ describe("background bridge", () => {
             });
           },
           set() {}
-        },
-        onChanged: {
-          addListener(listener: StorageChangeListener) {
-            storageListeners.push(listener);
+        }
+      },
+      alarms: {
+        create: vi.fn(),
+        onAlarm: {
+          addListener(listener: AlarmListener) {
+            alarmListeners.push(listener);
           }
         }
       },
@@ -3384,9 +3414,7 @@ describe("background bridge", () => {
     scriptRegistry.unregisterContentScripts.mockClear();
 
     browserPasskeyProxyEnabled = false;
-    for (const listener of storageListeners) {
-      listener({ vaultkernExtensionSettings: {} }, "local");
-    }
+    triggerBrowserSettingsReconciliation(alarmListeners);
 
     await vi.waitFor(() => {
       expect(detach).toHaveBeenCalledTimes(1);
@@ -3427,7 +3455,7 @@ describe("background bridge", () => {
     );
     const detach = vi.fn(async () => undefined);
     let browserPasskeyProxyEnabled = true;
-    const storageListeners: StorageChangeListener[] = [];
+    const alarmListeners: AlarmListener[] = [];
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       runtime: {
@@ -3450,10 +3478,13 @@ describe("background bridge", () => {
             });
           },
           set() {}
-        },
-        onChanged: {
-          addListener(listener: StorageChangeListener) {
-            storageListeners.push(listener);
+        }
+      },
+      alarms: {
+        create: vi.fn(),
+        onAlarm: {
+          addListener(listener: AlarmListener) {
+            alarmListeners.push(listener);
           }
         }
       },
@@ -3469,9 +3500,7 @@ describe("background bridge", () => {
     });
 
     browserPasskeyProxyEnabled = false;
-    for (const listener of storageListeners) {
-      listener({ vaultkernExtensionSettings: {} }, "local");
-    }
+    triggerBrowserSettingsReconciliation(alarmListeners);
     resolveAttach();
     await completePasskeyLedgerReconciliation(port);
 

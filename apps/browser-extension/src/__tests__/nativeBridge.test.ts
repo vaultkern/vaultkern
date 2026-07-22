@@ -508,129 +508,7 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
-  it("uses the interactive timeout while waiting for local vault file selection", async () => {
-    vi.useFakeTimers();
-
-    const port = createPort();
-    const connectNative = vi.fn(() => port);
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        connectNative
-      }
-    };
-
-    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
-      timeoutMs: 25,
-      interactiveTimeoutMs: 1_000
-    });
-
-    const request = bridge.send({
-      version: 1,
-      command: { type: "add_local_vault_reference", path: undefined }
-    });
-
-    await vi.advanceTimersByTimeAsync(25);
-
-    expect(port.disconnect).not.toHaveBeenCalled();
-
-    port.emitMessage({
-      type: "vault_reference",
-      vaultRefId: "vault-ref-1"
-    });
-
-    await expect(request).resolves.toMatchObject({
-      type: "vault_reference",
-      vaultRefId: "vault-ref-1"
-    });
-
-    vi.useRealTimers();
-  });
-
-  it("uses the interactive timeout while unlocking a vault", async () => {
-    vi.useFakeTimers();
-
-    const port = createPort();
-    const connectNative = vi.fn(() => port);
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        connectNative
-      }
-    };
-
-    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
-      timeoutMs: 25,
-      interactiveTimeoutMs: 1_000
-    });
-
-    const request = bridge.send({
-      version: 1,
-      command: { type: "unlock_current_vault_with_password", password: "demo-password" }
-    });
-
-    await vi.advanceTimersByTimeAsync(25);
-
-    expect(port.disconnect).not.toHaveBeenCalled();
-
-    port.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    await expect(request).resolves.toMatchObject({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    vi.useRealTimers();
-  });
-
-  it("uses the interactive timeout while unlocking the selected current vault", async () => {
-    vi.useFakeTimers();
-
-    const port = createPort();
-    const connectNative = vi.fn(() => port);
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        connectNative
-      }
-    };
-
-    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
-      timeoutMs: 25,
-      interactiveTimeoutMs: 1_000
-    });
-
-    const request = bridge.send({
-      version: 1,
-      command: {
-        type: "unlock_current_vault",
-        password: "demo-password",
-        key_file_path: null
-      }
-    });
-
-    await vi.advanceTimersByTimeAsync(25);
-
-    expect(port.disconnect).not.toHaveBeenCalled();
-
-    port.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    await expect(request).resolves.toMatchObject({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    vi.useRealTimers();
-  });
-
-  it("uses the interactive timeout while unlocking an explicitly opened vault", async () => {
+  it("does not grant retired browser unlock commands an interactive timeout", async () => {
     vi.useFakeTimers();
 
     const port = createPort();
@@ -651,21 +529,15 @@ describe("createNativeMessagingBridge", () => {
     });
 
     expect(port.postMessage).toHaveBeenLastCalledWith(
-      expect.objectContaining({ requestTimeoutMs: 1_000 })
+      expect.objectContaining({ requestTimeoutMs: 25 })
     );
-    await vi.advanceTimersByTimeAsync(25);
-    expect(port.disconnect).not.toHaveBeenCalled();
-
-    port.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
+    const failure = expect(request).rejects.toMatchObject({
+      code: "native_timeout",
+      message: "native messaging timed out"
     });
-    await expect(request).resolves.toMatchObject({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
+    await vi.advanceTimersByTimeAsync(1_025);
+    await failure;
+    expect(port.disconnect).toHaveBeenCalledTimes(1);
 
     vi.useRealTimers();
   });
@@ -839,86 +711,6 @@ describe("createNativeMessagingBridge", () => {
     port.emitMessage({ type: "saved" });
 
     await expect(request).resolves.toEqual({ type: "saved" });
-
-    vi.useRealTimers();
-  });
-
-  it("uses the interactive timeout while enabling quick unlock", async () => {
-    vi.useFakeTimers();
-
-    const port = createPort();
-    const connectNative = vi.fn(() => port);
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        connectNative
-      }
-    };
-
-    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
-      timeoutMs: 25,
-      interactiveTimeoutMs: 1_000
-    });
-
-    const request = bridge.send({
-      version: 1,
-      command: { type: "enable_quick_unlock_for_current_vault" }
-    });
-
-    await vi.advanceTimersByTimeAsync(25);
-
-    expect(port.disconnect).not.toHaveBeenCalled();
-
-    port.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    await expect(request).resolves.toMatchObject({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    vi.useRealTimers();
-  });
-
-  it("uses the interactive timeout while unlocking with quick unlock", async () => {
-    vi.useFakeTimers();
-
-    const port = createPort();
-    const connectNative = vi.fn(() => port);
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        connectNative
-      }
-    };
-
-    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
-      timeoutMs: 25,
-      interactiveTimeoutMs: 1_000
-    });
-
-    const request = bridge.send({
-      version: 1,
-      command: { type: "unlock_current_vault_with_quick_unlock" }
-    });
-
-    await vi.advanceTimersByTimeAsync(25);
-
-    expect(port.disconnect).not.toHaveBeenCalled();
-
-    port.emitMessage({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-
-    await expect(request).resolves.toMatchObject({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
 
     vi.useRealTimers();
   });

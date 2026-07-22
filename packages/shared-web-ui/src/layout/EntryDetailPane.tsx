@@ -29,7 +29,6 @@ export function EntryDetailPane({
   onAddCustomField,
   onDeleteCustomField,
   onDownloadAttachment,
-  attachmentDownloadLimitBytes,
   onAddAttachment,
   onRenameAttachment,
   onReplaceAttachment,
@@ -71,7 +70,6 @@ export function EntryDetailPane({
   onAddCustomField: () => void;
   onDeleteCustomField: (index: number) => void;
   onDownloadAttachment?: (name: string) => void;
-  attachmentDownloadLimitBytes?: number;
   onAddAttachment?: (file: File, protectInMemory: boolean) => void;
   onRenameAttachment?: (
     oldName: string,
@@ -146,7 +144,6 @@ export function EntryDetailPane({
         onAddCustomField={onAddCustomField}
         onDeleteCustomField={onDeleteCustomField}
         onDownloadAttachment={onDownloadAttachment}
-        attachmentDownloadLimitBytes={attachmentDownloadLimitBytes}
         onAddAttachment={onAddAttachment}
         onRenameAttachment={onRenameAttachment}
         onReplaceAttachment={onReplaceAttachment}

@@ -9,6 +9,15 @@ export interface SessionState {
   sourceStatus?: VaultSourceStatus | null;
 }
 
+export type ResidentAppRoute = "unlock" | "vaults" | "settings";
+
+export interface BrowserIntegrationSettings {
+  type: "browser_integration_settings";
+  language: "en" | "zh-CN";
+  autofillOnPageLoadEnabled: boolean;
+  browserPasskeyProxyEnabled: boolean;
+}
+
 export interface VaultSourceStatus {
   type?: "vault_source_status";
   sourceKind: string;
@@ -110,6 +119,25 @@ export interface EntrySummary {
   url: string;
   groupId?: string;
   hasTotp?: boolean;
+}
+
+export interface AutofillCredential {
+  type: "autofill_credential";
+  id: string;
+  username: string;
+  password: string;
+  totp?: string | null;
+}
+
+export interface AutofillEntryFields {
+  type: "autofill_entry_fields";
+  id: string;
+  fields: EntryDraft;
+}
+
+export interface AutofillCreateContext {
+  type: "autofill_create_context";
+  rootGroupId: string;
 }
 
 export interface GroupNode {
@@ -404,6 +432,19 @@ export class RuntimeClient {
     });
   }
 
+  async getBrowserIntegrationSettings(): Promise<BrowserIntegrationSettings> {
+    return this.sendCommand<BrowserIntegrationSettings>({
+      type: "get_browser_integration_settings"
+    });
+  }
+
+  async activateResidentApp(route: ResidentAppRoute): Promise<void> {
+    await this.sendCommand<{ type: "resident_app_activated" }>({
+      type: "activate_resident_app",
+      route
+    });
+  }
+
   async listRecentVaults(): Promise<VaultReference[]> {
     const response = await this.sendCommand<VaultReferenceList>({
       type: "list_recent_vaults"
@@ -587,6 +628,41 @@ export class RuntimeClient {
       type: "get_entry_detail",
       vault_id: vaultId,
       entry_id: entryId
+    });
+  }
+
+  async getAutofillCredential(
+    vaultId: string,
+    entryId: string,
+    url: string
+  ): Promise<AutofillCredential> {
+    return this.sendCommand<AutofillCredential>({
+      type: "get_autofill_credential",
+      vault_id: vaultId,
+      entry_id: entryId,
+      url
+    });
+  }
+
+  async getAutofillEntryFields(
+    vaultId: string,
+    entryId: string,
+    url: string
+  ): Promise<AutofillEntryFields> {
+    return this.sendCommand<AutofillEntryFields>({
+      type: "get_autofill_entry_fields",
+      vault_id: vaultId,
+      entry_id: entryId,
+      url
+    });
+  }
+
+  async getAutofillCreateContext(
+    vaultId: string
+  ): Promise<AutofillCreateContext> {
+    return this.sendCommand<AutofillCreateContext>({
+      type: "get_autofill_create_context",
+      vault_id: vaultId
     });
   }
 

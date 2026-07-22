@@ -16,11 +16,11 @@ function chromeRegistryPath() {
 }
 
 function windowsRuntimePath() {
-  return `%LOCALAPPDATA%\\vaultkern-runtime\\vaultkern-runtime.exe`;
+  return `%ProgramFiles%\\VaultKern\\Browser Integration\\vaultkern-runtime.exe`;
 }
 
 function windowsManifestPath(browser: "chrome" | "edge") {
-  return `%LOCALAPPDATA%\\vaultkern-runtime\\com.vaultkern.runtime.${browser}.json`;
+  return `%ProgramFiles%\\VaultKern\\Browser Integration\\com.vaultkern.runtime.${browser}.json`;
 }
 
 function isErrorCode(error: unknown, code: string) {
@@ -36,10 +36,11 @@ export function renderNativeHostHelp(error: unknown) {
   if (isErrorCode(error, "resident_unavailable")) {
     return (
       <div>
-        <h2>Start the VaultKern Windows app</h2>
+        <h2>Open the VaultKern Windows app</h2>
         <p>
-          The browser extension connects through the resident app on Windows.
-          Start VaultKern, keep it running, then retry unlocking.
+          The native host could not start VaultKern automatically. Open or
+          restart the Windows app, then reopen the popup and retry the
+          operation.
         </p>
       </div>
     );
@@ -101,8 +102,8 @@ export function renderNativeHostHelp(error: unknown) {
             .
           </li>
           <li>
-            Open <code>chrome://extensions</code>, reload the extension, and try
-            unlocking again.
+            Open <code>chrome://extensions</code>, reload the extension, and
+            reopen the popup.
           </li>
         </ol>
       </div>
@@ -127,7 +128,7 @@ export function renderNativeHostHelp(error: unknown) {
             host manifest.
           </li>
           <li>Open <code>chrome://extensions</code> and reload the extension.</li>
-          <li>Try unlocking again after the host reconnects.</li>
+          <li>Retry the operation after the host reconnects.</li>
         </ol>
       </div>
     );

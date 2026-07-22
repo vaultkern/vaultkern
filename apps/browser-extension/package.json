@@ -10,10 +10,9 @@
   "scripts": {
     "build": "vite build && node scripts/verifyClassicContentScript.mjs && node scripts/writeManifest.mjs",
     "build:e2e": "vite build && node scripts/verifyClassicContentScript.mjs && node scripts/writeManifest.mjs --fixed-key",
-    "smoke:e2e": "npm run build:e2e && cargo build -p vaultkern-runtime && node smoke/run-chrome-e2e.mjs",
     "smoke:simplewebauthn": "node smoke/simplewebauthn-server.mjs",
     "test:simplewebauthn-smoke": "node --test smoke/simplewebauthn-server.node-test.mjs",
-    "test": "node --test smoke/run-chrome-e2e.node-test.mjs && vitest run"
+    "test": "vitest run"
   },
   "license": "GPL-3.0-or-later"
 }

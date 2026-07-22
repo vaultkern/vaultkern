@@ -11,8 +11,6 @@ export interface ExtensionSettings {
   quickUnlockEnabled: boolean;
 }
 
-export type SettingsSurface = "browser" | "windows";
-
 export interface RecentVaultRetentionRecord {
   vaultRefId: string;
   lastUsedAt?: number | null;
@@ -31,7 +29,6 @@ export function sortRecentVaultsForRetention<T extends RecentVaultRetentionRecor
 }
 
 export interface ExtensionSettingsStore {
-  surface?: SettingsSurface;
   nativeReconciliationOwned?: boolean;
   loadReconciliationError?(): Promise<string | null>;
   subscribeReconciliationError?(
@@ -100,8 +97,9 @@ export function normalizeWindowsAppSettings(value: unknown): ExtensionSettings {
   const normalized = normalizeExtensionSettings(value);
   return {
     ...normalized,
-    autofillOnPageLoadEnabled: false,
-    browserPasskeyProxyEnabled: false
+    browserPasskeyProxyEnabled:
+      normalized.browserPasskeyProxyEnabled &&
+      !normalized.windowsPasskeyProviderEnabled
   };
 }
 
@@ -111,7 +109,6 @@ export function createMemoryExtensionSettingsStore(
   let current = normalizeExtensionSettings(initial);
 
   return {
-    surface: "windows",
     async load() {
       return current;
     },

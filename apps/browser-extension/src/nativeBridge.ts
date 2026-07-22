@@ -249,33 +249,7 @@ function shouldCancelActivePreload(
 // This list only grants enough UI time for the runtime's interactive gate.
 // The Rust runtime owns and exhaustively enforces the authorization policy.
 const FRESH_VERIFICATION_COMMANDS = new Set([
-  "handshake",
-  "add_local_vault_reference",
-  "begin_one_drive_login",
-  "complete_pending_one_drive_login",
-  "list_one_drive_children",
-  "add_one_drive_vault_reference",
-  "retry_vault_source_sync",
-  "delete_vault_reference",
-  "create_entry",
-  "update_entry_fields",
-  "compare_and_update_entry_fields",
-  "persist_autofill_mutation",
-  "clear_entry_totp",
-  "set_entry_passkey",
-  "clear_entry_passkey",
-  "delete_entry",
-  "get_entry_detail",
-  "get_entry_history_detail",
-  "get_entry_attachment_content",
-  "add_entry_attachment",
-  "update_entry_attachment_metadata",
-  "replace_entry_attachment_content",
-  "delete_entry_attachment",
-  "update_entry",
-  "update_database_settings",
-  "find_exact_matching_entry_ids",
-  "disable_quick_unlock_for_current_vault"
+  "persist_autofill_mutation"
 ]);
 
 function commandRequiresFreshVerification(command: Record<string, unknown>) {
@@ -314,18 +288,10 @@ export function createNativeMessagingBridge(
       const command = (message as { command: Record<string, unknown> }).command;
       if (
         commandRequiresFreshVerification(command) ||
-        (command.type === "add_local_vault_reference" && command.path === undefined) ||
-        command.type === "unlock_current_vault" ||
-        command.type === "unlock_current_vault_with_password" ||
-        command.type === "unlock_with_password" ||
-        command.type === "unlock_vault" ||
-        command.type === "enable_quick_unlock_for_current_vault" ||
-        command.type === "unlock_current_vault_with_quick_unlock" ||
         command.type === "create_passkey_assertion" ||
         command.type === "create_passkey_registration" ||
         command.type === "verify_passkey_user" ||
         command.type === "save_passkey_registration" ||
-        command.type === "save_vault" ||
         command.type === "abort_passkey_registration" ||
         command.type === "commit_passkey_registration"
       ) {

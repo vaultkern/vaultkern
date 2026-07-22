@@ -13,7 +13,9 @@ use vaultkern_runtime::QuickUnlockReconciliationCredentials;
 #[cfg(windows)]
 use vaultkern_runtime::resident_ipc::start_windows_resident_ipc_server;
 #[cfg(windows)]
-use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse, SensitiveString};
+use vaultkern_runtime_protocol::{
+    ErrorDto, ProtocolEnvelope, ResidentAppRouteDto, RuntimeResponse, SensitiveString,
+};
 #[cfg(windows)]
 use vaultkern_windows::{
     DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, SettingsReconciliationRequest,
@@ -112,12 +114,19 @@ fn load_desktop_reconciliation_error(
 
 #[cfg(windows)]
 #[tauri::command]
+fn take_pending_resident_route(bridge: State<'_, RuntimeBridge>) -> Option<ResidentAppRouteDto> {
+    bridge.take_pending_resident_route()
+}
+
+#[cfg(windows)]
+#[tauri::command]
 fn save_desktop_settings(
     desired: Value,
     settings: State<'_, Arc<DesktopSettingsStore>>,
     bridge: State<'_, RuntimeBridge>,
 ) -> Result<(), String> {
     settings.save(&desired).map_err(|error| error.to_string())?;
+    bridge.set_browser_integration_settings(&desired);
     bridge.schedule_reconciliation();
     Ok(())
 }
@@ -180,6 +189,8 @@ fn main() {
                 .map_err(std::io::Error::other)?
                 .join("desktop-settings.json");
             let settings = Arc::new(DesktopSettingsStore::new(settings_path));
+            let initial_settings = settings.load().map_err(std::io::Error::other)?;
+            plugin_bridge.set_browser_integration_settings(&initial_settings);
             let plugin = Arc::new(PasskeyPluginServer::start(plugin_bridge.clone()));
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");
@@ -233,6 +244,30 @@ fn main() {
                     }
                 })
                 .map_err(std::io::Error::other)?;
+            let (resident_activation, resident_activation_requests) = std::sync::mpsc::channel();
+            plugin_bridge
+                .set_resident_activation_notifier(resident_activation)
+                .map_err(std::io::Error::other)?;
+            let resident_activation_app = app.handle().clone();
+            let resident_activation_bridge = plugin_bridge.clone();
+            std::thread::Builder::new()
+                .name("vaultkern-resident-activation".to_owned())
+                .spawn(move || {
+                    while let Ok(route) = resident_activation_requests.recv() {
+                        if let Err(error) =
+                            show_main_window(&resident_activation_app, &resident_activation_bridge)
+                        {
+                            eprintln!("failed to show VaultKern for browser activation: {error}");
+                            continue;
+                        }
+                        resident_activation_bridge.queue_pending_resident_route(route);
+                        if let Err(error) = resident_activation_app.emit("vaultkern-open-route", ())
+                        {
+                            eprintln!("failed to route browser activation: {error}");
+                        }
+                    }
+                })
+                .map_err(std::io::Error::other)?;
             plugin_bridge.schedule_reconciliation();
 
             let ipc_bridge = plugin_bridge.clone();
@@ -269,6 +304,7 @@ fn main() {
             runtime_send,
             load_desktop_settings,
             load_desktop_reconciliation_error,
+            take_pending_resident_route,
             save_desktop_settings,
             queue_quick_unlock_enrollment
         ])

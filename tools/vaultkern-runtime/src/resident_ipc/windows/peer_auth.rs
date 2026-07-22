@@ -46,6 +46,18 @@ struct ExpectedResidentPackageIdentity {
     package_publisher: &'static str,
 }
 
+pub(super) fn expected_resident_activation_identity()
+-> Result<(&'static str, &'static str, &'static str)> {
+    let package = expected_resident_package_identity()?;
+    let application_id = manifest_element_attribute(RESIDENT_PACKAGE_MANIFEST, "Application", "Id")
+        .context("resident package manifest has no Application Id")?;
+    Ok((
+        package.package_name,
+        package.package_publisher,
+        application_id,
+    ))
+}
+
 #[derive(Clone, Debug)]
 struct AuthenticodeIdentity {
     subject: String,

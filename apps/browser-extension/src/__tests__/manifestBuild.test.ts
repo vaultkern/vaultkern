@@ -70,7 +70,7 @@ describe("manifest build", () => {
     );
   });
 
-  it("declares a standalone extension options page", () => {
+  it("ships only the popup as an extension-owned UI surface", () => {
     const repoManifest = JSON.parse(
       readFileSync(
         join(
@@ -80,8 +80,14 @@ describe("manifest build", () => {
         "utf8"
       )
     );
+    const viteConfig = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "../../vite.config.ts"),
+      "utf8"
+    );
 
-    expect(repoManifest.options_page).toBe("options.html");
+    expect(repoManifest).not.toHaveProperty("options_page");
+    expect(viteConfig).not.toContain('manager: "manager.html"');
+    expect(viteConfig).not.toContain('options: "options.html"');
   });
 
   it("omits the fixed extension key for normal production builds", () => {

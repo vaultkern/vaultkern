@@ -170,13 +170,9 @@ impl PasskeyPluginServer {
 
     fn reconcile_registration(&self, enabled: bool) -> Result<bool, String> {
         if !enabled {
-            let was_enabled = self.enabled.swap(false, Ordering::AcqRel);
-            let status = unsafe { vaultkern_plugin_remove_registered() };
-            if failed(status) {
-                self.enabled.store(was_enabled, Ordering::Release);
-                return Err(hresult_message("unregister plugin authenticator", status));
-            }
-            return Ok(false);
+            return disable_registration_with(&self.enabled, || unsafe {
+                vaultkern_plugin_remove_registered()
+            });
         }
 
         let os_enabled = self.ensure_registered()?;
@@ -282,6 +278,18 @@ impl PasskeyPluginServer {
     }
 }
 
+fn disable_registration_with(
+    enabled: &AtomicBool,
+    unregister: impl FnOnce() -> i32,
+) -> Result<bool, String> {
+    enabled.store(false, Ordering::Release);
+    let status = unregister();
+    if failed(status) {
+        return Err(hresult_message("unregister plugin authenticator", status));
+    }
+    Ok(false)
+}
+
 extern "system" fn retain_context_callback(context: *mut c_void) {
     if !context.is_null() {
         unsafe {
@@ -303,6 +311,9 @@ extern "system" fn begin_operation_callback(context: *mut c_void, id: VkBytes) -
         let Some(context) = callback_context(context) else {
             return E_INVALIDARG;
         };
+        if !context.enabled.load(Ordering::Acquire) {
+            return NTE_NOT_FOUND;
+        }
         let id = match operation_id(id) {
             Ok(id) => id,
             Err(status) => return status,
@@ -595,6 +606,9 @@ extern "system" fn commit_registration_callback(
         let Some(context) = callback_context(context) else {
             return E_INVALIDARG;
         };
+        if !callback_available(context) {
+            return NTE_NOT_FOUND;
+        }
         let operation_id = match operation_id(transaction_id) {
             Ok(id) => id,
             Err(status) => return status,
@@ -841,22 +855,51 @@ fn hresult_message(operation: &str, status: i32) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        CallbackContext, CredentialBacking, NTE_NOT_FOUND, S_OK, VkBytes, VkMakeCredentialInput,
-        VkMakeCredentialOutput, VkOwnedBytes, borrowed_bytes, empty_owned_bytes, free_owned_bytes,
-        make_credential_callback, nul_terminated_wide, owned_bytes, release_context_callback,
-        retain_context_callback, runtime_error_hresult,
+        CallbackContext, CredentialBacking, E_FAIL, NTE_NOT_FOUND, S_OK, VkBytes,
+        VkMakeCredentialInput, VkMakeCredentialOutput, VkOwnedBytes, begin_operation_callback,
+        borrowed_bytes, commit_registration_callback, disable_registration_with, empty_owned_bytes,
+        free_owned_bytes, make_credential_callback, nul_terminated_wide, owned_bytes,
+        release_context_callback, retain_context_callback, runtime_error_hresult,
         vaultkern_plugin_test_can_select_second_matching_credential,
         vaultkern_plugin_test_replaces_cached_account_credential, zeroize_owned_bytes,
     };
     use crate::RuntimeBridge;
     use crate::plugin_operation_state::PluginOperationState;
     use serde_json::json;
-    use std::sync::{Arc, Mutex, atomic::AtomicBool};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use vaultkern_core::{CompositeKey, KeepassCore, SaveProfile, Vault};
     use vaultkern_runtime::PlatformPasskeyCredential;
     use zeroize::Zeroize;
 
     static NATIVE_CREDENTIAL_CACHE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn failed_os_unregister_keeps_provider_callbacks_disabled() {
+        let enabled = AtomicBool::new(true);
+
+        let result = disable_registration_with(&enabled, || E_FAIL);
+
+        assert!(result.is_err());
+        assert!(!enabled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn disabled_provider_rejects_new_and_commit_callbacks_from_stale_com_objects() {
+        let context = Arc::new(CallbackContext {
+            bridge: RuntimeBridge::new_for_tests(),
+            operations: PluginOperationState::default(),
+            enabled: Arc::new(AtomicBool::new(false)),
+        });
+        let raw = Arc::as_ptr(&context).cast_mut().cast();
+        let operation_id = [9_u8; 16];
+        let operation = borrowed_bytes(&operation_id);
+
+        assert_eq!(begin_operation_callback(raw, operation), NTE_NOT_FOUND);
+        assert_eq!(commit_registration_callback(raw, operation), NTE_NOT_FOUND);
+    }
 
     #[test]
     fn ffi_context_lease_keeps_the_runtime_context_alive() {

@@ -2,8 +2,6 @@ import "@testing-library/jest-dom/vitest";
 
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { DEFAULT_EXTENSION_SETTINGS } from "@vaultkern/shared-web-ui";
-
 import {
   dismissPendingAutofillSubmission,
   executePendingAutofillMutation,
@@ -103,27 +101,13 @@ function popupClient(overrides: Record<string, unknown> = {}) {
   };
   return {
     getSessionState: vi.fn(async () => session),
-    listRecentVaults: vi.fn(async () => []),
-    preloadCurrentVault: vi.fn(async () => session),
-    addLocalVaultReference: vi.fn(),
-    setCurrentVault: vi.fn(async () => session),
-    lockSession: vi.fn(async () => ({ ...session, unlocked: false })),
-    unlockCurrentVaultWithPassword: vi.fn(async () => session),
-    unlockCurrentVault: vi.fn(async () => session),
-    enableQuickUnlockForCurrentVault: vi.fn(async () => session),
-    unlockCurrentVaultWithQuickUnlock: vi.fn(async () => session),
-    listGroups: vi.fn(async () => ({
-      type: "group_tree",
-      root: {
-        id: GROUP_ID,
-        title: "Root",
-        entryCount: 0,
-        childCount: 0,
-        children: []
-      }
+    activateResidentApp: vi.fn(async () => undefined),
+    recordUserActivity: vi.fn(async () => session),
+    getAutofillEntryFields: vi.fn(async (_vaultId, entryId) => ({
+      id: entryId,
+      fields: fields("old-secret")
     })),
-    listEntries: vi.fn(async () => []),
-    getEntryDetail: vi.fn(),
+    getAutofillCreateContext: vi.fn(async () => ({ rootGroupId: GROUP_ID })),
     findExactMatchingEntryIds: vi.fn(async () => []),
     ...overrides
   };
@@ -332,15 +316,26 @@ describe("popup pending autofill V2 transport", () => {
           ]
         };
       }
-      if (command?.type === "get_entry_detail") {
+      if (command?.type === "get_autofill_credential") {
+        expect(command).toMatchObject({
+          vault_id: "vault-1",
+          entry_id: ENTRY_ID,
+          url: "https://example.com/login"
+        });
         return {
-          type: "entry_detail",
+          type: "autofill_credential",
           id: ENTRY_ID,
-          title: "Example",
           username: "alice",
           password: "secret",
-          url: "https://example.com/login",
-          notes: ""
+        };
+      }
+      if (command?.type === "get_session_state") {
+        return {
+          type: "session_state",
+          unlocked: true,
+          activeVaultId: "vault-1",
+          currentVaultRefId: "vault-ref-1",
+          supportsBiometricUnlock: false
         };
       }
       throw new Error("unexpected runtime command");
@@ -381,89 +376,13 @@ describe("popup pending autofill V2 transport", () => {
       { frameId: 0 }
     );
     expect(deliveredFrameIds).toEqual([0]);
-  });
-});
-
-it("reapplies current-first recent-vault retention after selecting a vault", async () => {
-  const initialVaults = [
-    {
-      vaultRefId: "vault-ref-a",
-      displayName: "Alpha",
-      sourceKind: "local",
-      sourceSummary: "alpha.kdbx",
-      lastUsedAt: 100,
-      availability: "ready",
-      supportsQuickUnlock: false,
-      isCurrent: true
-    },
-    {
-      vaultRefId: "vault-ref-b",
-      displayName: "Beta",
-      sourceKind: "local",
-      sourceSummary: "beta.kdbx",
-      lastUsedAt: 200,
-      availability: "ready",
-      supportsQuickUnlock: false,
-      isCurrent: false
-    }
-  ];
-  const selectedVaults = [
-    { ...initialVaults[0], isCurrent: false },
-    { ...initialVaults[1], lastUsedAt: 100, isCurrent: true },
-    {
-      vaultRefId: "vault-ref-c",
-      displayName: "Gamma",
-      sourceKind: "local",
-      sourceSummary: "gamma.kdbx",
-      lastUsedAt: 300,
-      availability: "ready",
-      supportsQuickUnlock: false,
-      isCurrent: false
-    }
-  ];
-  const locked = {
-    unlocked: false,
-    activeVaultId: null,
-    currentVaultRefId: "vault-ref-a"
-  };
-  const client = popupClient({
-    getSessionState: vi.fn(async () => locked),
-    listRecentVaults: vi
-      .fn()
-      .mockResolvedValueOnce(initialVaults)
-      .mockResolvedValue(selectedVaults),
-    setCurrentVault: vi.fn(async () => ({
-      ...locked,
-      currentVaultRefId: "vault-ref-b"
-    }))
-  });
-
-  render(
-    <PopupApp
-      client={client}
-      activeSite={async () => "example.com"}
-      findCandidates={async () => []}
-      fillEntry={async () => undefined}
-      extensionSettingsStore={{
-        surface: "browser",
-        load: async () => ({
-          ...DEFAULT_EXTENSION_SETTINGS,
-          recentVaultLimit: 2
-        }),
-        save: async () => undefined
-      }}
-    />
-  );
-
-  fireEvent.click(await screen.findByRole("button", { name: /Beta/ }));
-
-  await waitFor(() => {
-    expect(screen.getByRole("button", { name: /Beta/ })).toHaveAttribute(
-      "aria-pressed",
-      "true"
-    );
-    expect(screen.getByRole("button", { name: /Gamma/ })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Alpha/ })).not.toBeInTheDocument();
+    expect(
+      sendMessage.mock.calls.some(
+        ([message]) =>
+          (message as { command?: { type?: unknown } }).command?.type ===
+          "get_entry_detail"
+      )
+    ).toBe(false);
   });
 });
 
@@ -533,8 +452,12 @@ describe("popup pending autofill V2 workflow", () => {
         { key: "Environment", value: "production", protected: false }
       ]
     };
+    const { type: _type, id: _id, ...currentFields } = currentDetail;
     const client = popupClient({
-      getEntryDetail: vi.fn(async () => currentDetail)
+      getAutofillEntryFields: vi.fn(async () => ({
+        id: ENTRY_ID,
+        fields: currentFields
+      }))
     });
     const plan = vi.fn(async (_transactionId, _tabId, vaultId, inputPlan) => ({
       ...planned(),
@@ -582,10 +505,9 @@ describe("popup pending autofill V2 workflow", () => {
 
   it("keeps an update conflict when the intended password changed concurrently", async () => {
     const client = popupClient({
-      getEntryDetail: vi.fn(async () => ({
-        type: "entry_detail" as const,
+      getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
-        ...fields("other-secret")
+        fields: fields("other-secret")
       }))
     });
     const plan = vi.fn();
@@ -608,10 +530,9 @@ describe("popup pending autofill V2 workflow", () => {
 
   it("reconciles an already-present update with an exact no-op plan", async () => {
     const client = popupClient({
-      getEntryDetail: vi.fn(async () => ({
-        type: "entry_detail" as const,
+      getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
-        ...fields("new-secret")
+        fields: fields("new-secret")
       }))
     });
     const plan = vi.fn(async (_transactionId, _tabId, vaultId, inputPlan) => ({
@@ -648,10 +569,9 @@ describe("popup pending autofill V2 workflow", () => {
     const conflicted = planned("persist_conflict");
     conflicted.plan.desiredFields.notes = "popup must not author this delta";
     const client = popupClient({
-      getEntryDetail: vi.fn(async () => ({
-        type: "entry_detail" as const,
+      getAutofillEntryFields: vi.fn(async () => ({
         id: ENTRY_ID,
-        ...fields("old-secret")
+        fields: fields("old-secret")
       }))
     });
     const plan = vi.fn();

@@ -1,10 +1,7 @@
 import { RuntimeClient, createNegotiatedRuntimeTransport } from "@vaultkern/runtime-web-client";
 
 import { createNativeMessagingBridge } from "./nativeBridge";
-import {
-  EXTENSION_SETTINGS_STORAGE_KEY,
-  createChromeExtensionSettingsStore
-} from "./extensionSettings";
+import { loadResidentBrowserSettings } from "./residentBrowserSettings";
 import {
   pendingAutofillStateIsRecoveryProtected,
   pendingAutofillSubmissionFromUnknown,
@@ -40,7 +37,8 @@ import {
 } from "./webauthnProxy";
 
 const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
-const extensionSettingsStore = createChromeExtensionSettingsStore();
+const BROWSER_SETTINGS_RECONCILIATION_ALARM =
+  "vaultkern-browser-settings-reconciliation";
 let webAuthnProxyAttached = false;
 let webAuthnProxySyncPromise: Promise<void> | null = null;
 let webAuthnProxySyncRequested = false;
@@ -136,28 +134,25 @@ function activeVaultIdFromSessionState(response: unknown) {
   return (response as { activeVaultId: string }).activeVaultId;
 }
 
-function pageLoadEntryCredentials(
+function pageLoadAutofillCredential(
   response: unknown,
-  expectedEntryId: string,
-  pageUrl: string
+  expectedEntryId: string
 ) {
   if (
     typeof response !== "object" ||
     response === null ||
-    (response as { type?: unknown }).type !== "entry_detail"
+    (response as { type?: unknown }).type !== "autofill_credential"
   ) {
     return null;
   }
 
   const id = (response as { id?: unknown }).id;
-  const detailUrl = (response as { url?: unknown }).url;
   const username = (response as { username?: unknown }).username;
   const password = (response as { password?: unknown }).password;
   if (
     typeof id !== "string" ||
     id.trim() === "" ||
     id !== expectedEntryId ||
-    !sameExactHttpOrigin(detailUrl, pageUrl) ||
     typeof username !== "string" ||
     username.trim() === "" ||
     typeof password !== "string" ||
@@ -187,7 +182,7 @@ async function pageLoadAutofillTabCanReceive(tabId: number, expectedUrl: string)
 }
 
 async function pageLoadAutofillStillAuthorized(vaultId: string) {
-  const settings = await extensionSettingsStore.load();
+  const settings = await currentBrowserIntegrationSettings();
   if (!settings.autofillOnPageLoadEnabled) {
     return false;
   }
@@ -1058,15 +1053,21 @@ const nativeBridge = rawNativeBridge
   ? createNegotiatedRuntimeTransport(rawNativeBridge, [
       "runtime-core",
       "browser-extension",
-      "database-settings",
-      "one-drive",
-      "passkey-ceremonies",
-      "quick-unlock"
+      "browser-autofill",
+      "passkey-ceremonies"
     ])
   : null;
 nativeRuntimeClient = nativeBridge
   ? new RuntimeClient({ send: (message) => sendRuntimeMessage(message) })
   : null;
+
+async function currentBrowserIntegrationSettings() {
+  if (!nativeRuntimeClient) {
+    throw new Error("Native runtime is unavailable");
+  }
+  return loadResidentBrowserSettings(nativeRuntimeClient);
+}
+
 function scheduleSavedSettingsReconciliation() {
   if (chromeApi?.webAuthenticationProxy) {
     void syncWebAuthnProxy().catch((error) => {
@@ -1247,7 +1248,7 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
       return;
     }
 
-    const settings = await extensionSettingsStore.load();
+    const settings = await currentBrowserIntegrationSettings();
     if (!settings.autofillOnPageLoadEnabled) {
       outcome = "disabled";
       return;
@@ -1284,14 +1285,14 @@ async function maybeSendPageLoadAutofill(tabId: number, tabUrl: string | undefin
       return;
     }
 
-    const credentials = pageLoadEntryCredentials(
+    const credentials = pageLoadAutofillCredential(
       await sendRuntimeCommand({
-        type: "get_entry_detail",
+        type: "get_autofill_credential",
         vault_id: vaultId,
-        entry_id: candidate.id
+        entry_id: candidate.id,
+        url
       }),
-      candidate.id,
-      url
+      candidate.id
     );
     if (!credentials) {
       outcome = "entry_detail_rejected";
@@ -1418,6 +1419,10 @@ chromeApi?.alarms?.onAlarm?.addListener?.((alarm: { name?: string }) => {
   if (typeof alarm.name !== "string") {
     return;
   }
+  if (alarm.name === BROWSER_SETTINGS_RECONCILIATION_ALARM) {
+    scheduleSavedSettingsReconciliation();
+    return;
+  }
   const tabId = tabIdFromPendingAutofillAlarmName(alarm.name);
   const recoveryAlarm = alarm.name.startsWith(
     `${PENDING_AUTOFILL_ALARM_PREFIX}recovery:`
@@ -1460,6 +1465,9 @@ if (chromeApi?.webAuthenticationProxy) {
 
   chromeApi.tabs?.onUpdated?.addListener?.(
     (tabId: number, changeInfo: { status?: string }) => {
+      if (changeInfo.status === "complete") {
+        scheduleSavedSettingsReconciliation();
+      }
       if (
         webAuthnPageHookRegistered &&
         browserPasskeyProxyEnabled &&
@@ -1479,15 +1487,9 @@ if (chromeApi?.webAuthenticationProxy) {
 }
 
 scheduleSavedSettingsReconciliation();
-
-chromeApi?.storage?.onChanged?.addListener?.(
-  (changes: Record<string, unknown>, areaName: string) => {
-    if (areaName !== "local" || !(EXTENSION_SETTINGS_STORAGE_KEY in changes)) {
-      return;
-    }
-    scheduleSavedSettingsReconciliation();
-  }
-);
+void chromeApi?.alarms?.create?.(BROWSER_SETTINGS_RECONCILIATION_ALARM, {
+  periodInMinutes: 0.5
+});
 
 function syncWebAuthnProxy(): Promise<void> {
   webAuthnProxySyncRequested = true;
@@ -1515,7 +1517,7 @@ async function syncWebAuthnProxyOnce() {
     return;
   }
 
-  const settings = await extensionSettingsStore.load();
+  const settings = await currentBrowserIntegrationSettings();
   browserPasskeyProxyEnabled = settings.browserPasskeyProxyEnabled;
   if (settings.browserPasskeyProxyEnabled) {
     if (webAuthnProxyAttached) {
@@ -1759,28 +1761,11 @@ async function sendRuntimeMessage(message: unknown) {
   try {
     const response = await nativeBridge.send(message);
     syncNativeKeepAliveFromResponse(response);
-    if (isSuccessfulVaultUnlock(message, response)) {
-      scheduleSavedSettingsReconciliation();
-    }
     return response;
   } catch (error) {
     stopNativeKeepAlive();
     throw error;
   }
-}
-
-function isSuccessfulVaultUnlock(message: unknown, response: unknown) {
-  const commandType = (
-    message as { command?: { type?: unknown } } | null
-  )?.command?.type;
-  return (
-    (commandType === "unlock_current_vault" ||
-      commandType === "unlock_current_vault_with_password" ||
-      commandType === "unlock_current_vault_with_quick_unlock" ||
-      commandType === "unlock_vault" ||
-      commandType === "unlock_with_password") &&
-    sessionStateFromResponse(response)?.unlocked === true
-  );
 }
 
 function syncNativeKeepAliveFromResponse(response: unknown) {

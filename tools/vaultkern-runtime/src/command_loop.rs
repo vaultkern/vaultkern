@@ -9,7 +9,9 @@ use crate::{Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession};
 
 pub(crate) const MAX_NATIVE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 pub(crate) const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
+#[cfg(any(windows, test))]
 const MAX_CHUNKED_NATIVE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(any(windows, test))]
 const NATIVE_RESPONSE_CHUNK_BYTES: usize = 384 * 1024;
 const MAX_NATIVE_REQUEST_ID_BYTES: usize = 256;
 
@@ -362,6 +364,7 @@ pub(crate) fn write_native_message(
     write_native_payload(writer, &payload)
 }
 
+#[cfg(any(windows, test))]
 pub(crate) fn write_chunked_native_message(
     writer: &mut impl Write,
     response: &RuntimeResponse,

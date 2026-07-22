@@ -13,9 +13,16 @@ use serde::Deserialize;
 #[cfg(test)]
 use serde_json::{Value, json};
 use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse};
+use windows::Win32::System::Com::{
+    CLSCTX_LOCAL_SERVER, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize,
+};
+use windows::Win32::UI::Shell::{
+    AO_NONE, ApplicationActivationManager, IApplicationActivationManager,
+};
+use windows::core::PCWSTR;
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
-    GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED,
+    GENERIC_READ, GENERIC_WRITE, GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -28,6 +35,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX, ReadFile,
     SECURITY_EFFECTIVE_ONLY, SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
+use windows_sys::Win32::Storage::Packaging::Appx::{PACKAGE_ID, PackageFamilyNameFromId};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId,
     GetNamedPipeServerProcessId, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
@@ -45,21 +53,22 @@ use super::{
     prepare_runtime_protocol_request, request_deadline_error, validate_configured_browser_origin,
     validate_request, validate_server_hello, write_frame,
 };
+#[cfg(test)]
+use crate::command_loop::MAX_NATIVE_RESPONSE_BYTES;
 use crate::command_loop::{
     MAX_NATIVE_REQUEST_BYTES, NativeMessage, configure_stdio_for_native_messaging,
     read_native_message_or_eof_with_limit, write_chunked_native_message, write_native_message,
 };
-#[cfg(test)]
-use crate::command_loop::{MAX_NATIVE_RESPONSE_BYTES, encode_native_response};
 
 mod peer_auth;
 
 const PIPE_PREFIX: &str = r"\\.\pipe\VaultKern.Resident.";
 const PIPE_BUFFER_BYTES: u32 = 64 * 1024;
 const PIPE_CONNECT_WAIT_MS: u32 = 5_000;
+const RESIDENT_START_WAIT: Duration = Duration::from_secs(10);
 const REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(25);
 const CLIENT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
-const CONNECTION_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(295);
+const SERVER_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct WindowsResidentIpcServer {
     shutdown: Arc<AtomicBool>,
@@ -141,11 +150,16 @@ pub fn run_windows_native_messaging_shim(
     let pipe_name = wide_nul(&format!("{PIPE_PREFIX}{}", identity.sid_string));
     let pipe = match open_client_pipe(&pipe_name) {
         Ok(pipe) => pipe,
-        Err(error) => {
-            let message = "VaultKern resident app is unavailable; start the Windows app and retry";
-            let _ = write_startup_failure("resident_unavailable", message);
-            return Err(error).context(message);
-        }
+        Err(initial_error) => match start_packaged_resident_and_connect(&pipe_name) {
+            Ok(pipe) => pipe,
+            Err(start_error) => {
+                let message = "VaultKern resident app is unavailable and could not be started";
+                let _ = write_startup_failure("resident_unavailable", message);
+                return Err(start_error).context(format!(
+                    "{message}; initial resident connection failed: {initial_error:#}"
+                ));
+            }
+        },
     };
     if let Err(error) = verify_pipe_server(&pipe, &identity.sid) {
         let message = "VaultKern could not authenticate the resident app";
@@ -167,6 +181,89 @@ pub fn run_windows_native_messaging_shim(
         .context("start native messaging input reader")?;
 
     forward_browser_messages(pipe, receiver)
+}
+
+fn start_packaged_resident_and_connect(pipe_name: &[u16]) -> Result<Pipe> {
+    activate_packaged_resident_app()?;
+    let deadline = Instant::now() + RESIDENT_START_WAIT;
+    loop {
+        match open_client_pipe(pipe_name) {
+            Ok(pipe) => return Ok(pipe),
+            Err(error) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(50));
+                drop(error);
+            }
+            Err(error) => {
+                return Err(error).context("connect to the activated VaultKern resident app");
+            }
+        }
+    }
+}
+
+fn activate_packaged_resident_app() -> Result<()> {
+    unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
+        .ok()
+        .context("initialize COM for resident app activation")?;
+    let activation = (|| -> Result<()> {
+        let app_user_model_id = wide_nul(&resident_app_user_model_id()?);
+        let arguments = wide_nul("-BrowserActivated");
+        let manager: IApplicationActivationManager =
+            unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
+                .context("create the Windows application activation manager")?;
+        unsafe {
+            manager.ActivateApplication(
+                PCWSTR(app_user_model_id.as_ptr()),
+                PCWSTR(arguments.as_ptr()),
+                AO_NONE,
+            )
+        }
+        .context("activate the packaged VaultKern resident app")?;
+        Ok(())
+    })();
+    unsafe { CoUninitialize() };
+    activation
+}
+
+fn resident_app_user_model_id() -> Result<String> {
+    let (package_name, package_publisher, application_id) =
+        peer_auth::expected_resident_activation_identity()?;
+    let mut package_name = wide_nul(package_name);
+    let mut package_publisher = wide_nul(package_publisher);
+    let package_id = PACKAGE_ID {
+        name: package_name.as_mut_ptr(),
+        publisher: package_publisher.as_mut_ptr(),
+        ..Default::default()
+    };
+    let mut family_name_length = 0_u32;
+    let required =
+        unsafe { PackageFamilyNameFromId(&package_id, &mut family_name_length, null_mut()) };
+    if required != ERROR_INSUFFICIENT_BUFFER || family_name_length == 0 {
+        return Err(std::io::Error::from_raw_os_error(required as i32))
+            .context("measure the resident package family name");
+    }
+
+    let mut family_name = vec![0_u16; family_name_length as usize];
+    let status = unsafe {
+        PackageFamilyNameFromId(
+            &package_id,
+            &mut family_name_length,
+            family_name.as_mut_ptr(),
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32))
+            .context("derive the resident package family name");
+    }
+    let family_name_end = family_name
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(family_name.len());
+    if family_name_end == 0 {
+        anyhow::bail!("derived resident package family name is empty");
+    }
+    let family_name = String::from_utf16(&family_name[..family_name_end])
+        .context("derived resident package family name is invalid UTF-16")?;
+    Ok(format!("{family_name}!{application_id}"))
 }
 
 fn write_startup_failure(code: &str, message: &str) -> Result<()> {
@@ -294,42 +391,6 @@ fn serve_connection(
             return Err(error.context("reject resident IPC handshake"));
         }
     };
-    let connection_parent_window =
-        resolve_request_parent_window(requested_parent_window, browser_process_id, expected_sid);
-    let authorization = handler(
-        ProtocolEnvelope::new(RuntimeCommand::Handshake {
-            protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
-            capabilities: vec!["runtime-core".into(), "browser-extension".into()],
-        }),
-        Arc::new(AtomicBool::new(false)),
-        connection_parent_window,
-    );
-    match authorization {
-        RuntimeResponse::Handshake(_) => {}
-        RuntimeResponse::Error(error) => {
-            let _ = send_frame(
-                &writer,
-                &ResidentIpcFrame::Error {
-                    request_id: None,
-                    code: "browser_authorization_failed".into(),
-                    message: error.message.clone(),
-                },
-            );
-            anyhow::bail!("resident browser authorization failed: {}", error.message);
-        }
-        _ => {
-            let _ = send_frame(
-                &writer,
-                &ResidentIpcFrame::Error {
-                    request_id: None,
-                    code: "browser_authorization_failed".into(),
-                    message: "resident runtime returned an invalid browser authorization response"
-                        .into(),
-                },
-            );
-            anyhow::bail!("resident runtime returned an invalid browser authorization response");
-        }
-    }
     send_frame(&writer, &ResidentIpcFrame::ServerHello(hello))?;
 
     let pending = PendingRequests::default();
@@ -561,7 +622,7 @@ fn perform_client_handshake(
         )),
     )?;
     let mut reader = PipeFrameReader::new(Arc::new(pipe.duplicate()?));
-    match read_pipe_frame_with_timeout(&mut reader, CONNECTION_AUTHORIZATION_TIMEOUT)
+    match read_pipe_frame_with_timeout(&mut reader, SERVER_HELLO_TIMEOUT)
         .context("wait for resident IPC server hello")?
     {
         ResidentIpcFrame::ServerHello(hello) => validate_server_hello(&hello),
@@ -1386,7 +1447,8 @@ mod tests {
     use super::*;
     use crate::resident_ipc::read_frame;
     use vaultkern_runtime_protocol::{
-        EntryAttachmentContentDto, HandshakeDto, PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
+        AutofillCredentialDto, AutofillPersistPlanDto, EntryFieldsDto, FillCandidateListDto,
+        HandshakeDto, PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
     };
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
@@ -1412,6 +1474,36 @@ mod tests {
             supports_biometric_unlock: true,
             source_status: None,
         })
+    }
+
+    fn test_autofill_mutation(transaction_id: &str) -> RuntimeCommand {
+        RuntimeCommand::PersistAutofillMutation {
+            transaction_id: transaction_id.into(),
+            operation_id: format!("operation-{transaction_id}"),
+            vault_id: "vault-1".into(),
+            plan: AutofillPersistPlanDto::Create {
+                parent_group_id: "root".into(),
+                planned_entry_id: format!("entry-{transaction_id}"),
+                expected_matching_entry_ids: Vec::new(),
+                desired_fields: EntryFieldsDto {
+                    title: "test".into(),
+                    username: String::new().into(),
+                    password: String::new().into(),
+                    url: "https://example.test/".into(),
+                    notes: String::new().into(),
+                    totp_uri: None,
+                    custom_fields: Vec::new(),
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn resident_activation_aumid_is_derived_without_caller_package_identity() {
+        let aumid = resident_app_user_model_id().expect("derive resident AUMID");
+
+        assert!(aumid.starts_with("VaultKern.Windows_"));
+        assert!(aumid.ends_with("!VaultKern"));
     }
 
     #[test]
@@ -1516,6 +1608,8 @@ mod tests {
         let _pipe_test = PIPE_TEST_LOCK.lock().expect("lock resident pipe test");
         let observed_cancellations = Arc::new(AtomicUsize::new(0));
         let handler_cancellations = observed_cancellations.clone();
+        let blocking_queries_started = Arc::new(AtomicUsize::new(0));
+        let handler_blocking_queries_started = blocking_queries_started.clone();
         let running_mutation_started = Arc::new(AtomicBool::new(false));
         let handler_mutation_started = running_mutation_started.clone();
         let deadline_mutation_started = Arc::new(AtomicBool::new(false));
@@ -1540,48 +1634,53 @@ mod tests {
                         })
                     }
                     RuntimeCommand::GetSessionState => locked_session_response(),
-                    RuntimeCommand::AddEntryAttachment {
-                        name,
-                        data_base64,
-                        protect_in_memory,
-                        ..
-                    } => RuntimeResponse::EntryAttachmentContent(EntryAttachmentContentDto {
-                        name,
-                        data_base64,
-                        protect_in_memory,
-                    }),
-                    RuntimeCommand::ReplaceEntryAttachmentContent { data_base64, .. } => {
-                        handler_consumed_blob_length
-                            .store(data_base64.as_str().len(), Ordering::Release);
-                        RuntimeResponse::Saved
-                    }
-                    RuntimeCommand::GetEntryAttachmentContent { name, .. }
-                        if name == "oversized" =>
+                    RuntimeCommand::GetAutofillCredential { entry_id, url, .. }
+                        if entry_id == "echo" =>
                     {
-                        RuntimeResponse::EntryAttachmentContent(EntryAttachmentContentDto {
-                            name,
-                            data_base64: "A".repeat(MAX_NATIVE_RESPONSE_BYTES).into(),
-                            protect_in_memory: true,
+                        RuntimeResponse::AutofillCredential(AutofillCredentialDto {
+                            id: entry_id,
+                            username: String::new().into(),
+                            password: url.into(),
+                            totp: None,
                         })
                     }
-                    RuntimeCommand::GetEntryDetail { entry_id, .. }
-                        if entry_id == "block-until-cancelled" =>
+                    RuntimeCommand::FindFillCandidates { url, .. }
+                        if url != "block-until-cancelled" =>
                     {
+                        handler_consumed_blob_length.store(url.len(), Ordering::Release);
+                        RuntimeResponse::FillCandidates(FillCandidateListDto {
+                            entries: Vec::new(),
+                        })
+                    }
+                    RuntimeCommand::GetAutofillCredential { entry_id, .. }
+                        if entry_id == "oversized" =>
+                    {
+                        RuntimeResponse::AutofillCredential(AutofillCredentialDto {
+                            id: entry_id,
+                            username: String::new().into(),
+                            password: "A".repeat(MAX_NATIVE_RESPONSE_BYTES).into(),
+                            totp: None,
+                        })
+                    }
+                    RuntimeCommand::FindFillCandidates { url, .. }
+                        if url == "block-until-cancelled" =>
+                    {
+                        handler_blocking_queries_started.fetch_add(1, Ordering::AcqRel);
                         while !cancelled.load(Ordering::Acquire) {
                             std::thread::sleep(Duration::from_millis(5));
                         }
                         handler_cancellations.fetch_add(1, Ordering::AcqRel);
                         RuntimeResponse::Saved
                     }
-                    RuntimeCommand::SaveVault { vault_id }
-                        if vault_id == "commit-after-dispatch" =>
+                    RuntimeCommand::PersistAutofillMutation { transaction_id, .. }
+                        if transaction_id == "commit-after-dispatch" =>
                     {
                         handler_mutation_started.store(true, Ordering::Release);
                         std::thread::sleep(Duration::from_millis(50));
                         RuntimeResponse::Saved
                     }
-                    RuntimeCommand::SaveVault { vault_id }
-                        if vault_id == "commit-after-deadline" =>
+                    RuntimeCommand::PersistAutofillMutation { transaction_id, .. }
+                        if transaction_id == "commit-after-deadline" =>
                     {
                         handler_deadline_mutation_started.store(true, Ordering::Release);
                         std::thread::sleep(Duration::from_millis(750));
@@ -1642,6 +1741,7 @@ mod tests {
                     capabilities: vec![
                         "runtime-core".into(),
                         "browser-extension".into(),
+                        "browser-autofill".into(),
                         "database-settings".into(),
                         "one-drive".into(),
                         "passkey-ceremonies".into(),
@@ -1663,8 +1763,8 @@ mod tests {
         }
         assert_eq!(
             connection_authorizations.load(Ordering::Acquire),
-            1,
-            "the authenticated connection must perform one Hello authorization; the protocol handshake must only negotiate capabilities"
+            0,
+            "transport authentication and the fixed extension identity must be sufficient; reconnecting must not prompt for Hello"
         );
 
         write_frame(
@@ -1693,12 +1793,10 @@ mod tests {
             &request_frame(
                 "native-large-1",
                 5_000,
-                RuntimeCommand::AddEntryAttachment {
+                RuntimeCommand::GetAutofillCredential {
                     vault_id: "vault-1".into(),
-                    entry_id: "entry-1".into(),
-                    name: "large.bin".into(),
-                    data_base64: large_blob.clone().into(),
-                    protect_in_memory: true,
+                    entry_id: "echo".into(),
+                    url: large_blob.clone(),
                 },
             ),
         )
@@ -1712,10 +1810,16 @@ mod tests {
                 message,
             } => {
                 assert_eq!(request_id, "native-large-1");
-                let RuntimeResponse::EntryAttachmentContent(content) = message else {
-                    panic!("expected attachment echo response");
+                let RuntimeResponse::AutofillCredential(credential) = message else {
+                    if let RuntimeResponse::Error(error) = message {
+                        panic!(
+                            "expected autofill echo response, got {}: {}",
+                            error.code, error.message
+                        );
+                    }
+                    panic!("expected autofill echo response");
                 };
-                assert_eq!(content.data_base64.as_str().len(), large_blob.len());
+                assert_eq!(credential.password.as_str().len(), large_blob.len());
             }
             _ => panic!("expected correlated large response"),
         }
@@ -1727,11 +1831,9 @@ mod tests {
             &request_frame(
                 "native-multi-buffer-1",
                 5_000,
-                RuntimeCommand::ReplaceEntryAttachmentContent {
+                RuntimeCommand::FindFillCandidates {
                     vault_id: "vault-1".into(),
-                    entry_id: "entry-1".into(),
-                    name: "multi-buffer.bin".into(),
-                    data_base64: multi_buffer_blob.into(),
+                    url: multi_buffer_blob,
                 },
             ),
         )
@@ -1745,7 +1847,7 @@ mod tests {
                 message,
             } => {
                 assert_eq!(request_id, "native-multi-buffer-1");
-                assert!(matches!(message, RuntimeResponse::Saved));
+                assert!(matches!(message, RuntimeResponse::FillCandidates(_)));
             }
             _ => panic!("expected correlated multi-buffer response"),
         }
@@ -1763,10 +1865,10 @@ mod tests {
             &request_frame(
                 "native-oversized-response-1",
                 5_000,
-                RuntimeCommand::GetEntryAttachmentContent {
+                RuntimeCommand::GetAutofillCredential {
                     vault_id: "vault-1".into(),
-                    entry_id: "entry-1".into(),
-                    name: "oversized".into(),
+                    entry_id: "oversized".into(),
+                    url: "https://example.test/".into(),
                 },
             ),
         )
@@ -1777,14 +1879,13 @@ mod tests {
         {
             ResidentIpcFrame::Response {
                 request_id,
-                message:
-                    RuntimeResponse::EntryAttachmentContent(EntryAttachmentContentDto {
-                        data_base64,
-                        ..
-                    }),
+                message: RuntimeResponse::AutofillCredential(credential),
             } => {
                 assert_eq!(request_id, "native-oversized-response-1");
-                assert_eq!(data_base64.as_str().len(), MAX_NATIVE_RESPONSE_BYTES);
+                assert_eq!(
+                    credential.password.as_str().len(),
+                    MAX_NATIVE_RESPONSE_BYTES
+                );
             }
             _ => panic!("expected resident pipe to preserve the large response for shim chunking"),
         }
@@ -1794,13 +1895,18 @@ mod tests {
             &request_frame(
                 "native-cancel-1",
                 5_000,
-                RuntimeCommand::GetEntryDetail {
+                RuntimeCommand::FindFillCandidates {
                     vault_id: "vault-1".into(),
-                    entry_id: "block-until-cancelled".into(),
+                    url: "block-until-cancelled".into(),
                 },
             ),
         )
         .expect("send cancellable resident IPC request");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while blocking_queries_started.load(Ordering::Acquire) < 1 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(blocking_queries_started.load(Ordering::Acquire), 1);
         write_frame(
             &mut writer,
             &ResidentIpcFrame::Cancel {
@@ -1808,22 +1914,26 @@ mod tests {
             },
         )
         .expect("cancel resident IPC request");
-        assert_request_error(
-            read_frame(&mut reader)
-                .expect("read cancellation response")
-                .expect("cancellation response before EOF"),
-            "native-cancel-1",
-            "request_cancelled",
-        );
+        match read_frame(&mut reader)
+            .expect("read cancellation response")
+            .expect("cancellation response before EOF")
+        {
+            ResidentIpcFrame::Response {
+                request_id,
+                message,
+            } => {
+                assert_eq!(request_id, "native-cancel-1");
+                assert!(matches!(message, RuntimeResponse::Saved));
+            }
+            _ => panic!("expected the running query to observe cancellation"),
+        }
 
         write_frame(
             &mut writer,
             &request_frame(
                 "native-running-cancel-1",
                 5_000,
-                RuntimeCommand::SaveVault {
-                    vault_id: "commit-after-dispatch".into(),
-                },
+                test_autofill_mutation("commit-after-dispatch"),
             ),
         )
         .expect("send running mutation request");
@@ -1858,9 +1968,7 @@ mod tests {
             &request_frame(
                 "native-running-timeout-1",
                 250,
-                RuntimeCommand::SaveVault {
-                    vault_id: "commit-after-deadline".into(),
-                },
+                test_autofill_mutation("commit-after-deadline"),
             ),
         )
         .expect("send mutation that outlives its response deadline");
@@ -1889,20 +1997,25 @@ mod tests {
             &mut writer,
             &request_frame(
                 "native-timeout-1",
-                50,
-                RuntimeCommand::GetEntryDetail {
+                500,
+                RuntimeCommand::FindFillCandidates {
                     vault_id: "vault-1".into(),
-                    entry_id: "block-until-cancelled".into(),
+                    url: "block-until-cancelled".into(),
                 },
             ),
         )
         .expect("send timing out resident IPC request");
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while blocking_queries_started.load(Ordering::Acquire) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(blocking_queries_started.load(Ordering::Acquire), 2);
         assert_request_error(
             read_frame(&mut reader)
                 .expect("read timeout response")
                 .expect("timeout response before EOF"),
             "native-timeout-1",
-            "request_timeout",
+            "request_outcome_unknown",
         );
 
         let deadline = Instant::now() + Duration::from_secs(2);

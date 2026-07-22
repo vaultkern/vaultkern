@@ -13,8 +13,8 @@ use vaultkern_runtime::{
     QuickUnlockReconciliationCredentials, Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession,
 };
 use vaultkern_runtime_protocol::{
-    ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
-    SessionStateDto,
+    BrowserIntegrationSettingsDto, ErrorDto, ProtocolEnvelope, ResidentAppRouteDto, RuntimeCommand,
+    RuntimeResponse, SaveVaultStatusDto, SessionStateDto,
 };
 use zeroize::Zeroizing;
 
@@ -23,6 +23,9 @@ pub struct RuntimeBridge {
     requests: Sender<RuntimeRequest>,
     reconciliation_notifier: Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
     session_state_notifier: Arc<Mutex<Option<Sender<SessionStateDto>>>>,
+    resident_activation_notifier: Arc<Mutex<Option<Sender<ResidentAppRouteDto>>>>,
+    pending_resident_route: Arc<Mutex<Option<ResidentAppRouteDto>>>,
+    browser_integration_settings: Arc<Mutex<BrowserIntegrationSettingsDto>>,
     desktop_protocol_session: Arc<Mutex<RuntimeProtocolSession>>,
 }
 
@@ -400,6 +403,7 @@ impl RuntimeBridge {
         let (requests, receiver) = mpsc::channel::<RuntimeRequest>();
         let reconciliation_notifier = Arc::new(Mutex::new(None));
         let session_state_notifier = Arc::new(Mutex::new(None));
+        let resident_activation_notifier = Arc::new(Mutex::new(None));
         let worker_reconciliation_notifier = Arc::clone(&reconciliation_notifier);
         let worker_session_state_notifier = Arc::clone(&session_state_notifier);
         std::thread::Builder::new()
@@ -882,6 +886,13 @@ impl RuntimeBridge {
             requests,
             reconciliation_notifier,
             session_state_notifier,
+            resident_activation_notifier,
+            pending_resident_route: Arc::new(Mutex::new(None)),
+            browser_integration_settings: Arc::new(Mutex::new(BrowserIntegrationSettingsDto {
+                language: "en".into(),
+                autofill_on_page_load_enabled: false,
+                browser_passkey_proxy_enabled: false,
+            })),
             desktop_protocol_session: Arc::new(Mutex::new(RuntimeProtocolSession::resident_app())),
         }
     }
@@ -904,7 +915,59 @@ impl RuntimeBridge {
         if cancelled.load(Ordering::Acquire) {
             return cancelled_response();
         }
+        if envelope.version == vaultkern_runtime_protocol::PROTOCOL_VERSION
+            && browser_passkey_proxy_must_be_enabled(&envelope.command)
+            && !self
+                .browser_integration_settings
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .browser_passkey_proxy_enabled
+        {
+            return error_response(
+                "browser_passkey_proxy_disabled",
+                "browser passkey handling is disabled in resident settings",
+            );
+        }
+        if envelope.version == vaultkern_runtime_protocol::PROTOCOL_VERSION
+            && let RuntimeCommand::ActivateResidentApp { route } = &envelope.command
+        {
+            return self.activate_resident_app(*route);
+        }
+        if envelope.version == vaultkern_runtime_protocol::PROTOCOL_VERSION
+            && matches!(
+                &envelope.command,
+                RuntimeCommand::GetBrowserIntegrationSettings
+            )
+        {
+            return RuntimeResponse::BrowserIntegrationSettings(
+                self.browser_integration_settings
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .clone(),
+            );
+        }
         self.request_protocol(envelope, cancelled, true, parent_window)
+    }
+
+    fn activate_resident_app(&self, route: ResidentAppRouteDto) -> RuntimeResponse {
+        let notifier = self
+            .resident_activation_notifier
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        let Some(notifier) = notifier else {
+            return error_response(
+                "runtime_unavailable",
+                "the resident app activation channel is unavailable",
+            );
+        };
+        if notifier.send(route).is_err() {
+            return error_response(
+                "runtime_unavailable",
+                "the resident app activation channel stopped responding",
+            );
+        }
+        RuntimeResponse::ResidentAppActivated
     }
 
     fn request_value(
@@ -1242,6 +1305,58 @@ impl RuntimeBridge {
         Ok(())
     }
 
+    pub fn set_resident_activation_notifier(
+        &self,
+        notifier: Sender<ResidentAppRouteDto>,
+    ) -> Result<(), String> {
+        let mut slot = self
+            .resident_activation_notifier
+            .lock()
+            .map_err(|_| "resident activation notifier is unavailable".to_owned())?;
+        *slot = Some(notifier);
+        Ok(())
+    }
+
+    pub fn queue_pending_resident_route(&self, route: ResidentAppRouteDto) {
+        *self
+            .pending_resident_route
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some(route);
+    }
+
+    pub fn take_pending_resident_route(&self) -> Option<ResidentAppRouteDto> {
+        self.pending_resident_route
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+    }
+
+    pub fn set_browser_integration_settings(&self, settings: &Value) {
+        let windows_provider_enabled = settings
+            .get("windowsPasskeyProviderEnabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        *self
+            .browser_integration_settings
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = BrowserIntegrationSettingsDto {
+            language: if settings.get("language").and_then(Value::as_str) == Some("zh-CN") {
+                "zh-CN".into()
+            } else {
+                "en".into()
+            },
+            autofill_on_page_load_enabled: settings
+                .get("autofillOnPageLoadEnabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            browser_passkey_proxy_enabled: !windows_provider_enabled
+                && settings
+                    .get("browserPasskeyProxyEnabled")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+        };
+    }
+
     pub fn schedule_reconciliation(&self) {
         self.notify_reconciliation();
     }
@@ -1294,6 +1409,26 @@ impl RuntimeBridge {
             "settings reconciliation stopped before acknowledging credentials".to_owned()
         })?
     }
+}
+
+fn browser_passkey_proxy_must_be_enabled(command: &RuntimeCommand) -> bool {
+    // Query/reconcile/unknown-delivery/abort commands remain available so a
+    // disabled proxy can clean up an interrupted ceremony without progressing it.
+    matches!(
+        command,
+        RuntimeCommand::GetPasskeyUserVerificationCapability
+            | RuntimeCommand::VerifyPasskeyUser { .. }
+            | RuntimeCommand::ListPasskeyCredentials { .. }
+            | RuntimeCommand::RegisterPasskeyCeremony { .. }
+            | RuntimeCommand::AdvancePasskeyCeremonyPhase { .. }
+            | RuntimeCommand::BindPasskeyCeremonyVault { .. }
+            | RuntimeCommand::CreatePasskeyAssertion { .. }
+            | RuntimeCommand::CreatePasskeyRegistration { .. }
+            | RuntimeCommand::SavePasskeyRegistration { .. }
+            | RuntimeCommand::CommitPasskeyRegistration { .. }
+            | RuntimeCommand::PasskeyCredentialStatus { .. }
+            | RuntimeCommand::PasskeyCredentialStatusBatch { .. }
+    )
 }
 
 fn publish_session_state(
@@ -1531,8 +1666,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use vaultkern_runtime_protocol::{
-        ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto,
-        VaultSourceStatusDto,
+        ProtocolEnvelope, ResidentAppRouteDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+        SaveVaultStatusDto, VaultSourceStatusDto,
     };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
@@ -1652,6 +1787,134 @@ mod tests {
                 .message
                 .contains("fresh browser request verification failed")
         );
+    }
+
+    #[test]
+    fn browser_activation_is_forwarded_to_the_resident_window_without_runtime_dispatch() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let (notifier, notifications) = mpsc::channel();
+        bridge
+            .set_resident_activation_notifier(notifier)
+            .expect("install resident activation notifier");
+
+        let response = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::ActivateResidentApp {
+                route: ResidentAppRouteDto::Settings,
+            }),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+
+        assert!(matches!(response, RuntimeResponse::ResidentAppActivated));
+        assert_eq!(
+            notifications
+                .recv_timeout(Duration::from_secs(1))
+                .expect("resident route notification"),
+            ResidentAppRouteDto::Settings
+        );
+    }
+
+    #[test]
+    fn resident_activation_route_waits_for_the_webview_to_take_it() {
+        let bridge = RuntimeBridge::new_for_tests();
+
+        bridge.queue_pending_resident_route(ResidentAppRouteDto::Settings);
+        bridge.queue_pending_resident_route(ResidentAppRouteDto::Vaults);
+
+        assert_eq!(
+            bridge.take_pending_resident_route(),
+            Some(ResidentAppRouteDto::Vaults)
+        );
+        assert_eq!(bridge.take_pending_resident_route(), None);
+    }
+
+    #[test]
+    fn browser_integration_settings_are_read_from_resident_desired_state() {
+        let bridge = RuntimeBridge::new_for_tests();
+        bridge.set_browser_integration_settings(&json!({
+            "language": "zh-CN",
+            "autofillOnPageLoadEnabled": true,
+            "browserPasskeyProxyEnabled": true
+        }));
+
+        let response = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::GetBrowserIntegrationSettings),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+
+        let RuntimeResponse::BrowserIntegrationSettings(settings) = response else {
+            panic!("expected browser integration settings");
+        };
+        let serialized = serde_json::to_value(&settings).expect("serialize browser settings");
+        assert!(serialized.get("clearClipboardSeconds").is_none());
+        assert_eq!(settings.language, "zh-CN");
+        assert!(settings.autofill_on_page_load_enabled);
+        assert!(settings.browser_passkey_proxy_enabled);
+    }
+
+    #[test]
+    fn resident_policy_rejects_browser_passkey_work_while_proxy_is_disabled() {
+        let bridge = RuntimeBridge::new_for_tests();
+
+        let disabled = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        let RuntimeResponse::Error(error) = disabled else {
+            panic!("expected disabled browser passkey proxy error");
+        };
+        assert_eq!(error.code, "browser_passkey_proxy_disabled");
+
+        let assertion = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::CreatePasskeyAssertion {
+                ceremony_token: "ceremony".into(),
+                expected_phase:
+                    vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::CompletionAndMutation,
+                vault_id: "vault".into(),
+                relying_party: "example.com".into(),
+                origin: "https://example.com".into(),
+                credential_id: None,
+                discoverable: true,
+                user_presence_verified: true,
+                related_origin_verified: false,
+                client_data_json_base64url: "client-data".into(),
+            }),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        let RuntimeResponse::Error(error) = assertion else {
+            panic!("expected disabled browser assertion rejection");
+        };
+        assert_eq!(error.code, "browser_passkey_proxy_disabled");
+
+        bridge.set_browser_integration_settings(&json!({
+            "browserPasskeyProxyEnabled": true
+        }));
+        let enabled = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        assert!(matches!(
+            enabled,
+            RuntimeResponse::PasskeyUserVerificationCapability(_)
+        ));
+
+        bridge.set_browser_integration_settings(&json!({
+            "windowsPasskeyProviderEnabled": true,
+            "browserPasskeyProxyEnabled": true
+        }));
+        let system_provider_selected = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::GetPasskeyUserVerificationCapability),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        let RuntimeResponse::Error(error) = system_provider_selected else {
+            panic!("expected system-provider browser proxy rejection");
+        };
+        assert_eq!(error.code, "browser_passkey_proxy_disabled");
     }
 
     #[test]

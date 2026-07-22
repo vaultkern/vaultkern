@@ -15,10 +15,8 @@ const ENTRY_ID = "00000000-0000-4000-8000-000000000501";
 const RUNTIME_CAPABILITIES = [
   "runtime-core",
   "browser-extension",
-  "database-settings",
-  "one-drive",
-  "passkey-ceremonies",
-  "quick-unlock"
+  "browser-autofill",
+  "passkey-ceremonies"
 ];
 
 function fields(password = "new-secret") {
@@ -101,6 +99,21 @@ function nativePort() {
         const requestId = (message as { requestId?: string }).requestId;
         queueMicrotask(() =>
           emit({ type: "vault_reference_list", vaults: [] }, requestId)
+        );
+      }
+      if (command?.type === "get_browser_integration_settings") {
+        const requestId = (message as { requestId?: string }).requestId;
+        queueMicrotask(() =>
+          emit(
+            {
+              type: "browser_integration_settings",
+              language: "en",
+              clearClipboardSeconds: 30,
+              autofillOnPageLoadEnabled: false,
+              browserPasskeyProxyEnabled: false
+            },
+            requestId
+          )
         );
       }
     }),
@@ -291,7 +304,7 @@ describe("background atomic pending autofill V2", () => {
     expect(commandCalls(port, "get_session_state")).toHaveLength(0);
   });
 
-  it("allows generic native commands from an extension page hosted in a tab", async () => {
+  it("allows generic native commands from the popup extension page", async () => {
     const { listeners, port } = await setup();
     const request = send(
       listeners,
@@ -299,14 +312,7 @@ describe("background atomic pending autofill V2", () => {
         version: 1,
         command: { type: "get_session_state" }
       },
-      {
-        id: EXTENSION_ID,
-        url: `chrome-extension://${EXTENSION_ID}/manager.html`,
-        tab: {
-          id: 11,
-          url: `chrome-extension://${EXTENSION_ID}/manager.html`
-        }
-      }
+      trustedSender()
     );
     await vi.waitFor(() =>
       expect(commandCalls(port, "get_session_state")).toHaveLength(1)
