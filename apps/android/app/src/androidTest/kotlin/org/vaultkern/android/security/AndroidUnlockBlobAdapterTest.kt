@@ -3,6 +3,7 @@ package org.vaultkern.android.security
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
+import androidx.biometric.BiometricManager
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import java.security.Key
@@ -20,6 +21,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Assume.assumeTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.vaultkern.core.PlatformAdapterException
@@ -210,6 +212,13 @@ class AndroidUnlockBlobAdapterTest {
     @Test
     fun productKeystoreKeyIsPerUseBiometricInvalidatedAndRecordsActualSecurity() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val biometricStatus = BiometricManager.from(context).canAuthenticate(
+            BiometricManager.Authenticators.BIOMETRIC_STRONG,
+        )
+        assumeTrue(
+            "requires an enrolled BIOMETRIC_STRONG authenticator",
+            biometricStatus == BiometricManager.BIOMETRIC_SUCCESS,
+        )
         val backend = AndroidKeystoreUnlockCipherBackend(context)
         val prepared = backend.prepareEncryption()
 
