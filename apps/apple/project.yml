@@ -23,6 +23,7 @@ targets:
       - path: ../../crates/vaultkern-uniffi/bindings/swift/SensitiveTypes.swift
       - path: ../../crates/vaultkern-uniffi/bindings/swift/VaultKernCore.swift
       - path: ../../crates/vaultkern-uniffi/bindings/swift/MacOSUnlockBlobAdapter.swift
+      - path: ../../crates/vaultkern-uniffi/bindings/swift/MacOSOneDriveTokenAdapter.swift
     preBuildScripts:
       - name: Build Rust UniFFI library
         script: "$SRCROOT/Scripts/build-rust.zsh"
@@ -55,6 +56,8 @@ targets:
       properties:
         com.apple.security.app-sandbox: true
         com.apple.security.files.user-selected.read-write: true
+        com.apple.security.network.client: true
+        com.apple.security.network.server: true
         keychain-access-groups:
           - "$(AppIdentifierPrefix)com.vaultkern.shared"
   VaultKernTests:

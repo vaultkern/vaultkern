@@ -1,9 +1,11 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
   @ObservedObject var model: VaultAppModel
   @State private var presentsVaultImporter = false
+  @State private var presentsOneDrive = false
 
   private let kdbxType = UTType(filenameExtension: "kdbx") ?? .data
 
@@ -28,8 +30,14 @@ struct ContentView: View {
       Task { await model.openVault(url) }
     }
     .onReceive(NotificationCenter.default.publisher(for: .openVaultPicker)) { _ in
-      guard model.canChangeVault, model.currentVault == nil else { return }
+      guard model.canChangeVault, !model.hasSelectedVault else { return }
       presentsVaultImporter = true
+    }
+    .sheet(
+      isPresented: $presentsOneDrive,
+      onDismiss: model.resetOneDriveBrowser
+    ) {
+      OneDriveSourceView(model: model, isPresented: $presentsOneDrive)
     }
     .alert(
       "VaultKern",
@@ -78,10 +86,26 @@ struct ContentView: View {
 
   private var sidebar: some View {
     List(selection: selectedEntryBinding) {
-      if let vault = model.currentVault {
+      if let vaultName = model.selectedVaultName {
         Section("Vault") {
-          Label(vault.name, systemImage: model.isUnlocked ? "lock.open" : "lock")
-            .lineLimit(2)
+          Label(
+            vaultName,
+            systemImage: model.isRemoteVault
+              ? "externaldrive.badge.icloud"
+              : (model.isUnlocked ? "lock.open" : "lock")
+          )
+          .lineLimit(2)
+        }
+      }
+
+      if model.isRemoteVault, let status = model.sourceStatus {
+        Section("OneDrive") {
+          Label(status.remoteState.capitalized, systemImage: "arrow.triangle.2.circlepath")
+          if let error = status.lastError {
+            Label(error, systemImage: "exclamationmark.triangle")
+              .foregroundStyle(.red)
+              .lineLimit(2)
+          }
         }
       }
 
@@ -118,7 +142,7 @@ struct ContentView: View {
 
   @ViewBuilder
   private var detail: some View {
-    if model.currentVault == nil {
+    if !model.hasSelectedVault {
       ContentUnavailableView {
         Label("Open a KDBX vault", systemImage: "folder.badge.plus")
       } actions: {
@@ -144,13 +168,20 @@ struct ContentView: View {
   @ToolbarContentBuilder
   private var toolbar: some ToolbarContent {
     ToolbarItemGroup(placement: .primaryAction) {
-      if model.currentVault == nil {
+      if !model.hasSelectedVault {
         Button {
           presentsVaultImporter = true
         } label: {
           Label("Open Vault", systemImage: "folder")
         }
         .help("Open Vault")
+        .disabled(!model.canChangeVault)
+        Button {
+          presentsOneDrive = true
+        } label: {
+          Label("OneDrive", systemImage: "externaldrive.badge.icloud")
+        }
+        .help("Open from OneDrive")
         .disabled(!model.canChangeVault)
       } else {
         if model.isUnlocked {
@@ -161,6 +192,15 @@ struct ContentView: View {
           }
           .help("Refresh Entries")
           .disabled(!model.canChangeVault)
+          if model.isRemoteVault {
+            Button {
+              Task { await model.syncCurrentVault() }
+            } label: {
+              Label("Sync", systemImage: "arrow.triangle.2.circlepath")
+            }
+            .help("Sync OneDrive Vault")
+            .disabled(!model.canChangeVault)
+          }
           Button {
             Task { await model.lockVault() }
           } label: {
@@ -169,13 +209,15 @@ struct ContentView: View {
           .help("Lock Vault")
           .disabled(!model.canChangeVault)
         }
-        Button {
-          Task { await model.closeVault() }
-        } label: {
-          Label("Close", systemImage: "xmark.circle")
+        if !model.isRemoteVault {
+          Button {
+            Task { await model.closeVault() }
+          } label: {
+            Label("Close", systemImage: "xmark.circle")
+          }
+          .help("Close Vault")
+          .disabled(!model.canChangeVault)
         }
-        .help("Close Vault")
-        .disabled(!model.canChangeVault)
       }
     }
   }
@@ -457,5 +499,158 @@ private struct QuickUnlockEnrollmentView: View {
       password.removeAll(keepingCapacity: false)
       keyFileURL = nil
     }
+  }
+}
+
+private struct OneDriveSourceView: View {
+  @ObservedObject var model: VaultAppModel
+  @Binding var isPresented: Bool
+
+  var body: some View {
+    NavigationStack {
+      Group {
+        switch model.oneDriveBrowserState {
+        case .idle, .checking:
+          ProgressView()
+            .controlSize(.large)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .needsAuthorization:
+          ContentUnavailableView {
+            Label("Connect OneDrive", systemImage: "person.crop.circle.badge.plus")
+          } actions: {
+            Button("Connect", systemImage: "arrow.up.right.square", action: connect)
+              .buttonStyle(.borderedProminent)
+          }
+        case .authorizing:
+          ProgressView("Waiting for OneDrive")
+            .controlSize(.large)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case .awaitingCallback:
+          ContentUnavailableView {
+            Label("OneDrive sign-in", systemImage: "person.crop.circle.badge.clock")
+          } actions: {
+            Button("Open Sign-In", systemImage: "arrow.up.right.square") {
+              openAuthorizationPage()
+            }
+            Button("Finish", systemImage: "checkmark") {
+              Task { await model.completeOneDriveLogin() }
+            }
+            .buttonStyle(.borderedProminent)
+          }
+        case .browsing(let accountLabel):
+          browser(accountLabel: accountLabel)
+        case .failed(let message):
+          ContentUnavailableView {
+            Label("OneDrive unavailable", systemImage: "exclamationmark.icloud")
+          } description: {
+            Text(message)
+          } actions: {
+            Button("Reconnect", systemImage: "arrow.clockwise", action: connect)
+          }
+        }
+      }
+      .navigationTitle(model.oneDriveFolders.last?.name ?? "OneDrive")
+      .toolbar {
+        ToolbarItem(placement: .cancellationAction) {
+          Button {
+            isPresented = false
+          } label: {
+            Image(systemName: "xmark")
+          }
+          .help("Close")
+          .disabled(locksAuthorizationPresentation)
+        }
+        if model.oneDriveFolders.count > 1,
+          case .browsing = model.oneDriveBrowserState
+        {
+          ToolbarItem(placement: .navigation) {
+            Button {
+              Task { await model.leaveOneDriveFolder() }
+            } label: {
+              Image(systemName: "chevron.left")
+            }
+            .help("Parent Folder")
+            .disabled(model.isBusy)
+          }
+        }
+      }
+    }
+    .frame(minWidth: 620, minHeight: 480)
+    .interactiveDismissDisabled(locksAuthorizationPresentation)
+    .task {
+      guard model.oneDriveBrowserState == .idle else { return }
+      await model.prepareOneDriveBrowser()
+    }
+  }
+
+  @ViewBuilder
+  private func browser(accountLabel: String?) -> some View {
+    if model.oneDriveItems.isEmpty {
+      ContentUnavailableView(
+        "No KDBX vaults",
+        systemImage: "externaldrive.badge.xmark",
+        description: accountLabel.map(Text.init)
+      )
+    } else {
+      List(model.oneDriveItems, id: \.itemId) { item in
+        Button {
+          if item.folder {
+            Task { await model.enterOneDriveFolder(item) }
+          } else {
+            Task {
+              if await model.selectOneDriveVault(item) {
+                isPresented = false
+              }
+            }
+          }
+        } label: {
+          HStack(spacing: 12) {
+            Image(systemName: item.folder ? "folder" : "lock.doc")
+              .foregroundStyle(item.folder ? .blue : .primary)
+              .frame(width: 20)
+            Text(item.name)
+              .lineLimit(1)
+            Spacer()
+            if let size = item.size, !item.folder {
+              Text(ByteCountFormatter.string(fromByteCount: Int64(size), countStyle: .file))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+            }
+            if item.folder {
+              Image(systemName: "chevron.right")
+                .foregroundStyle(.tertiary)
+            }
+          }
+          .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(model.isBusy)
+      }
+    }
+  }
+
+  private func connect() {
+    Task {
+      guard let url = await model.beginOneDriveLogin() else { return }
+      if NSWorkspace.shared.open(url) {
+        model.oneDriveAuthorizationBrowserDidOpen()
+      } else {
+        model.oneDriveAuthorizationBrowserDidNotOpen()
+      }
+    }
+  }
+
+  private func openAuthorizationPage() {
+    guard let url = model.oneDriveAuthorizationURL else { return }
+    if NSWorkspace.shared.open(url) {
+      model.oneDriveAuthorizationBrowserDidOpen()
+    } else {
+      model.oneDriveAuthorizationBrowserDidNotOpen()
+    }
+  }
+
+  private var locksAuthorizationPresentation: Bool {
+    model.oneDriveBrowserState == .authorizing
+      || model.oneDriveBrowserState == .awaitingCallback
   }
 }
