@@ -15,7 +15,6 @@ const unsupportedClient = {
   },
   addLocalVaultReference: unsupported,
   beginOneDriveLogin: unsupported,
-  completeOneDriveLogin: unsupported,
   completePendingOneDriveLogin: unsupported,
   async listOneDriveChildren() {
     return [];
@@ -35,6 +34,9 @@ const unsupportedClient = {
     };
   },
   async deleteRecentVault() {
+    return [];
+  },
+  async deleteRecentVaultIfNotCurrent() {
     return [];
   },
   openLocalVault: unsupported,

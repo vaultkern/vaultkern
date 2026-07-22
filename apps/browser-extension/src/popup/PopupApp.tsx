@@ -12,7 +12,7 @@ import type {
 import {
   DEFAULT_EXTENSION_SETTINGS,
   I18nProvider,
-  normalizeExtensionSettings,
+  normalizeBrowserExtensionSettings,
   translate
 } from "@vaultkern/shared-web-ui";
 import type { ExtensionSettingsStore } from "@vaultkern/shared-web-ui";
@@ -463,75 +463,10 @@ export function PopupApp({
   async function loadExtensionSettingsForPopup() {
     const loadedSettings =
       (await extensionSettingsStore?.load()) ?? DEFAULT_EXTENSION_SETTINGS;
-    const normalizedSettings = normalizeExtensionSettings(loadedSettings);
+    const normalizedSettings = normalizeBrowserExtensionSettings(loadedSettings);
     extensionSettingsRef.current = normalizedSettings;
     setExtensionSettings(normalizedSettings);
     return normalizedSettings;
-  }
-
-  async function enableQuickUnlockAfterPasswordUnlock(
-    unlockedSession: SessionStateLike,
-    credentials: UnlockCredentials,
-    settingsForUnlock = extensionSettingsRef.current
-  ) {
-    if (!settingsForUnlock.quickUnlockEnabled) {
-      return unlockedSession;
-    }
-
-    if (unlockedSession.supportsBiometricUnlock !== true) {
-      return unlockedSession;
-    }
-
-    let currentVault =
-      recentVaults.find(
-        (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
-      ) ??
-      recentVaults.find((vault) => vault.isCurrent) ??
-      null;
-
-    if (!currentVault && unlockedSession.currentVaultRefId) {
-      try {
-        const vaults = limitRecentVaults(
-          await client.listRecentVaults(),
-          settingsForUnlock.recentVaultLimit
-        );
-        setRecentVaults(vaults);
-        setRecentVaultsError(null);
-        currentVault =
-          vaults.find(
-            (vault) => vault.vaultRefId === unlockedSession.currentVaultRefId
-          ) ??
-          vaults.find((vault) => vault.isCurrent) ??
-          null;
-      } catch {
-        return unlockedSession;
-      }
-    }
-
-    if (currentVault?.supportsQuickUnlock) {
-      return unlockedSession;
-    }
-
-    if (!currentVault && !unlockedSession.currentVaultRefId) {
-      return unlockedSession;
-    }
-
-    try {
-      const nextSession = await client.enableQuickUnlockForCurrentVault(credentials);
-      const vaults = await client.listRecentVaults();
-      setRecentVaults(limitRecentVaults(vaults, settingsForUnlock.recentVaultLimit));
-      setRecentVaultsError(null);
-      return nextSession;
-    } catch (quickUnlockFailure) {
-      setUnlockError(
-        popupErrorMessage(
-          quickUnlockFailure,
-          translate(settingsForUnlock.language, "Failed to update quick unlock")
-        )
-      );
-      setUnlockErrorCause(quickUnlockFailure);
-      return unlockedSession;
-    }
   }
 
   function notifyWebAuthnUnlockCompleteOnce(
@@ -1045,26 +980,11 @@ export function PopupApp({
       if (preload) {
         await preload;
       }
-      const settingsForUnlock = await loadExtensionSettingsForPopup();
       const unlockPassword = password;
-      const unlockKeyFilePath = keyFilePath;
-      const unlockedSession = await client.unlockCurrentVault({
+      const nextSession = await client.unlockCurrentVault({
         password,
         keyFilePath
       });
-      const shouldEnableQuickUnlock =
-        unlockPassword !== "" || unlockKeyFilePath !== "";
-      const nextSession =
-        shouldEnableQuickUnlock
-          ? await enableQuickUnlockAfterPasswordUnlock(
-              unlockedSession,
-              {
-                password: unlockPassword,
-                keyFilePath: unlockKeyFilePath
-              },
-              settingsForUnlock
-            )
-          : unlockedSession;
       setSession(nextSession);
       setPassword("");
       setKeyFilePath("");

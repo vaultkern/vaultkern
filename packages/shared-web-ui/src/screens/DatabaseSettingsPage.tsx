@@ -34,7 +34,6 @@ export function DatabaseSettingsPage({
   settings,
   loading,
   saving,
-  pendingSave,
   error,
   onSave,
   onDraftChange
@@ -42,7 +41,6 @@ export function DatabaseSettingsPage({
   settings: DatabaseSettings | null;
   loading: boolean;
   saving: boolean;
-  pendingSave?: boolean;
   error: string | null;
   onSave: (update: DatabaseSettingsUpdate) => void;
   onDraftChange?: (update: DatabaseSettingsUpdate | null, dirty: boolean) => void;
@@ -53,14 +51,10 @@ export function DatabaseSettingsPage({
 
   useEffect(() => {
     if (settings) {
-      setDraft((current) =>
-        pendingSave
-          ? createDraft(settings)
-          : rebaseDraft(draftBaseline.current, current, settings)
-      );
+      setDraft((current) => rebaseDraft(draftBaseline.current, current, settings));
       draftBaseline.current = settings;
     }
-  }, [pendingSave, settings]);
+  }, [settings]);
 
   useLayoutEffect(() => {
     onDraftChange?.(
@@ -101,16 +95,12 @@ export function DatabaseSettingsPage({
           <h1 style={pageTitleStyle}>{settings.metadata.name}</h1>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving
-            ? text("Saving...")
-            : pendingSave
-              ? text("Retry save")
-              : text("Save settings")}
+          {saving ? text("Saving...") : text("Save settings")}
         </button>
       </div>
       {error ? <div role="alert">{error}</div> : null}
 
-      <fieldset disabled={saving || pendingSave} style={settingsFieldsetStyle}>
+      <fieldset disabled={saving} style={settingsFieldsetStyle}>
       <section style={sectionStyle}>
         <h2 style={sectionTitleStyle}>{text("Database Metadata")}</h2>
         <Field label={text("Database Name")}>
@@ -319,7 +309,10 @@ function createDraft(settings: DatabaseSettings | null): Draft {
 
 function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSettingsUpdate {
   const kdf: DatabaseKdfSettings = settings.encryption.kdf;
-  const autosaveDelaySeconds = parseOptionalInteger(draft.autosaveDelaySeconds);
+  const autosaveDelaySeconds = optionalIntegerFieldUpdate(
+    settings.autosaveDelaySeconds,
+    draft.autosaveDelaySeconds
+  );
   const encryption: DatabaseEncryptionSettings = {
     compression: draft.compression,
     cipher: draft.cipher,
@@ -345,8 +338,16 @@ function createUpdate(settings: DatabaseSettings, draft: Draft): DatabaseSetting
       enabled: draft.recycleBinEnabled
     },
     encryption,
-    ...(autosaveDelaySeconds === null ? {} : { autosaveDelaySeconds })
+    ...(autosaveDelaySeconds === undefined ? {} : { autosaveDelaySeconds })
   };
+}
+
+function optionalIntegerFieldUpdate(
+  current: number | null,
+  draft: string
+): number | null | undefined {
+  const desired = parseOptionalInteger(draft);
+  return desired === current ? undefined : desired;
 }
 
 function rebaseDraft(

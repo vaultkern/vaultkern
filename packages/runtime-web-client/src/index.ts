@@ -47,6 +47,12 @@ export interface DatabaseSettings {
   hasPassword: boolean;
 }
 
+export interface DatabaseSettingsCommitResult {
+  type: "database_settings_commit_result";
+  settings: DatabaseSettings;
+  saveResult: SaveVaultResult;
+}
+
 export interface DatabaseSettingsUpdate {
   metadata?: DatabaseMetadataSettings;
   publicMetadata?: DatabasePublicMetadataSettings;
@@ -54,7 +60,7 @@ export interface DatabaseSettingsUpdate {
   recycleBin?: DatabaseRecycleBinSettings;
   encryption?: DatabaseEncryptionSettings;
   credentials?: DatabaseCredentialsUpdate;
-  autosaveDelaySeconds?: number;
+  autosaveDelaySeconds?: number | null;
 }
 
 export interface DatabaseMetadataSettings {
@@ -140,12 +146,13 @@ export interface EntryPasskey {
   username: string;
   credentialId: string;
   generatedUserId: string | null;
-  privateKeyPem: string;
   relyingParty: string;
   userHandle: string | null;
   backupEligible: boolean;
   backupState: boolean;
 }
+
+export type EntryPasskeyUpdate = EntryPasskey;
 
 export interface EntryFieldProtection {
   protectTitle: boolean;
@@ -216,7 +223,6 @@ export interface EntryHistoryDetail {
   historyIndex: number;
   title: string;
   username: string;
-  password: string;
   url: string;
   notes: string;
   modifiedAt: number;
@@ -345,7 +351,6 @@ export interface OneDriveAuthSession {
   type: "one_drive_auth_session";
   authUrl: string;
   redirectUri: string;
-  codeVerifier: string;
   expiresInSeconds: number;
 }
 
@@ -366,12 +371,6 @@ export interface OneDriveItem {
 export interface OneDriveItemList {
   type: "one_drive_item_list";
   items: OneDriveItem[];
-}
-
-export interface CompleteOneDriveLoginInput {
-  code: string;
-  redirectUri: string;
-  codeVerifier: string;
 }
 
 interface RuntimeErrorResponse {
@@ -425,17 +424,6 @@ export class RuntimeClient {
     });
   }
 
-  async completeOneDriveLogin(
-    input: CompleteOneDriveLoginInput
-  ): Promise<OneDriveAuthStatus> {
-    return this.sendCommand<OneDriveAuthStatus>({
-      type: "complete_one_drive_login",
-      code: input.code,
-      redirect_uri: input.redirectUri,
-      code_verifier: input.codeVerifier
-    });
-  }
-
   async completePendingOneDriveLogin(): Promise<OneDriveAuthStatus> {
     return this.sendCommand<OneDriveAuthStatus>({
       type: "complete_pending_one_drive_login"
@@ -478,6 +466,14 @@ export class RuntimeClient {
   async deleteRecentVault(vaultRefId: string): Promise<VaultReference[]> {
     const response = await this.sendCommand<VaultReferenceList>({
       type: "delete_vault_reference",
+      vault_ref_id: vaultRefId
+    });
+    return response.vaults;
+  }
+
+  async deleteRecentVaultIfNotCurrent(vaultRefId: string): Promise<VaultReference[]> {
+    const response = await this.sendCommand<VaultReferenceList>({
+      type: "delete_vault_reference_if_not_current",
       vault_ref_id: vaultRefId
     });
     return response.vaults;
@@ -667,7 +663,7 @@ export class RuntimeClient {
   async setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskey
+    passkey: EntryPasskeyUpdate
   ): Promise<EntryDetail> {
     return this.sendCommand<EntryDetail>({
       type: "set_entry_passkey",
@@ -713,8 +709,8 @@ export class RuntimeClient {
   async updateDatabaseSettings(
     vaultId: string,
     update: DatabaseSettingsUpdate
-  ): Promise<DatabaseSettings> {
-    return this.sendCommand<DatabaseSettings>({
+  ): Promise<DatabaseSettingsCommitResult> {
+    return this.sendCommand<DatabaseSettingsCommitResult>({
       type: "update_database_settings",
       vault_id: vaultId,
       update
@@ -858,6 +854,11 @@ export class RuntimeClient {
 }
 
 export type { RuntimeTransport };
+export {
+  RUNTIME_PROTOCOL_VERSION,
+  createNegotiatedRuntimeTransport
+} from "./transport";
+export type { RuntimeHandshake } from "./transport";
 
 function isRuntimeErrorResponse(value: unknown): value is RuntimeErrorResponse {
   return (

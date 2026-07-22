@@ -7,7 +7,8 @@ import type {
   EntryDetail,
   EntryHistoryDetail,
   EntryHistoryItem,
-  EntryPasskey
+  EntryPasskey,
+  EntryPasskeyUpdate
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
@@ -87,7 +88,7 @@ export function EntryEditor({
   onReplaceAttachment?: (name: string, file: File) => void;
   onDeleteAttachment?: (name: string) => void;
   onSelectHistoryItem?: (historyIndex: number) => void;
-  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onSetPasskey?: (passkey: EntryPasskeyUpdate) => void;
   onClearPasskey?: () => void;
   onRetrySave?: () => void;
   onSave: () => void;
@@ -734,13 +735,13 @@ function PasskeySection({
   text: ReturnType<typeof useText>;
   busy?: boolean;
   pendingSave?: boolean;
-  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onSetPasskey?: (passkey: EntryPasskeyUpdate) => void;
   onClearPasskey?: () => void;
   onRetrySave?: () => void;
 }) {
   const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState<EntryPasskey>(() =>
-    entry.passkey ?? emptyPasskey()
+  const [draft, setDraft] = useState<PasskeyDraft>(() =>
+    passkeyDraft(entry.passkey)
   );
   const [revealedPasskeyFields, setRevealedPasskeyFields] = useState<Set<string>>(
     () => new Set()
@@ -751,12 +752,12 @@ function PasskeySection({
 
   useEffect(() => {
     setEditing(false);
-    setDraft(entry.passkey ?? emptyPasskey());
+    setDraft(passkeyDraft(entry.passkey));
     setRevealedPasskeyFields(new Set());
     setRevealedDraftFields(new Set());
   }, [entry.id, entry.passkey]);
 
-  function updateDraft(field: keyof EntryPasskey, value: string | boolean) {
+  function updateDraft(field: keyof PasskeyDraft, value: string | boolean) {
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
@@ -818,33 +819,20 @@ function PasskeySection({
 
   function renderSensitiveDraftInput(
     label: string,
-    field: "credentialId" | "generatedUserId" | "userHandle" | "privateKeyPem",
+    field: "credentialId" | "generatedUserId" | "userHandle",
     value: string,
-    updateField: keyof EntryPasskey
+    updateField: keyof PasskeyDraft
   ) {
     const revealed = revealedDraftFields.has(field);
-    const control =
-      field === "privateKeyPem" ? (
-        <textarea
-          aria-label={label}
-          value={value}
-          onChange={(event) => updateDraft(updateField, event.target.value)}
-          spellCheck={false}
-          style={
-            revealed
-              ? privateKeyPemDraftStyle
-              : concealedPrivateKeyPemDraftStyle
-          }
-        />
-      ) : (
-        <input
-          aria-label={label}
-          type={revealed ? "text" : "password"}
-          value={value}
-          onChange={(event) => updateDraft(updateField, event.target.value)}
-          style={fieldStyle}
-        />
-      );
+    const control = (
+      <input
+        aria-label={label}
+        type={revealed ? "text" : "password"}
+        value={value}
+        onChange={(event) => updateDraft(updateField, event.target.value)}
+        style={fieldStyle}
+      />
+    );
 
     return (
       <div style={sensitiveDraftFieldStyle}>
@@ -864,13 +852,12 @@ function PasskeySection({
     );
   }
 
-  function normalizedDraft(): EntryPasskey {
+  function normalizedDraft(): EntryPasskeyUpdate {
     return {
       ...draft,
       username: draft.username.trim(),
       credentialId: draft.credentialId.trim(),
       generatedUserId: emptyStringAsNull(draft.generatedUserId),
-      privateKeyPem: draft.privateKeyPem.trim(),
       relyingParty: draft.relyingParty.trim(),
       userHandle: emptyStringAsNull(draft.userHandle)
     };
@@ -879,11 +866,7 @@ function PasskeySection({
   const passkey = entry.passkey;
 
   function draftIsValid() {
-    return (
-      draft.credentialId.trim() !== "" &&
-      draft.relyingParty.trim() !== "" &&
-      privateKeyPemLooksValid(draft.privateKeyPem, passkey?.privateKeyPem)
-    );
+    return draft.credentialId.trim() !== "" && draft.relyingParty.trim() !== "";
   }
 
   return (
@@ -902,18 +885,20 @@ function PasskeySection({
             </button>
           ) : (
             <>
-              <button
-                type="button"
-                onClick={() => {
-                  setDraft(passkey ?? emptyPasskey());
-                  setRevealedDraftFields(new Set());
-                  setEditing((current) => !current);
-                }}
-                disabled={busy}
-                style={secondaryActionStyle}
-              >
-                {passkey ? text("Edit passkey") : text("Add passkey")}
-              </button>
+              {passkey ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDraft(passkeyDraft(passkey));
+                    setRevealedDraftFields(new Set());
+                    setEditing((current) => !current);
+                  }}
+                  disabled={busy}
+                  style={secondaryActionStyle}
+                >
+                  {text("Edit passkey")}
+                </button>
+              ) : null}
               {passkey ? (
                 <button
                   type="button"
@@ -952,11 +937,6 @@ function PasskeySection({
             text("User Handle"),
             "userHandle",
             passkey.userHandle
-          )}
-          {renderSensitivePasskeyRow(
-            text("Private Key PEM"),
-            "privateKeyPem",
-            passkey.privateKeyPem
           )}
           <div style={detailRowStyle}>
             <div style={detailKeyStyle}>{text("Backup eligible")}</div>
@@ -1008,12 +988,6 @@ function PasskeySection({
             draft.userHandle ?? "",
             "userHandle"
           )}
-          {renderSensitiveDraftInput(
-            text("Private Key PEM"),
-            "privateKeyPem",
-            draft.privateKeyPem,
-            "privateKeyPem"
-          )}
           <div style={inlineActionsStyle}>
             <label style={checkboxFieldStyle}>
               <input
@@ -1052,7 +1026,7 @@ function PasskeySection({
               type="button"
               disabled={busy}
               onClick={() => {
-                setDraft(passkey ?? emptyPasskey());
+                setDraft(passkeyDraft(passkey));
                 setEditing(false);
               }}
               style={secondaryActionStyle}
@@ -1066,38 +1040,25 @@ function PasskeySection({
   );
 }
 
-function emptyPasskey(): EntryPasskey {
+type PasskeyDraft = EntryPasskey;
+
+function passkeyDraft(passkey: EntryPasskey | null | undefined): PasskeyDraft {
+  if (passkey) {
+    return { ...passkey };
+  }
+  return emptyPasskey();
+}
+
+function emptyPasskey(): PasskeyDraft {
   return {
     username: "",
     credentialId: "",
     generatedUserId: null,
-    privateKeyPem: "",
     relyingParty: "",
     userHandle: null,
     backupEligible: false,
     backupState: false
   };
-}
-
-function privateKeyPemLooksValid(value: string, existingValue?: string) {
-  const trimmed = value.trim();
-  if (
-    existingValue !== undefined &&
-    trimmed === existingValue.trim() &&
-    privateKeyPemHasMatchingEnvelope(trimmed)
-  ) {
-    return true;
-  }
-  return /^-----BEGIN PRIVATE KEY-----[\s\S]+-----END PRIVATE KEY-----$/u.test(
-    trimmed
-  );
-}
-
-function privateKeyPemHasMatchingEnvelope(value: string) {
-  const match = value.match(
-    /^-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----[\s\S]+-----END \1-----$/u
-  );
-  return Boolean(match);
 }
 
 function emptyStringAsNull(value: string | null): string | null {
@@ -1357,19 +1318,6 @@ const notesStyle = {
   ...fieldStyle,
   minHeight: "130px",
   resize: "vertical" as const
-};
-
-const privateKeyPemDraftStyle = {
-  ...fieldStyle,
-  minHeight: "150px",
-  resize: "vertical" as const,
-  fontFamily: "monospace",
-  whiteSpace: "pre-wrap" as const
-};
-
-const concealedPrivateKeyPemDraftStyle = {
-  ...privateKeyPemDraftStyle,
-  WebkitTextSecurity: "disc"
 };
 
 const fieldLabelStyle = {

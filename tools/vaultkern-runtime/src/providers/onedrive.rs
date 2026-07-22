@@ -81,6 +81,34 @@ pub enum OneDriveConditionalWriteOutcome {
     },
 }
 
+#[derive(Debug)]
+struct OneDriveItemNotFound {
+    drive_id: String,
+    item_id: String,
+}
+
+impl fmt::Display for OneDriveItemNotFound {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "OneDrive item not found: {}/{}",
+            self.drive_id, self.item_id
+        )
+    }
+}
+
+impl std::error::Error for OneDriveItemNotFound {}
+
+pub(crate) fn is_onedrive_item_not_found(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<OneDriveItemNotFound>().is_some()
+        || error.chain().any(|cause| {
+            matches!(
+                cause.downcast_ref::<ureq::Error>(),
+                Some(ureq::Error::Status(404, _))
+            )
+        })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OneDriveConditionalWriteError {
     MissingEtag,
@@ -94,6 +122,8 @@ pub enum OneDriveMemoryWriteBehavior {
     PreconditionFailed { replacement_bytes: Option<Vec<u8>> },
     OutcomeUnknownCommitted,
     OutcomeUnknownNotCommitted,
+    OutcomeUnknownCommittedReadbackUnavailable,
+    OutcomeUnknownNotCommittedReadbackUnavailable,
 }
 
 impl fmt::Display for OneDriveConditionalWriteError {
@@ -157,24 +187,26 @@ pub struct OneDriveVaultSourceProvider {
     refresh_token_load_error: Option<String>,
     token_state: RefCell<Option<OneDriveTokenState>>,
     pending_login: Option<PendingOneDriveLogin>,
-    test_code_verifier: Option<String>,
+    test_code_verifier: Option<Zeroizing<String>>,
+    memory_mode: bool,
     memory_items: BTreeMap<(String, String), MemoryOneDriveItem>,
     memory_remote_state_reads: Cell<usize>,
     memory_snapshot_reads: Cell<usize>,
     memory_snapshot_from_state_reads: Cell<usize>,
     memory_writes: Cell<usize>,
     memory_write_behaviors: VecDeque<OneDriveMemoryWriteBehavior>,
+    memory_fail_next_remote_state: Cell<bool>,
     memory_fail_next_conflict_copy: Cell<bool>,
 }
 
 struct PendingOneDriveLogin {
     redirect_uri: String,
-    code_verifier: String,
+    code_verifier: Zeroizing<String>,
     code_receiver: Receiver<Result<String, String>>,
 }
 
 struct OneDriveTokenState {
-    access_token: Option<String>,
+    access_token: Option<Zeroizing<String>>,
     access_expires_at: Option<Instant>,
     refresh_token: Zeroizing<String>,
     refresh_token_origin: RefreshTokenOrigin,
@@ -189,7 +221,8 @@ enum RefreshTokenOrigin {
 
 #[derive(Deserialize)]
 struct TokenResponse {
-    access_token: String,
+    #[serde(deserialize_with = "deserialize_access_token")]
+    access_token: Zeroizing<String>,
     #[serde(default, deserialize_with = "deserialize_optional_refresh_token")]
     refresh_token: Option<Zeroizing<String>>,
     #[serde(default)]
@@ -292,12 +325,14 @@ impl OneDriveVaultSourceProvider {
             token_state: RefCell::new(token_state),
             pending_login: None,
             test_code_verifier: None,
+            memory_mode: false,
             memory_items: BTreeMap::new(),
             memory_remote_state_reads: Cell::new(0),
             memory_snapshot_reads: Cell::new(0),
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
+            memory_fail_next_remote_state: Cell::new(false),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -314,12 +349,14 @@ impl OneDriveVaultSourceProvider {
             token_state: RefCell::new(None),
             pending_login: None,
             test_code_verifier: None,
+            memory_mode: true,
             memory_items: BTreeMap::new(),
             memory_remote_state_reads: Cell::new(0),
             memory_snapshot_reads: Cell::new(0),
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
+            memory_fail_next_remote_state: Cell::new(false),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -410,12 +447,14 @@ impl OneDriveVaultSourceProvider {
             token_state: RefCell::new(token_state),
             pending_login: None,
             test_code_verifier: None,
+            memory_mode: false,
             memory_items: BTreeMap::new(),
             memory_remote_state_reads: Cell::new(0),
             memory_snapshot_reads: Cell::new(0),
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
+            memory_fail_next_remote_state: Cell::new(false),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -423,7 +462,7 @@ impl OneDriveVaultSourceProvider {
     #[cfg(test)]
     fn set_test_tokens(&mut self, access_token: &str, refresh_token: &str) {
         self.token_state.replace(Some(OneDriveTokenState {
-            access_token: Some(access_token.into()),
+            access_token: Some(Zeroizing::new(access_token.into())),
             access_expires_at: Some(Instant::now() + Duration::from_secs(3600)),
             refresh_token: Zeroizing::new(refresh_token.into()),
             refresh_token_origin: RefreshTokenOrigin::Store,
@@ -433,7 +472,7 @@ impl OneDriveVaultSourceProvider {
     #[cfg(test)]
     fn set_expired_test_tokens(&mut self, access_token: &str, refresh_token: &str) {
         self.token_state.replace(Some(OneDriveTokenState {
-            access_token: Some(access_token.into()),
+            access_token: Some(Zeroizing::new(access_token.into())),
             access_expires_at: Some(Instant::now() - Duration::from_secs(1)),
             refresh_token: Zeroizing::new(refresh_token.into()),
             refresh_token_origin: RefreshTokenOrigin::Store,
@@ -442,7 +481,7 @@ impl OneDriveVaultSourceProvider {
 
     #[cfg(test)]
     fn set_test_code_verifier(&mut self, code_verifier: &str) {
-        self.test_code_verifier = Some(code_verifier.into());
+        self.test_code_verifier = Some(Zeroizing::new(code_verifier.into()));
     }
 
     pub fn insert_memory_item(
@@ -535,8 +574,9 @@ impl OneDriveVaultSourceProvider {
         let (code_receiver, redirect_uri) = start_loopback_callback_listener(&self.callback_addr)?;
         let code_verifier = self
             .test_code_verifier
-            .clone()
-            .unwrap_or_else(new_code_verifier);
+            .as_ref()
+            .map(|value| Zeroizing::new(value.to_string()))
+            .unwrap_or_else(|| Zeroizing::new(new_code_verifier()));
         let challenge = code_challenge(&code_verifier);
         let auth_url = format!(
             "{auth_url}?client_id={client_id}&response_type=code&redirect_uri={redirect_uri}&scope={scope}&code_challenge={challenge}&code_challenge_method=S256",
@@ -549,14 +589,13 @@ impl OneDriveVaultSourceProvider {
 
         self.pending_login = Some(PendingOneDriveLogin {
             redirect_uri: redirect_uri.clone(),
-            code_verifier: code_verifier.clone(),
+            code_verifier,
             code_receiver,
         });
 
         Ok(OneDriveAuthSessionDto {
             auth_url,
             redirect_uri,
-            code_verifier,
             expires_in_seconds: 600,
         })
     }
@@ -566,11 +605,13 @@ impl OneDriveVaultSourceProvider {
             .pending_login
             .take()
             .context("OneDrive login has not been started")?;
-        let code = pending
-            .code_receiver
-            .recv_timeout(Duration::from_secs(CALLBACK_WAIT_SECONDS))
-            .context("timed out waiting for OneDrive callback")?
-            .map_err(anyhow::Error::msg)?;
+        let code = Zeroizing::new(
+            pending
+                .code_receiver
+                .recv_timeout(Duration::from_secs(CALLBACK_WAIT_SECONDS))
+                .context("timed out waiting for OneDrive callback")?
+                .map_err(anyhow::Error::msg)?,
+        );
         self.complete_login(&code, &pending.redirect_uri, &pending.code_verifier)
     }
 
@@ -580,7 +621,7 @@ impl OneDriveVaultSourceProvider {
         redirect_uri: &str,
         code_verifier: &str,
     ) -> Result<OneDriveAuthStatusDto> {
-        if !self.memory_items.is_empty() {
+        if self.memory_mode {
             let account_label = self
                 .memory_items
                 .values()
@@ -620,14 +661,15 @@ impl OneDriveVaultSourceProvider {
             refresh_token,
             refresh_token_origin: RefreshTokenOrigin::Store,
         }));
+        let account_label = self.account_label().ok();
         Ok(OneDriveAuthStatusDto {
             status: "authorized".into(),
-            account_label: Some(self.account_label()?),
+            account_label,
         })
     }
 
     pub fn list_children(&self, parent_item_id: Option<&str>) -> Result<OneDriveItemListDto> {
-        if !self.memory_items.is_empty() {
+        if self.memory_mode {
             return Ok(OneDriveItemListDto {
                 items: self
                     .memory_items
@@ -686,7 +728,7 @@ impl OneDriveVaultSourceProvider {
     }
 
     pub fn metadata(&self, drive_id: &str, item_id: &str) -> Result<OneDriveMetadata> {
-        if self.memory_items.is_empty() {
+        if !self.memory_mode {
             let item = self.graph_item(drive_id, item_id)?;
             return Ok(OneDriveMetadata {
                 drive_id: drive_id.to_owned(),
@@ -708,7 +750,7 @@ impl OneDriveVaultSourceProvider {
     }
 
     pub fn read_snapshot(&self, drive_id: &str, item_id: &str) -> Result<OneDriveSnapshot> {
-        if self.memory_items.is_empty() {
+        if !self.memory_mode {
             let item = self.graph_item(drive_id, item_id)?;
             return self.read_snapshot_from_state(drive_id, item_id, &remote_state_for_item(item));
         }
@@ -725,7 +767,7 @@ impl OneDriveVaultSourceProvider {
     }
 
     pub fn remote_state(&self, drive_id: &str, item_id: &str) -> Result<OneDriveRemoteState> {
-        if self.memory_items.is_empty() {
+        if !self.memory_mode {
             return self
                 .graph_item(drive_id, item_id)
                 .map(remote_state_for_item);
@@ -733,6 +775,9 @@ impl OneDriveVaultSourceProvider {
 
         self.memory_remote_state_reads
             .set(self.memory_remote_state_reads.get() + 1);
+        if self.memory_fail_next_remote_state.replace(false) {
+            anyhow::bail!("injected OneDrive readback failure");
+        }
         let item = self.item(drive_id, item_id)?;
         Ok(OneDriveRemoteState {
             name: item.name.clone(),
@@ -749,7 +794,7 @@ impl OneDriveVaultSourceProvider {
         item_id: &str,
         state: &OneDriveRemoteState,
     ) -> Result<OneDriveSnapshot> {
-        if !self.memory_items.is_empty() {
+        if self.memory_mode {
             self.memory_snapshot_from_state_reads
                 .set(self.memory_snapshot_from_state_reads.get() + 1);
             return self.read_snapshot(drive_id, item_id);
@@ -771,7 +816,7 @@ impl OneDriveVaultSourceProvider {
         bytes: &[u8],
         observed: &OneDriveRemoteState,
     ) -> Result<OneDriveConditionalWriteOutcome, OneDriveConditionalWriteError> {
-        if !self.memory_items.is_empty() {
+        if self.memory_mode {
             self.memory_writes.set(self.memory_writes.get() + 1);
             let expected_revision = observed
                 .memory_revision
@@ -802,6 +847,20 @@ impl OneDriveVaultSourceProvider {
                         });
                     }
                     OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommitted => {
+                        return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
+                            message: "injected ambiguous uncommitted write".into(),
+                        });
+                    }
+                    OneDriveMemoryWriteBehavior::OutcomeUnknownCommittedReadbackUnavailable => {
+                        item.bytes = bytes.to_vec();
+                        item.revision += 1;
+                        self.memory_fail_next_remote_state.set(true);
+                        return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
+                            message: "injected ambiguous committed write".into(),
+                        });
+                    }
+                    OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommittedReadbackUnavailable => {
+                        self.memory_fail_next_remote_state.set(true);
                         return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
                             message: "injected ambiguous uncommitted write".into(),
                         });
@@ -865,11 +924,34 @@ impl OneDriveVaultSourceProvider {
         name: &str,
         bytes: &[u8],
     ) -> Result<OneDriveItemDto> {
-        if !self.memory_items.is_empty() {
+        if self.memory_mode {
             if self.memory_fail_next_conflict_copy.replace(false) {
                 anyhow::bail!("injected OneDrive conflict-copy upload failure");
             }
             let account_label = self.item(drive_id, item_id)?.account_label.clone();
+            if let Some(existing_key) = self
+                .memory_items
+                .iter()
+                .find(|((candidate_drive, _), item)| {
+                    candidate_drive == drive_id && item.name == name
+                })
+                .map(|(key, _)| key.clone())
+            {
+                let existing = self
+                    .memory_items
+                    .get_mut(&existing_key)
+                    .context("stable OneDrive conflict copy disappeared")?;
+                existing.bytes = bytes.to_vec();
+                existing.revision = existing.revision.saturating_add(1);
+                self.memory_writes.set(self.memory_writes.get() + 1);
+                return Ok(OneDriveItemDto {
+                    drive_id: existing.drive_id.clone(),
+                    item_id: existing.item_id.clone(),
+                    name: existing.name.clone(),
+                    folder: false,
+                    size: Some(bytes.len() as u64),
+                });
+            }
             let conflict_item_id = format!("vaultkern-conflict-{}", Uuid::new_v4());
             self.memory_writes.set(self.memory_writes.get() + 1);
             self.memory_items.insert(
@@ -904,7 +986,7 @@ impl OneDriveVaultSourceProvider {
             encode_component(name),
         );
         let url =
-            self.graph_url_with_query(&path, &[("@microsoft.graph.conflictBehavior", "rename")]);
+            self.graph_url_with_query(&path, &[("@microsoft.graph.conflictBehavior", "replace")]);
         let response = self
             .authorized_request("PUT", &url)?
             .send_bytes(bytes)
@@ -925,7 +1007,13 @@ impl OneDriveVaultSourceProvider {
     fn item(&self, drive_id: &str, item_id: &str) -> Result<&MemoryOneDriveItem> {
         self.memory_items
             .get(&(drive_id.to_owned(), item_id.to_owned()))
-            .with_context(|| format!("OneDrive item not found: {drive_id}/{item_id}"))
+            .ok_or_else(|| {
+                OneDriveItemNotFound {
+                    drive_id: drive_id.to_owned(),
+                    item_id: item_id.to_owned(),
+                }
+                .into()
+            })
     }
 
     fn account_label(&self) -> Result<String> {
@@ -1017,19 +1105,35 @@ impl OneDriveVaultSourceProvider {
 
     fn authorized_request(&self, method: &str, url: &str) -> Result<ureq::Request> {
         let access_token = self.access_token()?;
-        Ok(ureq::request(method, url).set("Authorization", &format!("Bearer {access_token}")))
+        let authorization = Zeroizing::new(format!("Bearer {}", access_token.as_str()));
+        Ok(ureq::request(method, url).set("Authorization", authorization.as_str()))
     }
 
-    fn access_token(&self) -> Result<String> {
-        if let Some(state) = self.token_state.borrow().as_ref()
-            && let Some(access_token) = state.access_token.clone()
-        {
-            let token_is_fresh = state
+    fn access_token(&self) -> Result<Zeroizing<String>> {
+        let fresh = self.token_state.borrow().as_ref().and_then(|state| {
+            let access_token = state.access_token.clone()?;
+            state
                 .access_expires_at
-                .is_some_and(|expires_at| expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW);
-            if token_is_fresh {
-                return Ok(access_token);
+                .is_some_and(|expires_at| expires_at > Instant::now() + ACCESS_TOKEN_EXPIRY_SKEW)
+                .then(|| {
+                    (
+                        access_token,
+                        (state.refresh_token_origin == RefreshTokenOrigin::Unpersisted)
+                            .then(|| state.refresh_token.clone()),
+                    )
+                })
+        });
+        if let Some((access_token, unpersisted_refresh_token)) = fresh {
+            if let Some(refresh_token) = unpersisted_refresh_token {
+                self.store_refresh_token(&refresh_token)?;
+                if let Some(state) = self.token_state.borrow_mut().as_mut()
+                    && state.refresh_token_origin == RefreshTokenOrigin::Unpersisted
+                    && state.refresh_token.as_str() == refresh_token.as_str()
+                {
+                    state.refresh_token_origin = RefreshTokenOrigin::Store;
+                }
             }
+            return Ok(access_token);
         }
         self.refresh_access_token()
     }
@@ -1041,7 +1145,7 @@ impl OneDriveVaultSourceProvider {
         }
     }
 
-    fn refresh_access_token(&self) -> Result<String> {
+    fn refresh_access_token(&self) -> Result<Zeroizing<String>> {
         let client_id = self
             .client_id
             .as_deref()
@@ -1056,22 +1160,42 @@ impl OneDriveVaultSourceProvider {
                     .ok()
                     .map(|token| (Zeroizing::new(token), RefreshTokenOrigin::Environment))
             });
-        let Some((refresh_token, refresh_token_origin)) = current_token else {
+        let Some((mut refresh_token, mut refresh_token_origin)) = current_token else {
             if let Some(error) = &self.refresh_token_load_error {
                 anyhow::bail!("failed to load persisted OneDrive refresh token: {error}");
             }
             anyhow::bail!("OneDrive account is not connected");
         };
-        let token = ureq::post(&self.token_url)
-            .send_form(&[
-                ("client_id", client_id),
-                ("scope", ONEDRIVE_SCOPES),
-                ("refresh_token", refresh_token.as_str()),
-                ("grant_type", "refresh_token"),
-            ])
-            .context("failed to refresh OneDrive access token")?
-            .into_json::<TokenResponse>()
-            .context("failed to decode OneDrive refresh response")?;
+        let exchange = |candidate: &str| -> Result<TokenResponse> {
+            ureq::post(&self.token_url)
+                .send_form(&[
+                    ("client_id", client_id),
+                    ("scope", ONEDRIVE_SCOPES),
+                    ("refresh_token", candidate),
+                    ("grant_type", "refresh_token"),
+                ])
+                .context("failed to refresh OneDrive access token")?
+                .into_json::<TokenResponse>()
+                .context("failed to decode OneDrive refresh response")
+        };
+        let token = match exchange(&refresh_token) {
+            Ok(token) => token,
+            Err(first_error) if refresh_token_origin == RefreshTokenOrigin::Store => {
+                match self.refresh_token_store.load() {
+                    Ok(Some(latest)) if latest.as_str() != refresh_token.as_str() => {
+                        refresh_token = latest;
+                        refresh_token_origin = RefreshTokenOrigin::Store;
+                        exchange(&refresh_token).with_context(|| {
+                            format!(
+                                "failed to refresh OneDrive access token after reloading a concurrently rotated refresh token; first attempt: {first_error:#}"
+                            )
+                        })?
+                    }
+                    _ => return Err(first_error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         let expires_at = access_expires_at(&token);
         let mut persistence_error = None;
         let (next_refresh, next_origin) = match token.refresh_token {
@@ -1106,8 +1230,10 @@ impl OneDriveVaultSourceProvider {
                 (refresh_token, next_origin)
             }
         };
+        let access_token = token.access_token;
+        let returned_access_token = Zeroizing::new(access_token.to_string());
         self.token_state.replace(Some(OneDriveTokenState {
-            access_token: Some(token.access_token.clone()),
+            access_token: Some(access_token),
             access_expires_at: expires_at,
             refresh_token: next_refresh,
             refresh_token_origin: next_origin,
@@ -1115,7 +1241,7 @@ impl OneDriveVaultSourceProvider {
         if let Some(error) = persistence_error {
             return Err(error);
         }
-        Ok(token.access_token)
+        Ok(returned_access_token)
     }
 
     fn store_refresh_token(&self, refresh_token: &str) -> Result<()> {
@@ -1179,6 +1305,15 @@ where
     D: Deserializer<'de>,
 {
     Option::<String>::deserialize(deserializer).map(|token| token.map(Zeroizing::new))
+}
+
+fn deserialize_access_token<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Zeroizing<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Zeroizing::new)
 }
 
 fn is_retryable_graph_status(status: u16) -> bool {
@@ -1328,7 +1463,8 @@ fn encode_component(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        OneDriveConditionalWriteError, OneDriveConditionalWriteOutcome, OneDriveVaultSourceProvider,
+        MAX_AUTHORIZED_GET_ATTEMPTS, OneDriveConditionalWriteError,
+        OneDriveConditionalWriteOutcome, OneDriveVaultSourceProvider,
     };
     use crate::providers::onedrive_token_store::{
         MemoryOneDriveRefreshTokenStore, OneDriveRefreshTokenStore,
@@ -1337,7 +1473,7 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::TcpStream;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
     use zeroize::Zeroizing;
@@ -1350,8 +1486,29 @@ mod tests {
         store_calls: Arc<AtomicUsize>,
     }
 
-    struct RotatedTokenFailingStore {
+    struct RotatedTokenFailOnceStore {
         store_calls: Arc<AtomicUsize>,
+    }
+
+    #[derive(Clone)]
+    struct SharedRefreshTokenStore {
+        token: Arc<Mutex<String>>,
+    }
+
+    impl OneDriveRefreshTokenStore for SharedRefreshTokenStore {
+        fn load(&self) -> Result<Option<Zeroizing<String>>> {
+            Ok(Some(Zeroizing::new(self.token.lock().unwrap().clone())))
+        }
+
+        fn store(&self, token: &str) -> Result<()> {
+            *self.token.lock().unwrap() = token.to_owned();
+            Ok(())
+        }
+
+        fn delete(&self) -> Result<()> {
+            self.token.lock().unwrap().clear();
+            Ok(())
+        }
     }
 
     impl OneDriveRefreshTokenStore for FailingRefreshTokenStore {
@@ -1397,14 +1554,16 @@ mod tests {
         }
     }
 
-    impl OneDriveRefreshTokenStore for RotatedTokenFailingStore {
+    impl OneDriveRefreshTokenStore for RotatedTokenFailOnceStore {
         fn load(&self) -> Result<Option<Zeroizing<String>>> {
             Ok(Some(Zeroizing::new("refresh-1".to_owned())))
         }
 
         fn store(&self, _token: &str) -> Result<()> {
-            self.store_calls.fetch_add(1, Ordering::SeqCst);
-            anyhow::bail!("simulated rotated-token persistence failure")
+            if self.store_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                anyhow::bail!("simulated rotated-token persistence failure")
+            }
+            Ok(())
         }
 
         fn delete(&self) -> Result<()> {
@@ -1559,6 +1718,41 @@ mod tests {
         token.assert();
         me.assert();
         children.assert();
+    }
+
+    #[test]
+    fn login_commit_is_not_rolled_back_by_a_post_commit_account_label_failure() {
+        let mut server = mockito::Server::new();
+        let token = server
+            .mock("POST", "/token")
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(
+                r#"{"access_token":"access-1","refresh_token":"refresh-1","expires_in":3600}"#,
+            )
+            .create();
+        let me = server
+            .mock("GET", "/v1.0/me")
+            .match_header("authorization", "Bearer access-1")
+            .with_status(503)
+            .expect(MAX_AUTHORIZED_GET_ATTEMPTS)
+            .create();
+        let mut provider = OneDriveVaultSourceProvider::new_for_graph_tests(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+        );
+
+        let status = provider
+            .complete_login("auth-code", "http://127.0.0.1/callback", "verifier")
+            .unwrap();
+
+        assert_eq!(status.status, "authorized");
+        assert_eq!(status.account_label, None);
+        assert!(provider.token_state.borrow().is_some());
+        token.assert();
+        me.assert();
     }
 
     #[test]
@@ -1881,7 +2075,7 @@ mod tests {
             .match_header("authorization", "Bearer access-1")
             .match_query(mockito::Matcher::UrlEncoded(
                 "@microsoft.graph.conflictBehavior".into(),
-                "rename".into(),
+                "replace".into(),
             ))
             .match_body("copy")
             .with_status(200)
@@ -1912,6 +2106,47 @@ mod tests {
         assert_eq!(item.size, Some(4));
         metadata.assert();
         upload.assert();
+    }
+
+    #[test]
+    fn memory_conflict_copy_reuses_a_stable_name_idempotently() {
+        let mut provider = OneDriveVaultSourceProvider::new_in_memory();
+        provider.insert_memory_item(
+            "drive-1",
+            "item-1",
+            "Vault.kdbx",
+            "alice@example.com",
+            b"source".to_vec(),
+        );
+
+        let first = provider
+            .upload_sibling_conflict_copy(
+                "drive-1",
+                "item-1",
+                "Vault (VaultKern conflict stable).kdbx",
+                b"candidate",
+            )
+            .unwrap();
+        let second = provider
+            .upload_sibling_conflict_copy(
+                "drive-1",
+                "item-1",
+                "Vault (VaultKern conflict stable).kdbx",
+                b"candidate",
+            )
+            .unwrap();
+
+        assert_eq!(second.item_id, first.item_id);
+        assert_eq!(
+            provider
+                .list_children(None)
+                .unwrap()
+                .items
+                .into_iter()
+                .filter(|item| item.name == first.name)
+                .count(),
+            1
+        );
     }
 
     #[test]
@@ -2087,6 +2322,46 @@ mod tests {
     }
 
     #[test]
+    fn stale_provider_reloads_a_refresh_token_rotated_by_another_process() {
+        let shared = SharedRefreshTokenStore {
+            token: Arc::new(Mutex::new("refresh-0".to_owned())),
+        };
+        let mut server = mockito::Server::new();
+        let stale = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "refresh-0".into(),
+            ))
+            .with_status(400)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"error":"invalid_grant"}"#)
+            .create();
+        let current = server
+            .mock("POST", "/token")
+            .match_body(mockito::Matcher::UrlEncoded(
+                "refresh_token".into(),
+                "refresh-1".into(),
+            ))
+            .with_status(200)
+            .with_header("content-type", "application/json")
+            .with_body(r#"{"access_token":"access-1","expires_in":3600}"#)
+            .create();
+        let provider = OneDriveVaultSourceProvider::new_for_graph_tests_with_refresh_token_store(
+            "client-1",
+            &format!("{}/authorize", server.url()),
+            &format!("{}/token", server.url()),
+            &format!("{}/v1.0", server.url()),
+            Box::new(shared.clone()),
+        );
+        *shared.token.lock().unwrap() = "refresh-1".to_owned();
+
+        assert_eq!(provider.access_token().unwrap().as_str(), "access-1");
+        stale.assert();
+        current.assert();
+    }
+
+    #[test]
     fn refresh_token_store_replaces_rotated_token() {
         let store = MemoryOneDriveRefreshTokenStore::default();
         store.store("refresh-1").unwrap();
@@ -2201,7 +2476,7 @@ mod tests {
             &format!("{}/authorize", server.url()),
             &format!("{}/token", server.url()),
             &format!("{}/v1.0", server.url()),
-            Box::new(RotatedTokenFailingStore {
+            Box::new(RotatedTokenFailOnceStore {
                 store_calls: store_calls.clone(),
             }),
         );
@@ -2214,7 +2489,7 @@ mod tests {
             .list_children(None)
             .expect("the rotated in-memory token must remain usable");
 
-        assert_eq!(store_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(store_calls.load(Ordering::SeqCst), 2);
         refresh.assert();
         children.assert();
     }

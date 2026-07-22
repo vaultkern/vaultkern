@@ -149,20 +149,6 @@ function requestIdFromResponse(response: unknown) {
   return typeof requestId === "string" ? requestId : null;
 }
 
-function isUntaggedNativeErrorResponse(response: unknown) {
-  return (
-    typeof response === "object" &&
-    response !== null &&
-    !("requestId" in response) &&
-    "type" in response &&
-    (response as { type?: unknown }).type === "error" &&
-    "code" in response &&
-    typeof (response as { code?: unknown }).code === "string" &&
-    "message" in response &&
-    typeof (response as { message?: unknown }).message === "string"
-  );
-}
-
 function stripResponseRequestId(response: unknown) {
   if (typeof response !== "object" || response === null || !("requestId" in response)) {
     return response;
@@ -179,6 +165,10 @@ function isStartupCommand(message: unknown) {
 
 function isPreloadCommand(message: unknown) {
   return commandTypeFromMessage(message) === "preload_current_vault";
+}
+
+function isHandshakeCommand(message: unknown) {
+  return commandTypeFromMessage(message) === "handshake";
 }
 
 const STARTUP_OVERTAKEABLE_COMMANDS = new Set([
@@ -222,7 +212,6 @@ function shouldCancelActivePreload(
 const FRESH_VERIFICATION_COMMANDS = new Set([
   "add_local_vault_reference",
   "begin_one_drive_login",
-  "complete_one_drive_login",
   "complete_pending_one_drive_login",
   "list_one_drive_children",
   "add_one_drive_vault_reference",
@@ -271,7 +260,9 @@ export function createNativeMessagingBridge(
   let port: NativePort | null = null;
   let activeRequest: PendingRequest | null = null;
   const queuedRequests: PendingRequest[] = [];
+  const deferredPreloads: PendingRequest[] = [];
   let nextRequestId = 0;
+  let connectionGeneration = 0;
 
   function timeoutForMessage(message: unknown) {
     if (
@@ -333,12 +324,19 @@ export function createNativeMessagingBridge(
       clearRequestTimeout(request ?? null);
       request?.reject(error);
     }
+
+    while (deferredPreloads.length > 0) {
+      const request = deferredPreloads.shift();
+      clearRequestTimeout(request ?? null);
+      request?.reject(error);
+    }
   }
 
   function detachPort() {
     const hadPort = port !== null;
     port = null;
     if (hadPort) {
+      connectionGeneration += 1;
       try {
         options?.onPortDetached?.();
       } catch {
@@ -358,12 +356,19 @@ export function createNativeMessagingBridge(
     request.postMessageAttempts = 0;
     clearRequestTimeout(request);
     detachPort();
-    queuedRequests.push(request);
+    deferredPreloads.push(request);
 
     try {
       requestPort?.disconnect();
     } catch {
-      // The interrupted read will be retried on the next native port.
+      // The interrupted read will be retried after the new connection handshake.
+    }
+  }
+
+  function prepareForSend(message: unknown) {
+    cancelQueuedPreloads(message);
+    if (shouldCancelActivePreload(activeRequest, message)) {
+      interruptActivePreload();
     }
   }
 
@@ -386,6 +391,11 @@ export function createNativeMessagingBridge(
   }
 
   function enqueueRequest(request: PendingRequest) {
+    if (isHandshakeCommand(request.message) && port === null) {
+      queuedRequests.unshift(request);
+      return;
+    }
+
     if (!isStartupCommand(request.message)) {
       queuedRequests.push(request);
       return;
@@ -401,6 +411,7 @@ export function createNativeMessagingBridge(
     }
 
     queuedRequests.splice(insertionIndex, 0, request);
+    queuedRequests.push(...deferredPreloads.splice(0));
   }
 
   function onNativeMessage(attachedPort: NativePort, response: unknown) {
@@ -410,10 +421,21 @@ export function createNativeMessagingBridge(
 
     const request = activeRequest;
     const responseRequestId = requestIdFromResponse(response);
-    if (
-      responseRequestId !== request.requestId &&
-      !(responseRequestId === null && isUntaggedNativeErrorResponse(response))
-    ) {
+    if (responseRequestId !== request.requestId) {
+      if (responseRequestId === null) {
+        const error = new NativeMessagingError(
+          "native_unknown",
+          "native response is missing its request ID"
+        );
+        const requestPort = port;
+        detachPort();
+        rejectAll(error);
+        try {
+          requestPort?.disconnect();
+        } catch {
+          // The protocol-invalid connection is already detached.
+        }
+      }
       return;
     }
     emitEvent({
@@ -449,6 +471,7 @@ export function createNativeMessagingBridge(
     }
 
     port = connectNative(hostName);
+    connectionGeneration += 1;
     emitEvent({ event: "connect" });
     const attachedPort = port;
     port.onMessage.addListener((response: unknown) =>
@@ -535,12 +558,13 @@ export function createNativeMessagingBridge(
   }
 
   return {
+    connectionGeneration() {
+      return connectionGeneration;
+    },
+    prepareForSend,
     send(message: unknown) {
       return new Promise<unknown>((resolve, reject) => {
-        cancelQueuedPreloads(message);
-        if (shouldCancelActivePreload(activeRequest, message)) {
-          interruptActivePreload();
-        }
+        prepareForSend(message);
         const requestId = `native-${++nextRequestId}`;
         const requestTimeoutMs = timeoutForMessage(message);
         enqueueRequest({

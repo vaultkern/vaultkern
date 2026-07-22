@@ -3,7 +3,7 @@ import type {
   EntryDetail,
   EntryHistoryDetail,
   EntryHistoryItem,
-  EntryPasskey
+  EntryPasskeyUpdate
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
@@ -79,7 +79,7 @@ export function EntryDetailPane({
   onReplaceAttachment?: (name: string, file: File) => void;
   onDeleteAttachment?: (name: string) => void;
   onSelectHistoryItem?: (historyIndex: number) => void;
-  onSetPasskey?: (passkey: EntryPasskey) => void;
+  onSetPasskey?: (passkey: EntryPasskeyUpdate) => void;
   onClearPasskey?: () => void;
   onRetrySave?: () => void;
   onSave: () => void;

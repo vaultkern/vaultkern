@@ -8,28 +8,20 @@ use vaultkern_core::{
     Attachment, CompositeKey, CustomField, Entry, EntryFieldProtection, Group, KeepassCore,
     PasskeyRecord, SaveProfile, TotpSpec, Vault,
 };
-use vaultkern_runtime::Runtime;
+use vaultkern_runtime::{QuickUnlockReconciliationCredentials, Runtime};
 use vaultkern_runtime_protocol::{
     DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, EntryPasskeyDto,
-    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
-    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyFrameKindDto,
+    EntryPasskeyUpdateDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
+    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyFrameKindDto,
     PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto, RuntimeCommand,
     RuntimeResponse,
 };
 
 const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
 
-fn legacy_entry_passkey_fixture() -> EntryPasskeyDto {
-    EntryPasskeyDto {
-        username: "alice@example.com".into(),
-        credential_id: "credential-base64url".into(),
-        generated_user_id: Some("generated-user".into()),
-        private_key_pem: "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----".into(),
-        relying_party: "example.com".into(),
-        user_handle: Some("dXNlci0x".into()),
-        backup_eligible: true,
-        backup_state: false,
-    }
+fn clone_test_passkey_update(passkey: &EntryPasskeyUpdateDto) -> EntryPasskeyUpdateDto {
+    serde_json::from_value(serde_json::to_value(passkey).expect("serialize test passkey update"))
+        .expect("deserialize test passkey update")
 }
 
 #[test]
@@ -236,16 +228,17 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
-    let enabled = runtime
-        .handle(RuntimeCommand::EnableQuickUnlockForCurrentVault {
-            password: Some("demo-password".into()),
-            key_file_path: None,
-        })
-        .unwrap();
-    assert!(matches!(
-        enabled,
-        RuntimeResponse::SessionState(state) if state.unlocked
-    ));
+    assert!(
+        runtime
+            .reconcile_quick_unlock(
+                true,
+                Some(QuickUnlockReconciliationCredentials::from_protocol_input(
+                    Some("demo-password".into()),
+                    None,
+                )),
+            )
+            .unwrap()
+    );
 
     let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
     let RuntimeResponse::VaultReferenceList(recent) = recent else {
@@ -286,9 +279,7 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
         })
     );
 
-    runtime
-        .handle(RuntimeCommand::DisableQuickUnlockForCurrentVault)
-        .unwrap();
+    assert!(runtime.reconcile_quick_unlock(false, None).unwrap());
     let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
     let RuntimeResponse::VaultReferenceList(recent) = recent else {
         panic!("expected recent vault list");
@@ -632,7 +623,7 @@ fn runtime_excludes_passkey_only_entries_from_password_fill_candidates() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,
@@ -802,7 +793,7 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         .unwrap();
 
     let entry_id = match created {
-        RuntimeResponse::EntryDetail(mut detail) => {
+        RuntimeResponse::EntryDetail(detail) => {
             assert_eq!(detail.title, "Example");
             assert_eq!(detail.username, "alice");
             assert_eq!(detail.totp.as_deref(), Some("287082"));
@@ -812,7 +803,7 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
                     "otpauth://totp/Test:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test&algorithm=SHA1&digits=6&period=30"
                 )
             );
-            std::mem::take(&mut detail.id)
+            detail.id
         }
         other => panic!("expected entry detail, got {other:?}"),
     };
@@ -865,8 +856,18 @@ fn runtime_sets_and_clears_entry_passkey() {
 
     let mut vault = Vault::empty("demo");
     let root_id = vault.root.id.to_string();
-    let entry = Entry::new("Example");
+    let mut entry = Entry::new("Example");
     let entry_id = entry.id.to_string();
+    entry.passkey = Some(PasskeyRecord {
+        username: "legacy@example.com".into(),
+        credential_id: "bGVnYWN5LWNlcmVkZW50aWFs".into(),
+        generated_user_id: None,
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("bGVnYWN5LXVzZXI".into()),
+        backup_eligible: false,
+        backup_state: false,
+    });
     vault.root.entries.push(entry);
 
     let bytes = core
@@ -883,17 +884,36 @@ fn runtime_sets_and_clears_entry_passkey() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    let passkey = EntryPasskeyUpdateDto {
+        username: "alice@example.com".into(),
+        credential_id: "credential-base64url".into(),
+        generated_user_id: Some("generated-user".into()),
+        relying_party: "example.com".into(),
+        user_handle: Some("dXNlci0x".into()),
+        backup_eligible: true,
+        backup_state: false,
+    };
+    let expected_passkey = EntryPasskeyDto {
+        username: passkey.username.clone(),
+        credential_id: passkey.credential_id.clone(),
+        generated_user_id: passkey.generated_user_id.clone(),
+        relying_party: passkey.relying_party.clone(),
+        user_handle: passkey.user_handle.clone(),
+        backup_eligible: passkey.backup_eligible,
+        backup_state: passkey.backup_state,
+    };
+
     let updated = runtime
         .handle(RuntimeCommand::SetEntryPasskey {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            passkey: legacy_entry_passkey_fixture(),
+            passkey: clone_test_passkey_update(&passkey),
         })
         .unwrap();
     match updated {
         RuntimeResponse::EntryDetail(detail) => {
             assert_eq!(detail.id, entry_id);
-            assert_eq!(detail.passkey, Some(legacy_entry_passkey_fixture()));
+            assert_eq!(detail.passkey.as_ref(), Some(&expected_passkey));
         }
         other => panic!("expected entry detail, got {other:?}"),
     }
@@ -906,7 +926,7 @@ fn runtime_sets_and_clears_entry_passkey() {
         .unwrap();
     match detail {
         RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.passkey, Some(legacy_entry_passkey_fixture()));
+            assert_eq!(detail.passkey, Some(expected_passkey));
         }
         other => panic!("expected entry detail, got {other:?}"),
     }
@@ -960,8 +980,18 @@ fn runtime_set_and_clear_entry_passkey_enforces_history_limit() {
 
     let mut vault = Vault::empty("demo");
     vault.history_max_items = Some(1);
-    let entry = Entry::new("Example");
+    let mut entry = Entry::new("Example");
     let entry_id = entry.id.to_string();
+    entry.passkey = Some(PasskeyRecord {
+        username: "legacy@example.com".into(),
+        credential_id: "bGVnYWN5LWNlcmVkZW50aWFs".into(),
+        generated_user_id: None,
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
+        relying_party: "example.com".into(),
+        user_handle: Some("bGVnYWN5LXVzZXI".into()),
+        backup_eligible: false,
+        backup_state: false,
+    });
     vault.root.entries.push(entry);
 
     let bytes = core
@@ -978,20 +1008,23 @@ fn runtime_set_and_clear_entry_passkey_enforces_history_limit() {
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
 
+    let passkey = EntryPasskeyUpdateDto {
+        username: "alice@example.com".into(),
+        credential_id: "credential-base64url".into(),
+        generated_user_id: Some("generated-user".into()),
+        relying_party: "example.com".into(),
+        user_handle: Some("dXNlci0x".into()),
+        backup_eligible: true,
+        backup_state: false,
+    };
+
     runtime
         .handle(RuntimeCommand::SetEntryPasskey {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            passkey: legacy_entry_passkey_fixture(),
+            passkey: clone_test_passkey_update(&passkey),
         })
         .unwrap();
-    runtime
-        .handle(RuntimeCommand::ClearEntryPasskey {
-            vault_id: handle.vault_id.clone(),
-            entry_id: entry_id.clone(),
-        })
-        .unwrap();
-
     let history = runtime
         .handle(RuntimeCommand::ListEntryHistory {
             vault_id: handle.vault_id.clone(),
@@ -1007,7 +1040,13 @@ fn runtime_set_and_clear_entry_passkey_enforces_history_limit() {
         .handle(RuntimeCommand::SetEntryPasskey {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            passkey: legacy_entry_passkey_fixture(),
+            passkey,
+        })
+        .unwrap();
+    runtime
+        .handle(RuntimeCommand::ClearEntryPasskey {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
         })
         .unwrap();
 
@@ -1035,7 +1074,7 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,
@@ -1514,7 +1553,7 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
         username: "alice@example.com".into(),
         credential_id: "Zmlyc3QtY3JlZGVudGlhbA".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("Zmlyc3QtdXNlcg".into()),
         backup_eligible: true,
@@ -1528,7 +1567,7 @@ fn runtime_rejects_passkey_assertion_when_ceremony_switches_vault_after_binding(
         username: "mallory@example.com".into(),
         credential_id: "c2Vjb25kLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("c2Vjb25kLXVzZXI".into()),
         backup_eligible: true,
@@ -1657,7 +1696,7 @@ fn runtime_rejects_duplicate_active_passkey_credentials_for_allowed_credential()
             username: username.into(),
             credential_id: "ZHVwbGljYXRlLWNyZWRlbnRpYWw".into(),
             generated_user_id: None,
-            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
             relying_party: "example.com".into(),
             user_handle: Some("dXNlci0x".into()),
             backup_eligible: true,
@@ -1719,7 +1758,7 @@ fn runtime_rejects_passkey_assertion_without_user_presence() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -1785,7 +1824,7 @@ fn runtime_rejects_passkey_assertion_for_relying_party_mismatch() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -1850,7 +1889,7 @@ fn runtime_rejects_passkey_assertion_when_vault_is_locked() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -1957,7 +1996,7 @@ fn runtime_rejects_passkey_assertion_for_unknown_credential() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -2016,7 +2055,7 @@ fn runtime_allows_loopback_http_origin_for_passkey_assertion_smoke_tests() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "127.0.0.1".into(),
         user_handle: None,
         backup_eligible: false,
@@ -2081,7 +2120,7 @@ fn runtime_allows_bracketed_ipv6_loopback_http_origin_for_passkey_assertion_smok
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "::1".into(),
         user_handle: None,
         backup_eligible: false,
@@ -2146,7 +2185,7 @@ fn runtime_rejects_passkey_assertion_when_client_data_frame_context_mismatches_l
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -2274,14 +2313,19 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     assert_eq!(detail.username, "alice@example.com");
     let passkey = detail
         .passkey
-        .as_ref()
         .expect("registered entry should have a passkey");
     assert_eq!(passkey.credential_id, registration.credential_id);
     assert_eq!(passkey.relying_party, "example.com");
     assert_eq!(passkey.user_handle, Some("dXNlci0x".into()));
     assert!(passkey.backup_eligible);
     assert!(passkey.backup_state);
-    assert!(passkey.private_key_pem.contains("BEGIN PRIVATE KEY"));
+    assert!(
+        !serde_json::to_value(&passkey)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .contains_key("privateKeyPem")
+    );
 
     runtime
         .handle(RuntimeCommand::SaveVault {
@@ -2298,6 +2342,14 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
         .iter()
         .find(|entry| entry.id.to_string() == registration.entry_id)
         .expect("created passkey entry");
+    assert!(
+        created_entry
+            .passkey
+            .as_ref()
+            .expect("saved KPEX payload")
+            .private_key_pem
+            .contains("BEGIN PRIVATE KEY")
+    );
     assert_eq!(created_entry.created_at, 59);
     assert_eq!(created_entry.modified_at, 59);
     assert_eq!(created_entry.expiry_time, Some(59));
@@ -2343,7 +2395,7 @@ fn runtime_rejects_passkey_registration_when_generated_credential_id_collides() 
         username: "existing@example.net".into(),
         credential_id: colliding_credential_id.into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "other.example".into(),
         user_handle: Some("b3RoZXItdXNlcg".into()),
         backup_eligible: true,
@@ -2556,7 +2608,7 @@ fn runtime_omits_duplicate_passkey_credential_ids_from_discoverable_list() {
             username: username.into(),
             credential_id: duplicate_credential_id.into(),
             generated_user_id: None,
-            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
             relying_party: "example.com".into(),
             user_handle: Some(user_handle.into()),
             backup_eligible: false,
@@ -2569,7 +2621,7 @@ fn runtime_omits_duplicate_passkey_credential_ids_from_discoverable_list() {
         username: "unique@example.com".into(),
         credential_id: "dW5pcXVlLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("dW5pcXVlLXVzZXI".into()),
         backup_eligible: false,
@@ -2624,7 +2676,7 @@ fn runtime_reregisters_moved_live_passkey_without_creating_duplicate() {
         username: "alice@example.com".into(),
         credential_id: "bW92ZWQtb2xkLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: false,
@@ -3502,7 +3554,7 @@ fn runtime_reports_passkey_credential_status() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -3568,7 +3620,7 @@ fn runtime_reports_passkey_credential_status_batch() {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: None,
         backup_eligible: false,
@@ -3623,7 +3675,7 @@ fn runtime_scopes_passkey_credential_status_to_relying_party() {
         username: "alice@example.net".into(),
         credential_id: "c2hhcmVkLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "other.example".into(),
         user_handle: None,
         backup_eligible: false,
@@ -3748,7 +3800,7 @@ fn runtime_creates_discoverable_passkey_assertion_for_relying_party() {
         username: "alice@example.com".into(),
         credential_id: "ZGlzY292ZXJhYmxlLTE".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: false,
@@ -3856,7 +3908,7 @@ fn runtime_lists_passkey_credentials_for_relying_party_selection() {
             username: username.into(),
             credential_id: credential_id.into(),
             generated_user_id: None,
-            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
             relying_party: relying_party.into(),
             user_handle: user_handle.map(str::to_owned),
             backup_eligible: false,
@@ -3916,7 +3968,7 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         username: "active@example.com".into(),
         credential_id: "YWN0aXZlLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("YWN0aXZlLXVzZXI".into()),
         backup_eligible: false,
@@ -3929,7 +3981,7 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         username: "moved@example.com".into(),
         credential_id: "bW92ZWQtbGl2ZS1jcmVkZW50aWFs".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "moved.example.com".into(),
         user_handle: Some("bW92ZWQtdXNlcg".into()),
         backup_eligible: false,
@@ -3941,7 +3993,7 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         username: "deleted@example.com".into(),
         credential_id: "ZGVsZXRlZC1jcmVkZW50aWFs".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("ZGVsZXRlZC11c2Vy".into()),
         backup_eligible: false,
@@ -3955,7 +4007,7 @@ fn runtime_skips_recycled_passkeys_for_status_and_assertions() {
         username: "moved-group@example.com".into(),
         credential_id: "bW92ZWQtZ3JvdXAtY3JlZGVudGlhbA".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "moved-group.example.com".into(),
         user_handle: Some("bW92ZWQtZ3JvdXAtdXNlcg".into()),
         backup_eligible: false,
@@ -4154,7 +4206,7 @@ fn runtime_keeps_group_named_recycle_bin_live_without_uuid_metadata() {
         username: "active@example.com".into(),
         credential_id: "YWN0aXZlLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("YWN0aXZlLXVzZXI".into()),
         backup_eligible: false,
@@ -4166,7 +4218,7 @@ fn runtime_keeps_group_named_recycle_bin_live_without_uuid_metadata() {
         username: "deleted@example.com".into(),
         credential_id: "ZGVsZXRlZC1jcmVkZW50aWFs".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("ZGVsZXRlZC11c2Vy".into()),
         backup_eligible: false,
@@ -4243,7 +4295,7 @@ fn runtime_does_not_skip_active_group_named_recycle_bin_when_recycle_bin_is_disa
         username: "active@example.com".into(),
         credential_id: "YWN0aXZlLWNyZWRlbnRpYWw".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("YWN0aXZlLXVzZXI".into()),
         backup_eligible: false,
@@ -4300,7 +4352,7 @@ fn runtime_does_not_skip_recycle_bin_uuid_group_when_recycle_bin_is_disabled() {
         username: "active@example.com".into(),
         credential_id: "YWN0aXZlLXV1aWQtZGlzYWJsZWQ".into(),
         generated_user_id: None,
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("YWN0aXZlLXV1aWQtdXNlcg".into()),
         backup_eligible: false,
@@ -4377,7 +4429,7 @@ fn runtime_rejects_discoverable_passkey_assertion_without_selected_credential() 
             username: username.into(),
             credential_id: credential_id.into(),
             generated_user_id: None,
-            private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+            private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
             relying_party: "example.com".into(),
             user_handle: None,
             backup_eligible: false,
@@ -4467,7 +4519,7 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
         })
         .unwrap();
     let entry_id = match created {
-        RuntimeResponse::EntryDetail(mut detail) => std::mem::take(&mut detail.id),
+        RuntimeResponse::EntryDetail(detail) => detail.id,
         other => panic!("expected entry detail, got {other:?}"),
     };
 
@@ -4646,19 +4698,27 @@ fn runtime_returns_entry_history_through_protocol_commands() {
             history_index: 0,
         })
         .unwrap();
+    let detail_json = serde_json::to_string(&detail).unwrap();
+    assert!(
+        !detail_json.contains("old-secret"),
+        "history response serialized the historical password"
+    );
+    assert!(
+        !detail_json.contains("old-code"),
+        "history response serialized a protected historical custom-field value"
+    );
     match detail {
         RuntimeResponse::EntryHistoryDetail(detail) => {
             assert_eq!(detail.entry_id, entry_id);
             assert_eq!(detail.history_index, 0);
             assert_eq!(detail.title, "Old Example");
             assert_eq!(detail.username, "alice-old");
-            assert_eq!(detail.password, "old-secret");
             assert_eq!(detail.url, "https://example.com/old");
             assert_eq!(detail.notes, "old note");
             assert_eq!(detail.modified_at, 42);
             assert_eq!(detail.custom_fields.len(), 1);
             assert_eq!(detail.custom_fields[0].key, "RecoveryCode");
-            assert_eq!(detail.custom_fields[0].value, "old-code");
+            assert!(detail.custom_fields[0].value.is_empty());
             assert!(detail.custom_fields[0].protected);
             assert_eq!(detail.attachments.len(), 1);
             assert_eq!(detail.attachments[0].name, "backup.txt");
@@ -4696,7 +4756,7 @@ fn runtime_updates_entry_modified_time_after_manager_mutations() {
             username: "alice".into(),
             password: "secret".into(),
             url: "https://example.com".into(),
-            notes: String::new(),
+            notes: String::new().into(),
             totp_uri: None,
         })
         .unwrap()
@@ -5075,7 +5135,7 @@ fn register_ceremony_at_s3_with_discoverable_and_user_verification(
                 expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
                 vault_id,
                 method: PasskeyUserVerificationMethodDto::MasterPassword,
-                password: verification_password.map(str::to_owned),
+                password: verification_password.map(Into::into),
             })
             .unwrap();
     }
@@ -5157,7 +5217,7 @@ fn runtime_with_example_passkey() -> (Runtime, tempfile::TempDir, String) {
         username: "alice@example.com".into(),
         credential_id: "Y3JlZGVudGlhbC0x".into(),
         generated_user_id: Some("generated-user".into()),
-        private_key_pem: TEST_PASSKEY_PRIVATE_KEY.into(),
+        private_key_pem: String::from(TEST_PASSKEY_PRIVATE_KEY).into(),
         relying_party: "example.com".into(),
         user_handle: Some("dXNlci0x".into()),
         backup_eligible: true,

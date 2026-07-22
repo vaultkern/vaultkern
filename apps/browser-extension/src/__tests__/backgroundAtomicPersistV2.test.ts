@@ -12,6 +12,13 @@ const NEXT_TRANSACTION_ID = "00000000-0000-4000-8000-000000000102";
 const OPERATION_ID = "00000000-0000-4000-8000-000000000201";
 const NEXT_OPERATION_ID = "00000000-0000-4000-8000-000000000202";
 const ENTRY_ID = "00000000-0000-4000-8000-000000000501";
+const RUNTIME_CAPABILITIES = [
+  "runtime-core",
+  "browser-extension",
+  "database-settings",
+  "one-drive",
+  "passkey-ceremonies"
+];
 
 function fields(password = "new-secret") {
   return {
@@ -60,24 +67,36 @@ function sessionStorage() {
 function nativePort() {
   const messageListeners: Array<(message: unknown) => void> = [];
   const posted: unknown[] = [];
+  function emit(message: Record<string, unknown>, requestId?: string) {
+    const latest = posted.at(-1) as { requestId?: string } | undefined;
+    const responseRequestId = requestId ?? latest?.requestId;
+    const response = responseRequestId
+      ? { ...message, requestId: responseRequestId }
+      : message;
+    for (const listener of messageListeners) {
+      listener(response);
+    }
+  }
+
   return {
     posted,
-    postMessage: vi.fn((message: unknown) => posted.push(message)),
+    postMessage: vi.fn((message: unknown) => {
+      posted.push(message);
+      const command = (message as { command?: { type?: unknown } })?.command;
+      if (command?.type === "list_recent_vaults") {
+        const requestId = (message as { requestId?: string }).requestId;
+        queueMicrotask(() =>
+          emit({ type: "vault_reference_list", vaults: [] }, requestId)
+        );
+      }
+    }),
     onMessage: {
       addListener(listener: (message: unknown) => void) {
         messageListeners.push(listener);
       }
     },
     onDisconnect: { addListener: vi.fn() },
-    emit(message: Record<string, unknown>) {
-      const latest = posted.at(-1) as { requestId?: string } | undefined;
-      const response = latest?.requestId
-        ? { ...message, requestId: latest.requestId }
-        : message;
-      for (const listener of messageListeners) {
-        listener(response);
-      }
-    }
+    emit
   };
 }
 
@@ -173,6 +192,20 @@ async function setup(options: {
     alarms
   };
   await import("../background");
+  await flush();
+
+  const handshake = commandCalls(port, "handshake").at(-1)?.[0] as
+    | { requestId?: string }
+    | undefined;
+  expect(handshake?.requestId).toEqual(expect.any(String));
+  port.emit(
+    {
+      type: "handshake",
+      protocolVersion: 1,
+      capabilities: RUNTIME_CAPABILITIES
+    },
+    handshake?.requestId
+  );
   await flush();
   return { listeners, port, session, alarms };
 }

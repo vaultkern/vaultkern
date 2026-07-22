@@ -14,5 +14,6 @@
     "smoke:simplewebauthn": "node smoke/simplewebauthn-server.mjs",
     "test:simplewebauthn-smoke": "node --test smoke/simplewebauthn-server.node-test.mjs",
     "test": "node --test smoke/run-chrome-e2e.node-test.mjs && vitest run"
-  }
+  },
+  "license": "GPL-3.0-or-later"
 }

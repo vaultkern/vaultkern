@@ -4,8 +4,15 @@ import { DEFAULT_EXTENSION_SETTINGS } from "@vaultkern/shared-web-ui";
 
 import { createDesktopSettingsStore } from "./settingsStore";
 
-it("persists normalized desktop settings in local storage", async () => {
-  const store = createDesktopSettingsStore(window.localStorage);
+it("persists normalized desired settings through the native store", async () => {
+  let persisted: unknown = {};
+  const saveDesired = vi.fn(async (settings) => {
+    persisted = settings;
+  });
+  const store = createDesktopSettingsStore(
+    async () => persisted,
+    saveDesired
+  );
   const settings = {
     ...DEFAULT_EXTENSION_SETTINGS,
     recentVaultLimit: 4,
@@ -14,146 +21,67 @@ it("persists normalized desktop settings in local storage", async () => {
 
   await store.save(settings);
 
+  expect(saveDesired).toHaveBeenCalledWith(settings);
   await expect(store.load()).resolves.toEqual(settings);
 });
 
-it("recovers from a corrupt desktop settings value", async () => {
-  window.localStorage.setItem("vaultkern.desktop.settings.v1", "not-json");
+it("normalizes an absent native settings generation", async () => {
+  const store = createDesktopSettingsStore(
+    async () => ({}),
+    async () => undefined
+  );
 
-  await expect(
-    createDesktopSettingsStore(window.localStorage).load()
-  ).resolves.toEqual(DEFAULT_EXTENSION_SETTINGS);
+  await expect(store.load()).resolves.toEqual(DEFAULT_EXTENSION_SETTINGS);
 });
 
-it("applies the passkey-provider preference when settings load and save", async () => {
-  const applyPasskeyProviderSetting = vi.fn(async (_enabled: boolean) => undefined);
+it("marks native reconciliation as runtime-owned without exposing a second executor", async () => {
+  let persisted = DEFAULT_EXTENSION_SETTINGS;
   const store = createDesktopSettingsStore(
-    window.localStorage,
-    applyPasskeyProviderSetting
+    async () => persisted,
+    async (settings) => {
+      persisted = settings;
+    }
   );
 
   await store.load();
-  expect(applyPasskeyProviderSetting).toHaveBeenLastCalledWith(false);
-
   await store.save({
     ...DEFAULT_EXTENSION_SETTINGS,
-    passkeyProviderEnabled: true
+    windowsPasskeyProviderEnabled: true
   });
-  expect(applyPasskeyProviderSetting).toHaveBeenLastCalledWith(true);
+  expect(store.nativeReconciliationOwned).toBe(true);
+  expect("reconcile" in store).toBe(false);
 });
 
-it("does not report the passkey provider as enabled when startup activation fails", async () => {
-  window.localStorage.setItem(
-    "vaultkern.desktop.settings.v1",
-    JSON.stringify({
-      ...DEFAULT_EXTENSION_SETTINGS,
-      passkeyProviderEnabled: true
-    })
+it("does not run reconciliation when native desired-state persistence fails", async () => {
+  const store = createDesktopSettingsStore(
+    async () => DEFAULT_EXTENSION_SETTINGS,
+    async () => {
+      throw new Error("simulated native settings failure");
+    }
   );
-  const applyPasskeyProviderSetting = vi.fn(async () => {
-    throw new Error("plugin authenticator is unavailable");
-  });
-  const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
-
-  const settings = await createDesktopSettingsStore(
-    window.localStorage,
-    applyPasskeyProviderSetting
-  ).load();
-
-  expect(settings.passkeyProviderEnabled).toBe(false);
-  expect(applyPasskeyProviderSetting).toHaveBeenCalledWith(true);
-  consoleError.mockRestore();
-});
-
-it("does not report the passkey provider as enabled when Windows returns false", async () => {
-  window.localStorage.setItem(
-    "vaultkern.desktop.settings.v1",
-    JSON.stringify({
-      ...DEFAULT_EXTENSION_SETTINGS,
-      passkeyProviderEnabled: true
-    })
-  );
-  const applyPasskeyProviderSetting = vi.fn(async () => false);
-
-  const settings = await createDesktopSettingsStore(
-    window.localStorage,
-    applyPasskeyProviderSetting
-  ).load();
-
-  expect(settings.passkeyProviderEnabled).toBe(false);
-  expect(applyPasskeyProviderSetting.mock.calls).toEqual([[true], [false]]);
-});
-
-it("does not persist an enabled provider preference when Windows returns false", async () => {
-  let callbackEnabled = false;
-  const applyPasskeyProviderSetting = vi.fn(async (enabled: boolean) => {
-    callbackEnabled = enabled;
-    return false;
-  });
-  const storage = {
-    getItem: vi.fn(() => JSON.stringify(DEFAULT_EXTENSION_SETTINGS)),
-    setItem: vi.fn(),
-    removeItem: vi.fn()
-  };
-  const store = createDesktopSettingsStore(storage, applyPasskeyProviderSetting);
 
   await expect(
     store.save({
       ...DEFAULT_EXTENSION_SETTINGS,
-      passkeyProviderEnabled: true
+      windowsPasskeyProviderEnabled: true
     })
-  ).rejects.toThrow("Windows did not enable the passkey provider");
-
-  expect(storage.setItem).not.toHaveBeenCalled();
-  expect(applyPasskeyProviderSetting.mock.calls).toEqual([[true], [false]]);
-  expect(callbackEnabled).toBe(false);
+  ).rejects.toThrow("simulated native settings failure");
+  expect(store.nativeReconciliationOwned).toBe(true);
 });
 
-it("accepts a false Windows result when disabling the provider", async () => {
-  const applyPasskeyProviderSetting = vi.fn(async () => false);
-  const storage = {
-    getItem: vi.fn(() =>
-      JSON.stringify({
-        ...DEFAULT_EXTENSION_SETTINGS,
-        passkeyProviderEnabled: true
-      })
-    ),
-    setItem: vi.fn(),
-    removeItem: vi.fn()
-  };
-  const store = createDesktopSettingsStore(storage, applyPasskeyProviderSetting);
-
-  await store.save({
-    ...DEFAULT_EXTENSION_SETTINGS,
-    passkeyProviderEnabled: false
-  });
-
-  expect(storage.setItem).toHaveBeenCalledWith(
-    "vaultkern.desktop.settings.v1",
-    JSON.stringify({
-      ...DEFAULT_EXTENSION_SETTINGS,
-      passkeyProviderEnabled: false
-    })
+it("forwards manual quick-unlock enrollment only as input to the native reconciler", async () => {
+  const queueEnrollment = vi.fn(async () => undefined);
+  const store = createDesktopSettingsStore(
+    async () => DEFAULT_EXTENSION_SETTINGS,
+    async () => undefined,
+    queueEnrollment
   );
-});
-
-it("rolls back the provider when persisting its setting fails", async () => {
-  const applyPasskeyProviderSetting = vi.fn(async (_enabled: boolean) => undefined);
-  const storage = {
-    getItem: vi.fn(() => JSON.stringify(DEFAULT_EXTENSION_SETTINGS)),
-    setItem: vi.fn(() => {
-      throw new Error("simulated local-storage failure");
-    }),
-    removeItem: vi.fn()
+  const credentials = {
+    password: "demo-password",
+    keyFilePath: "demo.keyx"
   };
-  const store = createDesktopSettingsStore(storage, applyPasskeyProviderSetting);
 
-  await expect(
-    store.save({
-      ...DEFAULT_EXTENSION_SETTINGS,
-      passkeyProviderEnabled: true
-    })
-  ).rejects.toThrow("simulated local-storage failure");
+  await store.queueQuickUnlockEnrollment?.(credentials);
 
-  expect(applyPasskeyProviderSetting.mock.calls).toEqual([[true], [false]]);
+  expect(queueEnrollment).toHaveBeenCalledWith(credentials);
 });

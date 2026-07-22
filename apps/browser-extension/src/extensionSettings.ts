@@ -1,6 +1,6 @@
 import {
   DEFAULT_EXTENSION_SETTINGS,
-  normalizeExtensionSettings
+  normalizeBrowserExtensionSettings
 } from "@vaultkern/shared-web-ui";
 import type { ExtensionSettingsStore } from "@vaultkern/shared-web-ui";
 
@@ -21,32 +21,57 @@ export function createChromeExtensionSettingsStore(
 
   if (!storage) {
     return {
+      surface: "browser",
       async load() {
         return DEFAULT_EXTENSION_SETTINGS;
       },
       async save() {
-        return undefined;
+        throw new Error("chrome settings storage is unavailable");
       }
     };
   }
 
   return {
+    surface: "browser",
     async load() {
-      return new Promise((resolve) => {
+      return new Promise((resolve, reject) => {
         storage.get(EXTENSION_SETTINGS_STORAGE_KEY, (items) => {
-          resolve(normalizeExtensionSettings(items[EXTENSION_SETTINGS_STORAGE_KEY]));
+          const lastError = getChromeLastError();
+          if (lastError) {
+            reject(new Error(lastError));
+            return;
+          }
+          resolve(normalizeBrowserExtensionSettings(items[EXTENSION_SETTINGS_STORAGE_KEY]));
         });
       });
     },
     async save(settings) {
-      await new Promise<void>((resolve) => {
+      await new Promise<void>((resolve, reject) => {
         storage.set(
-          { [EXTENSION_SETTINGS_STORAGE_KEY]: normalizeExtensionSettings(settings) },
-          resolve
+          {
+            [EXTENSION_SETTINGS_STORAGE_KEY]:
+              normalizeBrowserExtensionSettings(settings)
+          },
+          () => {
+            const lastError = getChromeLastError();
+            if (lastError) {
+              reject(new Error(lastError));
+              return;
+            }
+            resolve();
+          }
         );
       });
     }
   };
+}
+
+function getChromeLastError(): string | null {
+  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
+  const lastError = chromeApi?.runtime?.lastError;
+  return typeof lastError?.message === "string" && lastError.message
+    ? lastError.message
+    : null;
 }
 
 function getChromeStorage() {

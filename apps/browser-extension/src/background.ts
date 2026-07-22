@@ -1,6 +1,7 @@
-import { RuntimeClient } from "@vaultkern/runtime-web-client";
+import { RuntimeClient, createNegotiatedRuntimeTransport } from "@vaultkern/runtime-web-client";
 
 import { createNativeMessagingBridge } from "./nativeBridge";
+import { createRecentVaultReconciler } from "./recentVaultReconciler";
 import {
   EXTENSION_SETTINGS_STORAGE_KEY,
   createChromeExtensionSettingsStore
@@ -44,7 +45,7 @@ const extensionSettingsStore = createChromeExtensionSettingsStore();
 let webAuthnProxyAttached = false;
 let webAuthnProxySyncPromise: Promise<void> | null = null;
 let webAuthnProxySyncRequested = false;
-let passkeyProviderEnabled = false;
+let browserPasskeyProxyEnabled = false;
 let nativeKeepAliveTimer: ReturnType<typeof setInterval> | null = null;
 let pageLoadAutofillAttemptSequence = 0;
 let nativeRuntimeClient: RuntimeClient | null = null;
@@ -1035,7 +1036,7 @@ function serializeError(error: unknown) {
   };
 }
 
-const nativeBridge =
+const rawNativeBridge =
   chromeApi?.runtime?.connectNative && chromeApi?.runtime?.onMessage
     ? createNativeMessagingBridge(
         chromeApi.runtime.connectNative.bind(chromeApi.runtime),
@@ -1054,9 +1055,36 @@ const nativeBridge =
         }
       )
     : null;
+const nativeBridge = rawNativeBridge
+  ? createNegotiatedRuntimeTransport(rawNativeBridge, [
+      "runtime-core",
+      "browser-extension",
+      "database-settings",
+      "one-drive",
+      "passkey-ceremonies"
+    ])
+  : null;
 nativeRuntimeClient = nativeBridge
   ? new RuntimeClient({ send: (message) => sendRuntimeMessage(message) })
   : null;
+const recentVaultReconciler = nativeRuntimeClient
+  ? createRecentVaultReconciler(extensionSettingsStore, nativeRuntimeClient)
+  : null;
+
+function scheduleRecentVaultReconciliation() {
+  void recentVaultReconciler?.schedule().catch((error) => {
+    console.error("failed to reconcile the recent-vault limit", error);
+  });
+}
+
+function scheduleSavedSettingsReconciliation() {
+  scheduleRecentVaultReconciliation();
+  if (chromeApi?.webAuthenticationProxy) {
+    void syncWebAuthnProxy().catch((error) => {
+      console.error("failed to reconcile the WebAuthn proxy", error);
+    });
+  }
+}
 
 function beginDetachedAutofillRecovery(transactionId: string) {
   const active = activeDetachedAutofillRecoveries.get(transactionId);
@@ -1441,30 +1469,18 @@ if (chromeApi?.webAuthenticationProxy) {
     registerWebAuthnProxyRequestHandlers(chromeApi, sendRuntimeCommand);
   }
 
-  void syncWebAuthnProxy();
-
-  chromeApi.storage?.onChanged?.addListener?.(
-    (changes: Record<string, unknown>, areaName: string) => {
-      if (areaName !== "local" || !(EXTENSION_SETTINGS_STORAGE_KEY in changes)) {
-        return;
-      }
-
-      void syncWebAuthnProxy();
-    }
-  );
-
   chromeApi.tabs?.onUpdated?.addListener?.(
     (tabId: number, changeInfo: { status?: string }) => {
       if (
         webAuthnPageHookRegistered &&
-        passkeyProviderEnabled &&
+        browserPasskeyProxyEnabled &&
         changeInfo.status === "complete"
       ) {
         void recordWebAuthnDebug(chromeApi, {
           event: "page_hook_tab_updated",
           tabId,
           status: changeInfo.status,
-          enabled: passkeyProviderEnabled,
+          enabled: browserPasskeyProxyEnabled,
           registered: webAuthnPageHookRegistered
         });
         void injectWebAuthnPageHookIntoTab(tabId);
@@ -1472,6 +1488,17 @@ if (chromeApi?.webAuthenticationProxy) {
     }
   );
 }
+
+scheduleSavedSettingsReconciliation();
+
+chromeApi?.storage?.onChanged?.addListener?.(
+  (changes: Record<string, unknown>, areaName: string) => {
+    if (areaName !== "local" || !(EXTENSION_SETTINGS_STORAGE_KEY in changes)) {
+      return;
+    }
+    scheduleSavedSettingsReconciliation();
+  }
+);
 
 function syncWebAuthnProxy(): Promise<void> {
   webAuthnProxySyncRequested = true;
@@ -1500,8 +1527,8 @@ async function syncWebAuthnProxyOnce() {
   }
 
   const settings = await extensionSettingsStore.load();
-  passkeyProviderEnabled = settings.passkeyProviderEnabled;
-  if (settings.passkeyProviderEnabled) {
+  browserPasskeyProxyEnabled = settings.browserPasskeyProxyEnabled;
+  if (settings.browserPasskeyProxyEnabled) {
     if (webAuthnProxyAttached) {
       await registerWebAuthnPageHook();
       return;
@@ -1743,11 +1770,28 @@ async function sendRuntimeMessage(message: unknown) {
   try {
     const response = await nativeBridge.send(message);
     syncNativeKeepAliveFromResponse(response);
+    if (isSuccessfulVaultUnlock(message, response)) {
+      scheduleSavedSettingsReconciliation();
+    }
     return response;
   } catch (error) {
     stopNativeKeepAlive();
     throw error;
   }
+}
+
+function isSuccessfulVaultUnlock(message: unknown, response: unknown) {
+  const commandType = (
+    message as { command?: { type?: unknown } } | null
+  )?.command?.type;
+  return (
+    (commandType === "unlock_current_vault" ||
+      commandType === "unlock_current_vault_with_password" ||
+      commandType === "unlock_current_vault_with_quick_unlock" ||
+      commandType === "unlock_vault" ||
+      commandType === "unlock_with_password") &&
+    sessionStateFromResponse(response)?.unlocked === true
+  );
 }
 
 function syncNativeKeepAliveFromResponse(response: unknown) {
@@ -1759,7 +1803,7 @@ function syncNativeKeepAliveFromResponse(response: unknown) {
   if (
     session.unlocked &&
     session.activeVaultId &&
-    passkeyProviderEnabled &&
+    browserPasskeyProxyEnabled &&
     webAuthnProxyAttached
   ) {
     startNativeKeepAlive();

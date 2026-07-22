@@ -10,12 +10,19 @@ beforeEach(() => {
 
 describe("extensionTransport", () => {
   it("sends runtime commands through chrome.runtime.sendMessage", async () => {
-    const sendMessage = vi.fn(async () => ({
-      type: "session_state",
-      unlocked: true,
-      activeVaultId: "vault-1",
-      supportsBiometricUnlock: false
-    }));
+    const sendMessage = vi
+      .fn()
+      .mockResolvedValueOnce({
+        type: "handshake",
+        protocolVersion: 1,
+        capabilities: ["runtime-core", "browser-extension"]
+      })
+      .mockResolvedValueOnce({
+        type: "session_state",
+        unlocked: true,
+        activeVaultId: "vault-1",
+        supportsBiometricUnlock: false
+      });
     const sendNativeMessage = vi.fn();
 
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
@@ -32,7 +39,8 @@ describe("extensionTransport", () => {
       command: { type: "get_session_state" }
     });
 
-    expect(sendMessage).toHaveBeenCalledWith({
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenNthCalledWith(1, {
       version: 1,
       command: { type: "get_session_state" }
     });

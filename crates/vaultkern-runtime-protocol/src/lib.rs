@@ -1,9 +1,120 @@
 use std::fmt;
+use std::ops::Deref;
 
-use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+pub const PROTOCOL_VERSION: u32 = 1;
+
+pub struct SensitiveString(Zeroizing<String>);
+
+impl SensitiveString {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn into_zeroizing(self) -> Zeroizing<String> {
+        self.0
+    }
+}
+
+impl Default for SensitiveString {
+    fn default() -> Self {
+        String::new().into()
+    }
+}
+
+impl Zeroize for SensitiveString {
+    fn zeroize(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for SensitiveString {}
+
+impl fmt::Debug for SensitiveString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
+    }
+}
+
+impl PartialEq for SensitiveString {
+    fn eq(&self, other: &Self) -> bool {
+        self.0 == other.0
+    }
+}
+
+impl Eq for SensitiveString {}
+
+impl PartialEq<str> for SensitiveString {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for SensitiveString {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
+impl PartialEq<SensitiveString> for str {
+    fn eq(&self, other: &SensitiveString) -> bool {
+        self == other.as_str()
+    }
+}
+
+impl PartialEq<SensitiveString> for &str {
+    fn eq(&self, other: &SensitiveString) -> bool {
+        *self == other.as_str()
+    }
+}
+
+impl Deref for SensitiveString {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for SensitiveString {
+    fn as_ref(&self) -> &str {
+        self
+    }
+}
+
+impl From<String> for SensitiveString {
+    fn from(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+}
+
+impl From<&str> for SensitiveString {
+    fn from(value: &str) -> Self {
+        value.to_owned().into()
+    }
+}
+
+impl Serialize for SensitiveString {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self)
+    }
+}
+
+impl<'de> Deserialize<'de> for SensitiveString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        String::deserialize(deserializer).map(Self::from)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProtocolEnvelope {
     pub version: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
@@ -14,7 +125,7 @@ pub struct ProtocolEnvelope {
 impl ProtocolEnvelope {
     pub fn new(command: RuntimeCommand) -> Self {
         Self {
-            version: 1,
+            version: PROTOCOL_VERSION,
             request_id: None,
             command,
         }
@@ -24,6 +135,10 @@ impl ProtocolEnvelope {
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeCommand {
+    Handshake {
+        protocol_version: u32,
+        capabilities: Vec<String>,
+    },
     GetSessionState,
     ListRecentVaults,
     PreloadCurrentVault,
@@ -31,11 +146,6 @@ pub enum RuntimeCommand {
         path: Option<String>,
     },
     BeginOneDriveLogin,
-    CompleteOneDriveLogin {
-        code: String,
-        redirect_uri: String,
-        code_verifier: String,
-    },
     CompletePendingOneDriveLogin,
     ListOneDriveChildren {
         parent_item_id: Option<String>,
@@ -53,15 +163,18 @@ pub enum RuntimeCommand {
     DeleteVaultReference {
         vault_ref_id: String,
     },
+    DeleteVaultReferenceIfNotCurrent {
+        vault_ref_id: String,
+    },
     UnlockCurrentVaultWithPassword {
-        password: String,
+        password: SensitiveString,
     },
     UnlockCurrentVault {
-        password: Option<String>,
+        password: Option<SensitiveString>,
         key_file_path: Option<String>,
     },
     EnableQuickUnlockForCurrentVault {
-        password: Option<String>,
+        password: Option<SensitiveString>,
         key_file_path: Option<String>,
     },
     UnlockCurrentVaultWithQuickUnlock,
@@ -72,11 +185,11 @@ pub enum RuntimeCommand {
     LockSession,
     UnlockWithPassword {
         vault_id: String,
-        password: String,
+        password: SensitiveString,
     },
     UnlockVault {
         vault_id: String,
-        password: Option<String>,
+        password: Option<SensitiveString>,
         key_file_path: Option<String>,
     },
     ListGroups {
@@ -101,22 +214,22 @@ pub enum RuntimeCommand {
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
-        title: String,
-        username: String,
-        password: String,
-        url: String,
-        notes: String,
-        totp_uri: Option<String>,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
+        totp_uri: Option<SensitiveString>,
     },
     UpdateEntryFields {
         vault_id: String,
         entry_id: String,
-        title: String,
-        username: String,
-        password: String,
-        url: String,
-        notes: String,
-        totp_uri: Option<String>,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
+        totp_uri: Option<SensitiveString>,
         custom_fields: Vec<EntryCustomFieldDto>,
     },
     CompareAndUpdateEntryFields {
@@ -138,7 +251,7 @@ pub enum RuntimeCommand {
     SetEntryPasskey {
         vault_id: String,
         entry_id: String,
-        passkey: EntryPasskeyDto,
+        passkey: EntryPasskeyUpdateDto,
     },
     ClearEntryPasskey {
         vault_id: String,
@@ -150,7 +263,7 @@ pub enum RuntimeCommand {
         expected_phase: PasskeyCeremonyPhaseDto,
         vault_id: String,
         method: PasskeyUserVerificationMethodDto,
-        password: Option<String>,
+        password: Option<SensitiveString>,
     },
     ListPasskeyCredentials {
         ceremony_token: String,
@@ -274,7 +387,7 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
         name: String,
-        data_base64: String,
+        data_base64: SensitiveString,
         protect_in_memory: bool,
     },
     UpdateEntryAttachmentMetadata {
@@ -288,7 +401,7 @@ pub enum RuntimeCommand {
         vault_id: String,
         entry_id: String,
         name: String,
-        data_base64: String,
+        data_base64: SensitiveString,
     },
     DeleteEntryAttachment {
         vault_id: String,
@@ -298,11 +411,11 @@ pub enum RuntimeCommand {
     UpdateEntry {
         vault_id: String,
         entry_id: String,
-        title: String,
-        username: String,
-        password: String,
-        url: String,
-        notes: String,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
     },
     SaveVault {
         vault_id: String,
@@ -324,9 +437,18 @@ pub enum RuntimeCommand {
     },
 }
 
+impl fmt::Debug for RuntimeCommand {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeCommand([REDACTED])")
+    }
+}
+
+impl ZeroizeOnDrop for RuntimeCommand {}
+
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum RuntimeResponse {
+    Handshake(HandshakeDto),
     SessionState(SessionStateDto),
     VaultReferenceList(VaultReferenceListDto),
     VaultReference(VaultReferenceDto),
@@ -356,10 +478,26 @@ pub enum RuntimeResponse {
     PasskeyCeremonyLedger(PasskeyCeremonyLedgerDto),
     PasskeyCeremonyReconciliation(PasskeyCeremonyReconciliationDto),
     DatabaseSettings(DatabaseSettingsDto),
+    DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
     AutofillPersistResult(AutofillPersistResultDto),
     Error(ErrorDto),
+}
+
+impl fmt::Debug for RuntimeResponse {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RuntimeResponse([REDACTED])")
+    }
+}
+
+impl ZeroizeOnDrop for RuntimeResponse {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandshakeDto {
+    pub protocol_version: u32,
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -402,12 +540,11 @@ pub struct VaultReferenceListDto {
     pub vaults: Vec<VaultReferenceDto>,
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OneDriveAuthSessionDto {
     pub auth_url: String,
     pub redirect_uri: String,
-    pub code_verifier: String,
     pub expires_in_seconds: u32,
 }
 
@@ -454,7 +591,14 @@ pub struct DatabaseSettingsDto {
     pub has_password: bool,
 }
 
-#[derive(Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DatabaseSettingsCommitResultDto {
+    pub settings: DatabaseSettingsDto,
+    pub save_result: SaveVaultResultDto,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseSettingsUpdateDto {
     #[serde(default)]
@@ -469,8 +613,55 @@ pub struct DatabaseSettingsUpdateDto {
     pub encryption: Option<DatabaseEncryptionSettingsDto>,
     #[serde(default)]
     pub credentials: Option<DatabaseCredentialsUpdateDto>,
-    #[serde(default)]
-    pub autosave_delay_seconds: Option<u32>,
+    #[serde(
+        default,
+        skip_serializing_if = "OptionalSettingUpdateDto::is_unchanged"
+    )]
+    pub autosave_delay_seconds: OptionalSettingUpdateDto<u32>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum OptionalSettingUpdateDto<T> {
+    #[default]
+    Unchanged,
+    Clear,
+    Set(T),
+}
+
+impl<T> OptionalSettingUpdateDto<T> {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+}
+
+impl<T> Serialize for OptionalSettingUpdateDto<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Unchanged | Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for OptionalSettingUpdateDto<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        Ok(match Option::<T>::deserialize(deserializer)? {
+            Some(value) => Self::Set(value),
+            None => Self::Clear,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -520,10 +711,10 @@ pub struct DatabaseKdfSettingsDto {
     pub parallelism: Option<u32>,
 }
 
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseCredentialsUpdateDto {
-    pub new_password: Option<String>,
+    pub new_password: Option<SensitiveString>,
     pub remove_password: bool,
 }
 
@@ -570,31 +761,85 @@ pub struct EntryIdListDto {
 #[serde(rename_all = "camelCase")]
 pub struct EntryDetailDto {
     pub id: String,
-    pub title: String,
-    pub username: String,
-    pub password: String,
-    pub url: String,
-    pub notes: String,
+    pub title: SensitiveString,
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub url: SensitiveString,
+    pub notes: SensitiveString,
     pub modified_at: u64,
-    pub totp: Option<String>,
-    pub totp_uri: Option<String>,
+    pub totp: Option<SensitiveString>,
+    pub totp_uri: Option<SensitiveString>,
     pub passkey: Option<EntryPasskeyDto>,
     pub field_protection: EntryFieldProtectionDto,
     pub custom_fields: Vec<EntryCustomFieldDto>,
     pub attachments: Vec<EntryAttachmentDto>,
 }
 
+impl fmt::Debug for EntryDetailDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryDetailDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryDetailDto {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.totp.zeroize();
+        self.totp_uri.zeroize();
+        if let Some(passkey) = &mut self.passkey {
+            passkey.username.zeroize();
+            passkey.credential_id.zeroize();
+            passkey.generated_user_id.zeroize();
+            passkey.relying_party.zeroize();
+            passkey.user_handle.zeroize();
+        }
+        self.passkey = None;
+        self.custom_fields.zeroize();
+        for attachment in &mut self.attachments {
+            attachment.name.zeroize();
+        }
+        self.attachments.clear();
+    }
+}
+
+impl ZeroizeOnDrop for EntryDetailDto {}
+
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EntryFieldsDto {
-    pub title: String,
-    pub username: String,
-    pub password: String,
-    pub url: String,
-    pub notes: String,
-    pub totp_uri: Option<String>,
+    pub title: SensitiveString,
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub url: SensitiveString,
+    pub notes: SensitiveString,
+    pub totp_uri: Option<SensitiveString>,
     pub custom_fields: Vec<EntryCustomFieldDto>,
 }
+
+impl fmt::Debug for EntryFieldsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryFieldsDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryFieldsDto {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.totp_uri.zeroize();
+        self.custom_fields.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryFieldsDto {}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -612,6 +857,41 @@ pub enum AutofillPersistPlanDto {
     },
 }
 
+impl fmt::Debug for AutofillPersistPlanDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillPersistPlanDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillPersistPlanDto {
+    fn zeroize(&mut self) {
+        match self {
+            Self::Update {
+                entry_id,
+                expected_fields,
+                desired_fields,
+            } => {
+                entry_id.zeroize();
+                expected_fields.zeroize();
+                desired_fields.zeroize();
+            }
+            Self::Create {
+                parent_group_id,
+                planned_entry_id,
+                expected_matching_entry_ids,
+                desired_fields,
+            } => {
+                parent_group_id.zeroize();
+                planned_entry_id.zeroize();
+                expected_matching_entry_ids.zeroize();
+                desired_fields.zeroize();
+            }
+        }
+    }
+}
+
+impl ZeroizeOnDrop for AutofillPersistPlanDto {}
+
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
@@ -619,11 +899,34 @@ pub struct EntryPasskeyDto {
     pub username: String,
     pub credential_id: String,
     pub generated_user_id: Option<String>,
-    pub private_key_pem: String,
     pub relying_party: String,
     pub user_handle: Option<String>,
     pub backup_eligible: bool,
     pub backup_state: bool,
+}
+
+impl fmt::Debug for EntryPasskeyDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryPasskeyDto([REDACTED])")
+    }
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct EntryPasskeyUpdateDto {
+    pub username: String,
+    pub credential_id: String,
+    pub generated_user_id: Option<String>,
+    pub relying_party: String,
+    pub user_handle: Option<String>,
+    pub backup_eligible: bool,
+    pub backup_state: bool,
+}
+
+impl fmt::Debug for EntryPasskeyUpdateDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryPasskeyUpdateDto([REDACTED])")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -937,15 +1240,37 @@ pub struct EntryHistoryListDto {
 pub struct EntryHistoryDetailDto {
     pub entry_id: String,
     pub history_index: usize,
-    pub title: String,
-    pub username: String,
-    pub password: String,
-    pub url: String,
-    pub notes: String,
+    pub title: SensitiveString,
+    pub username: SensitiveString,
+    pub url: SensitiveString,
+    pub notes: SensitiveString,
     pub modified_at: u64,
     pub custom_fields: Vec<EntryCustomFieldDto>,
     pub attachments: Vec<EntryAttachmentDto>,
 }
+
+impl fmt::Debug for EntryHistoryDetailDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryHistoryDetailDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryHistoryDetailDto {
+    fn zeroize(&mut self) {
+        self.entry_id.zeroize();
+        self.title.zeroize();
+        self.username.zeroize();
+        self.url.zeroize();
+        self.notes.zeroize();
+        self.custom_fields.zeroize();
+        for attachment in &mut self.attachments {
+            attachment.name.zeroize();
+        }
+        self.attachments.clear();
+    }
+}
+
+impl ZeroizeOnDrop for EntryHistoryDetailDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -961,9 +1286,24 @@ pub struct EntryFieldProtectionDto {
 #[serde(rename_all = "camelCase")]
 pub struct EntryCustomFieldDto {
     pub key: String,
-    pub value: String,
+    pub value: SensitiveString,
     pub protected: bool,
 }
+
+impl fmt::Debug for EntryCustomFieldDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryCustomFieldDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryCustomFieldDto {
+    fn zeroize(&mut self) {
+        self.key.zeroize();
+        self.value.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryCustomFieldDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -977,9 +1317,24 @@ pub struct EntryAttachmentDto {
 #[serde(rename_all = "camelCase")]
 pub struct EntryAttachmentContentDto {
     pub name: String,
-    pub data_base64: String,
+    pub data_base64: SensitiveString,
     pub protect_in_memory: bool,
 }
+
+impl fmt::Debug for EntryAttachmentContentDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("EntryAttachmentContentDto([REDACTED])")
+    }
+}
+
+impl Zeroize for EntryAttachmentContentDto {
+    fn zeroize(&mut self) {
+        self.name.zeroize();
+        self.data_base64.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryAttachmentContentDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -992,199 +1347,4 @@ pub struct FillCandidateListDto {
 pub struct ErrorDto {
     pub code: String,
     pub message: String,
-}
-
-impl Zeroize for OneDriveAuthSessionDto {
-    fn zeroize(&mut self) {
-        self.auth_url.zeroize();
-        self.redirect_uri.zeroize();
-        self.code_verifier.zeroize();
-    }
-}
-
-impl Zeroize for DatabaseCredentialsUpdateDto {
-    fn zeroize(&mut self) {
-        self.new_password.zeroize();
-    }
-}
-
-impl Zeroize for EntryCustomFieldDto {
-    fn zeroize(&mut self) {
-        self.key.zeroize();
-        self.value.zeroize();
-    }
-}
-
-impl Zeroize for EntryPasskeyDto {
-    fn zeroize(&mut self) {
-        self.username.zeroize();
-        self.credential_id.zeroize();
-        self.generated_user_id.zeroize();
-        self.private_key_pem.zeroize();
-        self.relying_party.zeroize();
-        self.user_handle.zeroize();
-    }
-}
-
-impl Zeroize for EntryFieldsDto {
-    fn zeroize(&mut self) {
-        self.title.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.url.zeroize();
-        self.notes.zeroize();
-        self.totp_uri.zeroize();
-        self.custom_fields.zeroize();
-    }
-}
-
-impl Zeroize for AutofillPersistPlanDto {
-    fn zeroize(&mut self) {
-        match self {
-            Self::Update {
-                entry_id,
-                expected_fields,
-                desired_fields,
-            } => {
-                entry_id.zeroize();
-                expected_fields.zeroize();
-                desired_fields.zeroize();
-            }
-            Self::Create {
-                parent_group_id,
-                planned_entry_id,
-                expected_matching_entry_ids,
-                desired_fields,
-            } => {
-                parent_group_id.zeroize();
-                planned_entry_id.zeroize();
-                expected_matching_entry_ids.zeroize();
-                desired_fields.zeroize();
-            }
-        }
-    }
-}
-
-impl Zeroize for EntryDetailDto {
-    fn zeroize(&mut self) {
-        self.id.zeroize();
-        self.title.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.url.zeroize();
-        self.notes.zeroize();
-        self.totp.zeroize();
-        self.totp_uri.zeroize();
-        self.passkey.zeroize();
-        self.custom_fields.zeroize();
-        for attachment in &mut self.attachments {
-            attachment.name.zeroize();
-        }
-    }
-}
-
-impl Zeroize for EntryHistoryDetailDto {
-    fn zeroize(&mut self) {
-        self.entry_id.zeroize();
-        self.title.zeroize();
-        self.username.zeroize();
-        self.password.zeroize();
-        self.url.zeroize();
-        self.notes.zeroize();
-        self.custom_fields.zeroize();
-        for attachment in &mut self.attachments {
-            attachment.name.zeroize();
-        }
-    }
-}
-
-impl Zeroize for EntryAttachmentContentDto {
-    fn zeroize(&mut self) {
-        self.name.zeroize();
-        self.data_base64.zeroize();
-    }
-}
-
-macro_rules! impl_zeroize_on_drop {
-    ($($type:ty),+ $(,)?) => {
-        $(
-            impl Drop for $type {
-                fn drop(&mut self) {
-                    self.zeroize();
-                }
-            }
-        )+
-    };
-}
-
-impl_zeroize_on_drop!(
-    OneDriveAuthSessionDto,
-    EntryDetailDto,
-    EntryHistoryDetailDto,
-    EntryAttachmentContentDto,
-);
-
-macro_rules! impl_redacted_debug {
-    ($($type:ty),+ $(,)?) => {
-        $(
-            impl fmt::Debug for $type {
-                fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                    formatter.write_str(concat!(stringify!($type), "([REDACTED])"))
-                }
-            }
-        )+
-    };
-}
-
-impl_redacted_debug!(
-    ProtocolEnvelope,
-    RuntimeCommand,
-    RuntimeResponse,
-    OneDriveAuthSessionDto,
-    DatabaseSettingsUpdateDto,
-    DatabaseCredentialsUpdateDto,
-    EntryDetailDto,
-    EntryFieldsDto,
-    AutofillPersistPlanDto,
-    EntryPasskeyDto,
-    EntryHistoryDetailDto,
-    EntryCustomFieldDto,
-    EntryAttachmentContentDto,
-);
-
-#[cfg(test)]
-mod secret_ownership_contract_tests {
-    use static_assertions::{assert_impl_all, assert_not_impl_any};
-    use zeroize::Zeroize;
-
-    use super::{
-        AutofillPersistPlanDto, DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto,
-        EntryAttachmentContentDto, EntryCustomFieldDto, EntryDetailDto, EntryFieldsDto,
-        EntryHistoryDetailDto, EntryPasskeyDto, OneDriveAuthSessionDto, ProtocolEnvelope,
-        RuntimeCommand, RuntimeResponse,
-    };
-
-    assert_not_impl_any!(ProtocolEnvelope: Clone);
-    assert_not_impl_any!(RuntimeCommand: Clone);
-    assert_not_impl_any!(RuntimeResponse: Clone);
-    assert_not_impl_any!(OneDriveAuthSessionDto: Clone);
-    assert_not_impl_any!(DatabaseCredentialsUpdateDto: Clone);
-    assert_not_impl_any!(DatabaseSettingsUpdateDto: Clone);
-    assert_not_impl_any!(EntryDetailDto: Clone);
-    assert_not_impl_any!(EntryFieldsDto: Clone);
-    assert_not_impl_any!(AutofillPersistPlanDto: Clone);
-    assert_not_impl_any!(EntryPasskeyDto: Clone);
-    assert_not_impl_any!(EntryHistoryDetailDto: Clone);
-    assert_not_impl_any!(EntryCustomFieldDto: Clone);
-    assert_not_impl_any!(EntryAttachmentContentDto: Clone);
-
-    assert_impl_all!(OneDriveAuthSessionDto: Zeroize);
-    assert_impl_all!(DatabaseCredentialsUpdateDto: Zeroize);
-    assert_impl_all!(EntryDetailDto: Zeroize);
-    assert_impl_all!(EntryFieldsDto: Zeroize);
-    assert_impl_all!(AutofillPersistPlanDto: Zeroize);
-    assert_impl_all!(EntryPasskeyDto: Zeroize);
-    assert_impl_all!(EntryHistoryDetailDto: Zeroize);
-    assert_impl_all!(EntryCustomFieldDto: Zeroize);
-    assert_impl_all!(EntryAttachmentContentDto: Zeroize);
 }

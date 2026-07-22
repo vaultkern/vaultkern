@@ -25,20 +25,22 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
-use crate::state_paths::{extension_state_dir, runtime_state_dir};
+#[cfg(any(windows, test))]
+use crate::state_paths::extension_state_dir;
+use crate::state_paths::runtime_state_dir;
 
 #[cfg(any(windows, test))]
 use crate::providers::durable_file::{
     DurableFaultInjector, DurableFaultPoint, DurableFileIdentity, ExclusiveFileLock,
-    TargetExpectation, TempWriteFaultPoints, create_dir_all_durable, create_durable_backup_copy,
-    opened_file_identity, path_file_identity, publish_temp, remove_if_exists, sync_parent,
+    TargetExpectation, TempWriteFaultPoints, create_dir_all_durable, opened_file_identity,
+    path_file_identity, publish_temp, remove_if_exists, sync_parent, unique_sibling_path,
     write_verified_temp,
 };
 
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 3;
+const QUICK_UNLOCK_ENVELOPE_VERSION: u8 = 4;
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
-const QUICK_UNLOCK_ENVELOPE_SCHEME: &str = "windows-passport-rsa-pkcs1-aes-256-gcm-hello-v3";
+const QUICK_UNLOCK_ENVELOPE_SCHEME: &str = "windows-passport-rsa-pkcs1-aes-256-gcm-hello-v4";
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
 const QUICK_UNLOCK_KEY_STORAGE_PROVIDER: &str = "Microsoft Passport Key Storage Provider";
 #[cfg_attr(not(any(windows, test)), allow(dead_code))]
@@ -48,9 +50,13 @@ const QUICK_UNLOCK_GESTURE_REQUIRED: u32 = 1;
 #[cfg(any(windows, test))]
 const QUICK_UNLOCK_RECORD_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(any(windows, test))]
-const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT: i32 = 1176;
-#[cfg(any(windows, test))]
 const WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2: i32 = 1177;
+#[cfg(any(windows, test))]
+const NTE_BAD_LEN: u32 = 0x8009_0004;
+#[cfg(any(windows, test))]
+const NTE_BAD_DATA: u32 = 0x8009_0005;
+#[cfg(any(windows, test))]
+const NTE_BAD_SIGNATURE: u32 = 0x8009_0006;
 #[cfg(any(windows, test))]
 const NTE_BAD_KEY_STATE: u32 = 0x8009_000b;
 #[cfg(any(windows, test))]
@@ -63,12 +69,13 @@ const NTE_BAD_KEYSET: u32 = 0x8009_0016;
 struct QuickUnlockEnvelope {
     version: u8,
     scheme: String,
+    public_key_sha256: String,
     wrapped_key: String,
     nonce: String,
     ciphertext: String,
 }
 
-#[cfg_attr(not(any(windows, test)), allow(dead_code))]
+#[allow(dead_code)]
 fn is_quick_unlock_envelope(bytes: &[u8]) -> bool {
     serde_json::from_slice::<QuickUnlockEnvelope>(bytes)
         .map(|envelope| {
@@ -149,6 +156,9 @@ fn publish_quick_unlock_record_with(
     parent_guard.validate(parent)?;
     let expectation = quick_unlock_target_expectation(path)?;
     let replacing = matches!(expectation, TargetExpectation::Identity(_));
+    let backup = replacing
+        .then(|| unique_sibling_path(path, "bak"))
+        .transpose()?;
     let temp = write_verified_temp(
         path,
         bytes,
@@ -161,31 +171,11 @@ fn publish_quick_unlock_record_with(
         },
     )
     .with_context(|| format!("failed to prepare quick unlock record: {}", path.display()))?;
-    let backup = if replacing {
-        match create_durable_backup_copy(path, "bak") {
-            Ok(backup) => Some(backup),
-            Err(error) => {
-                let _ = temp.discard();
-                return Err(error).with_context(|| {
-                    format!(
-                        "failed to preserve the previous quick unlock record: {}",
-                        path.display()
-                    )
-                });
-            }
-        }
-    } else {
-        None
-    };
     if let Err(source) = faults
         .check(DurableFaultPoint::BeforeTargetReplace)
         .and_then(|_| parent_guard.validate(parent))
     {
         let _ = temp.discard();
-        if let Some(backup) = &backup {
-            let _ = remove_if_exists(backup);
-            let _ = sync_parent(path);
-        }
         return Err(anyhow::Error::new(source).context(format!(
             "quick unlock record was not published: {}",
             path.display()
@@ -201,12 +191,6 @@ fn publish_quick_unlock_record_with(
         DurableFaultPoint::TargetReplaced,
         DurableFaultPoint::ParentSynced,
     ) {
-        if !error.published
-            && let Some(backup) = &backup
-        {
-            let _ = remove_if_exists(backup);
-            let _ = sync_parent(path);
-        }
         let state = if error.published && quick_unlock_replacement_outcome_is_unknown(&error.source)
         {
             "quick unlock record publication outcome is unknown; recovery artifacts were preserved"
@@ -334,10 +318,7 @@ fn validate_quick_unlock_parent_metadata(metadata: &fs::Metadata) -> io::Result<
 
 #[cfg(any(windows, test))]
 fn quick_unlock_replacement_outcome_is_unknown(error: &io::Error) -> bool {
-    matches!(
-        error.raw_os_error(),
-        Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT | WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
-    )
+    error.raw_os_error() == Some(WINDOWS_ERROR_UNABLE_TO_MOVE_REPLACEMENT_2)
 }
 
 #[cfg(any(windows, test))]
@@ -385,6 +366,30 @@ fn cleanup_quick_unlock_sidecars(path: &Path) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn delete_quick_unlock_record(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        anyhow::bail!("quick unlock record path has no parent directory");
+    };
+    if !parent.exists() {
+        return Ok(());
+    }
+    let parent_guard = QuickUnlockParentGuard::acquire(parent)?;
+    let lock_path = quick_unlock_record_lock_path(path)?;
+    let _lock =
+        ExclusiveFileLock::acquire_with_timeout(&lock_path, QUICK_UNLOCK_RECORD_LOCK_TIMEOUT)?;
+    parent_guard.validate(parent)?;
+    remove_if_exists(path)?;
+    cleanup_quick_unlock_sidecars(path)?;
+    parent_guard.validate(parent)?;
+    sync_parent(path).with_context(|| {
+        format!(
+            "failed to make quick unlock record deletion durable: {}",
+            path.display()
+        )
+    })
 }
 
 #[cfg(any(windows, test))]
@@ -512,6 +517,11 @@ fn is_hello_key_invalidated_status(status: u32) -> bool {
 }
 
 #[cfg(any(windows, test))]
+fn is_quick_unlock_record_invalidated_status(status: u32) -> bool {
+    matches!(status, NTE_BAD_LEN | NTE_BAD_DATA | NTE_BAD_SIGNATURE)
+}
+
+#[cfg(any(windows, test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum HelloKeyOpenDisposition {
     UseOpened,
@@ -564,6 +574,9 @@ pub trait SecureStorageProvider {
         false
     }
     fn delete(&self, key: &str) -> Result<()>;
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        Ok(0)
+    }
 }
 
 pub struct UnsupportedSecureStorageProvider;
@@ -587,30 +600,43 @@ impl SecureStorageProvider for UnsupportedSecureStorageProvider {
 }
 
 pub(crate) fn default_secure_storage_provider() -> Box<dyn SecureStorageProvider> {
-    default_secure_storage_provider_for_extension_id(None)
-}
-
-pub(crate) fn default_secure_storage_provider_for_extension_id(
-    extension_id: Option<&str>,
-) -> Box<dyn SecureStorageProvider> {
     #[cfg(windows)]
     {
         Box::new(WindowsHelloSecureStorageProvider::new(
-            quick_unlock_storage_dir(extension_id),
+            quick_unlock_storage_dir(),
         ))
     }
     #[cfg(not(windows))]
     {
-        let _ = extension_id;
         Box::new(UnsupportedSecureStorageProvider)
     }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-pub(crate) fn quick_unlock_storage_dir(extension_id: Option<&str>) -> PathBuf {
-    extension_id
-        .map(|id| extension_state_dir(id).join("quick-unlock"))
-        .unwrap_or_else(|| runtime_state_dir().join("quick-unlock"))
+pub(crate) fn quick_unlock_storage_dir() -> PathBuf {
+    runtime_state_dir().join("quick-unlock")
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn purge_legacy_extension_quick_unlock_storage(extension_id: &str) -> Result<()> {
+    let legacy = extension_state_dir(extension_id).join("quick-unlock");
+    match fs::symlink_metadata(&legacy) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            anyhow::bail!("legacy extension quick-unlock path is not a private directory")
+        }
+        Ok(_) => {
+            fs::remove_dir_all(&legacy)?;
+            sync_parent(&legacy)?;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(not(any(windows, test)))]
+pub(crate) fn purge_legacy_extension_quick_unlock_storage(_extension_id: &str) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -669,15 +695,21 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         let ciphertext = cipher
             .encrypt(Nonce::from_slice(&nonce), value)
             .map_err(|_| anyhow::anyhow!("failed to encrypt quick unlock credentials"))?;
-        let wrapped_key = with_hello_key(
+        let (wrapped_key, public_key_sha256) = with_hello_key(
             &self.wrapping_key_name()?,
             false,
             self.parent_window,
-            |key, _created| ncrypt_encrypt_pkcs1(key, &data_key[..]),
+            |key, _created| {
+                Ok((
+                    ncrypt_encrypt_pkcs1(key, &data_key[..])?,
+                    hello_public_key_sha256(key)?,
+                ))
+            },
         )?;
         let envelope = QuickUnlockEnvelope {
             version: QUICK_UNLOCK_ENVELOPE_VERSION,
             scheme: QUICK_UNLOCK_ENVELOPE_SCHEME.into(),
+            public_key_sha256,
             wrapped_key: BASE64_STANDARD.encode(wrapped_key),
             nonce: BASE64_STANDARD.encode(nonce),
             ciphertext: BASE64_STANDARD.encode(ciphertext),
@@ -737,6 +769,12 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             false,
             self.parent_window,
             |key, _created| {
+                if hello_public_key_sha256(key)? != envelope.public_key_sha256 {
+                    return Err(SecureStorageError::record_invalidated(
+                        "quick unlock credentials were encrypted by an earlier Windows Hello enrollment",
+                    )
+                    .into());
+                }
                 require_fresh_hello_gesture(
                     key,
                     "Verify with Windows Hello to unlock this VaultKern vault",
@@ -766,7 +804,25 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
         if !path.is_file() {
             return Ok(false);
         }
-        Ok(is_quick_unlock_envelope(&fs::read(path)?))
+        let bytes = fs::read(path)?;
+        let Ok(envelope) = serde_json::from_slice::<QuickUnlockEnvelope>(&bytes) else {
+            return Ok(false);
+        };
+        if envelope.version != QUICK_UNLOCK_ENVELOPE_VERSION
+            || envelope.scheme != QUICK_UNLOCK_ENVELOPE_SCHEME
+        {
+            return Ok(false);
+        }
+        match with_hello_key(
+            &self.wrapping_key_name()?,
+            false,
+            self.parent_window,
+            |key, _created| hello_public_key_sha256(key),
+        ) {
+            Ok(current) => Ok(current == envelope.public_key_sha256),
+            Err(error) if is_hello_key_invalidated(&error) => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     fn store_requires_user_presence(&self) -> bool {
@@ -779,12 +835,63 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
 
     fn delete(&self, key: &str) -> Result<()> {
         let path = self.path_for(key);
-        if path.exists() {
-            fs::remove_file(&path)?;
-            sync_parent(&path)?;
-        }
-        Ok(())
+        delete_quick_unlock_record(&path)
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        purge_quick_unlock_record_directory(&self.dir)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn purge_quick_unlock_record_directory(dir: &Path) -> Result<usize> {
+    match fs::symlink_metadata(dir) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            anyhow::bail!("quick unlock storage path is not a private directory")
+        }
+        Ok(_) => {}
+    }
+    let mut records = std::collections::BTreeSet::new();
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if is_quick_unlock_record_file_name(&name) {
+            records.insert(entry.path());
+            continue;
+        }
+        let Some(candidate) = name
+            .strip_prefix('.')
+            .and_then(|name| name.split_once(".vaultkern."))
+            .map(|(candidate, _)| candidate)
+        else {
+            continue;
+        };
+        if is_quick_unlock_record_file_name(candidate) {
+            records.insert(dir.join(candidate));
+        }
+    }
+    let count = records.len();
+    for record in records {
+        delete_quick_unlock_record(&record)?;
+    }
+    Ok(count)
+}
+
+#[cfg(any(windows, test))]
+fn is_quick_unlock_record_file_name(name: &str) -> bool {
+    let Some(digest) = name
+        .strip_prefix("quick_unlock_")
+        .and_then(|name| name.strip_suffix(".bin"))
+    else {
+        return false;
+    };
+    digest.len() == 64
+        && digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[cfg(windows)]
@@ -893,6 +1000,51 @@ fn with_hello_key<T>(
 
         operation(key, created)
     })
+}
+
+#[cfg(windows)]
+fn hello_public_key_sha256(
+    key: windows_sys::Win32::Security::Cryptography::NCRYPT_KEY_HANDLE,
+) -> Result<String> {
+    use windows_sys::Win32::Security::Cryptography::{BCRYPT_RSAPUBLIC_BLOB, NCryptExportKey};
+
+    let mut required = 0u32;
+    check_ncrypt(
+        unsafe {
+            NCryptExportKey(
+                key,
+                0,
+                BCRYPT_RSAPUBLIC_BLOB,
+                std::ptr::null(),
+                std::ptr::null_mut(),
+                0,
+                &mut required,
+                0,
+            )
+        },
+        "failed to size the Windows Hello public key",
+    )?;
+    let mut public_key = vec![0u8; required as usize];
+    check_ncrypt(
+        unsafe {
+            NCryptExportKey(
+                key,
+                0,
+                BCRYPT_RSAPUBLIC_BLOB,
+                std::ptr::null(),
+                public_key.as_mut_ptr(),
+                required,
+                &mut required,
+                0,
+            )
+        },
+        "failed to export the Windows Hello public key",
+    )?;
+    public_key.truncate(required as usize);
+    Ok(Sha256::digest(&public_key)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 #[cfg(windows)]
@@ -1117,7 +1269,7 @@ fn ncrypt_decrypt_pkcs1(
     use windows_sys::Win32::Security::Cryptography::{NCRYPT_PAD_PKCS1_FLAG, NCryptDecrypt};
 
     let mut output_len = 0u32;
-    check_ncrypt(
+    check_ncrypt_decrypt(
         unsafe {
             NCryptDecrypt(
                 key,
@@ -1133,7 +1285,7 @@ fn ncrypt_decrypt_pkcs1(
         "failed to measure unwrapped quick unlock key",
     )?;
     let mut output = Zeroizing::new(vec![0u8; usize::try_from(output_len)?]);
-    check_ncrypt(
+    check_ncrypt_decrypt(
         unsafe {
             NCryptDecrypt(
                 key,
@@ -1296,6 +1448,18 @@ fn check_ncrypt(status: windows_sys::core::HRESULT, message: &str) -> Result<()>
 }
 
 #[cfg(windows)]
+fn check_ncrypt_decrypt(status: windows_sys::core::HRESULT, message: &str) -> Result<()> {
+    if is_quick_unlock_record_invalidated_status(status as u32) {
+        Err(
+            SecureStorageError::record_invalidated(format!("{message}: 0x{:08x}", status as u32))
+                .into(),
+        )
+    } else {
+        check_ncrypt(status, message)
+    }
+}
+
+#[cfg(windows)]
 fn bytes_of<T>(value: &T) -> &[u8] {
     unsafe {
         std::slice::from_raw_parts((value as *const T).cast::<u8>(), std::mem::size_of::<T>())
@@ -1339,6 +1503,12 @@ impl SecureStorageProvider for MemorySecureStorageProvider {
         self.values.borrow_mut().remove(key);
         Ok(())
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        let count = self.values.borrow().len();
+        self.values.borrow_mut().clear();
+        Ok(count)
+    }
 }
 
 pub(crate) struct FailingContainsSecureStorageProvider {
@@ -1373,6 +1543,12 @@ impl SecureStorageProvider for FailingContainsSecureStorageProvider {
         self.values.borrow_mut().remove(key);
         Ok(())
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        let count = self.values.borrow().len();
+        self.values.borrow_mut().clear();
+        Ok(count)
+    }
 }
 
 pub(crate) struct FailingDeleteSecureStorageProvider {
@@ -1406,14 +1582,19 @@ impl SecureStorageProvider for FailingDeleteSecureStorageProvider {
     fn delete(&self, _key: &str) -> Result<()> {
         anyhow::bail!("injected secure storage delete failure")
     }
+
+    fn purge_quick_unlock_records(&self) -> Result<usize> {
+        anyhow::bail!("injected secure storage delete failure")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         MemorySecureStorageProvider, SecureStorageError, SecureStorageProvider,
-        is_quick_unlock_envelope, is_secure_storage_cancelled, publish_quick_unlock_record,
-        publish_quick_unlock_record_with, quick_unlock_gesture_required,
+        delete_quick_unlock_record, is_quick_unlock_envelope, is_secure_storage_cancelled,
+        publish_quick_unlock_record, publish_quick_unlock_record_with,
+        purge_quick_unlock_record_directory, quick_unlock_gesture_required,
         quick_unlock_key_storage_provider_name, quick_unlock_ngc_cache_type,
         quick_unlock_persistent_key_name, quick_unlock_record_lock_path,
         quick_unlock_replacement_outcome_is_unknown, quick_unlock_storage_dir,
@@ -1434,6 +1615,43 @@ mod tests {
 
         assert_zeroizing(&loaded);
         assert_eq!(loaded.as_slice(), b"secret");
+    }
+
+    #[test]
+    fn deleting_quick_unlock_removes_target_and_recovery_sidecars() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault.bin");
+        let temp = dir.path().join(".vault.bin.vaultkern.tmp.test");
+        let backup = dir.path().join(".vault.bin.vaultkern.bak.test");
+        std::fs::write(&path, b"current-secret").unwrap();
+        std::fs::write(&temp, b"temporary-secret").unwrap();
+        std::fs::write(&backup, b"previous-secret").unwrap();
+
+        delete_quick_unlock_record(&path).unwrap();
+
+        assert!(!path.exists());
+        assert!(!temp.exists());
+        assert!(!backup.exists());
+        delete_quick_unlock_record(&path).expect("repeated deletion is durable and idempotent");
+    }
+
+    #[test]
+    fn purging_quick_unlock_uses_the_actual_record_directory_not_a_reference_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let digest = "a".repeat(64);
+        let record = dir.path().join(format!("quick_unlock_{digest}.bin"));
+        let backup = dir
+            .path()
+            .join(format!(".quick_unlock_{digest}.bin.vaultkern.bak.test"));
+        let unrelated = dir.path().join("unrelated.bin");
+        std::fs::write(&record, b"record").unwrap();
+        std::fs::write(&backup, b"backup").unwrap();
+        std::fs::write(&unrelated, b"keep").unwrap();
+
+        assert_eq!(purge_quick_unlock_record_directory(dir.path()).unwrap(), 1);
+        assert!(!record.exists());
+        assert!(!backup.exists());
+        assert!(unrelated.exists());
     }
     use crate::state_paths::{extension_state_dir, runtime_state_dir};
     use std::time::Duration;
@@ -1522,6 +1740,20 @@ mod tests {
         ));
         assert!(!super::is_hello_key_invalidated_status(0x8009_0010));
         assert!(!super::is_hello_key_invalidated_status(0x8009_0030));
+    }
+
+    #[test]
+    fn corrupt_wrapped_key_statuses_invalidate_only_the_unlock_record() {
+        for status in [0x8009_0004, 0x8009_0005, 0x8009_0006] {
+            assert!(super::is_quick_unlock_record_invalidated_status(status));
+            assert!(!super::is_hello_key_invalidated_status(status));
+        }
+        assert!(!super::is_quick_unlock_record_invalidated_status(
+            super::NTE_BAD_KEY_STATE
+        ));
+        assert!(!super::is_quick_unlock_record_invalidated_status(
+            0x8009_0030
+        ));
     }
 
     #[test]
@@ -1742,12 +1974,12 @@ mod tests {
     }
 
     #[test]
-    fn windows_replace_errors_that_may_have_changed_the_target_are_outcome_unknown() {
-        assert!(quick_unlock_replacement_outcome_is_unknown(
-            &std::io::Error::from_raw_os_error(1176)
-        ));
+    fn windows_error_1177_is_classified_as_outcome_unknown() {
         assert!(quick_unlock_replacement_outcome_is_unknown(
             &std::io::Error::from_raw_os_error(1177)
+        ));
+        assert!(!quick_unlock_replacement_outcome_is_unknown(
+            &std::io::Error::from_raw_os_error(1176)
         ));
         assert!(!quick_unlock_replacement_outcome_is_unknown(
             &std::io::Error::other("post-publish cleanup failed")
@@ -2021,14 +2253,14 @@ mod tests {
     }
 
     #[test]
-    fn quick_unlock_storage_dir_is_scoped_by_extension_id() {
+    fn quick_unlock_storage_dir_has_one_resident_owner() {
         assert_eq!(
-            quick_unlock_storage_dir(Some("kblgblkjghklighdgmejjfondchkjcgf")),
-            extension_state_dir("kblgblkjghklighdgmejjfondchkjcgf").join("quick-unlock")
-        );
-        assert_eq!(
-            quick_unlock_storage_dir(None),
+            quick_unlock_storage_dir(),
             runtime_state_dir().join("quick-unlock")
+        );
+        assert_ne!(
+            quick_unlock_storage_dir(),
+            extension_state_dir("kblgblkjghklighdgmejjfondchkjcgf").join("quick-unlock")
         );
     }
 
@@ -2036,7 +2268,7 @@ mod tests {
     fn quick_unlock_presence_marker_rejects_legacy_dpapi_blobs() {
         assert!(!is_quick_unlock_envelope(b"legacy-dpapi-ciphertext"));
         assert!(is_quick_unlock_envelope(
-            br#"{"version":3,"scheme":"windows-passport-rsa-pkcs1-aes-256-gcm-hello-v3","wrapped_key":"","nonce":"","ciphertext":""}"#
+            br#"{"version":4,"scheme":"windows-passport-rsa-pkcs1-aes-256-gcm-hello-v4","public_key_sha256":"fixture","wrapped_key":"","nonce":"","ciphertext":""}"#
         ));
         assert!(!is_quick_unlock_envelope(
             br#"{"version":1,"scheme":"windows-cng-rsa-oaep-sha256-aes-256-gcm","wrapped_key":"","nonce":"","ciphertext":""}"#

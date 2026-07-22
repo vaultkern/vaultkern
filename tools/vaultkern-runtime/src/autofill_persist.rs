@@ -11,6 +11,7 @@ use vaultkern_core::{
 use vaultkern_runtime_protocol::{
     AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryFieldsDto,
 };
+use zeroize::Zeroizing;
 
 pub(crate) const AUTOFILL_RECEIPT_KEY: &str = "io.vaultkern.autofill.persist.receipts.v1";
 const PLAN_DIGEST_DOMAIN: &str = "vaultkern-autofill-persist-v1";
@@ -89,14 +90,29 @@ enum ReceiptMode {
     Create,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ValidatedFields {
-    dto: EntryFieldsDto,
+    values: ValidatedEntryFields,
     custom_fields: BTreeMap<String, CustomField>,
     totp: Option<TotpSpec>,
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
+struct ValidatedEntryFields {
+    title: Zeroizing<String>,
+    username: Zeroizing<String>,
+    password: Zeroizing<String>,
+    url: Zeroizing<String>,
+    notes: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for ValidatedEntryFields {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ValidatedEntryFields([REDACTED])")
+    }
+}
+
+#[derive(Debug, Clone)]
 enum ValidatedPlan {
     Update {
         entry_id: String,
@@ -149,8 +165,8 @@ impl ValidatedPlan {
                 let expected_fields = validate_fields("expected_fields", expected_fields)?;
                 let desired_fields = validate_fields("desired_fields", desired_fields)?;
                 validate_desired_fields("desired_fields", &desired_fields)?;
-                if http_origin("expected_fields.url", &expected_fields.dto.url)?
-                    != http_origin("desired_fields.url", &desired_fields.dto.url)?
+                if http_origin("expected_fields.url", &expected_fields.values.url)?
+                    != http_origin("desired_fields.url", &desired_fields.values.url)?
                 {
                     return invalid_plan("update URLs must have the same exact origin");
                 }
@@ -1111,7 +1127,7 @@ fn validate_fields(
             .insert(
                 field.key.clone(),
                 CustomField {
-                    value: field.value.clone(),
+                    value: field.value.as_str().to_owned(),
                     protected: effective_xml_field_protection(&field.value, field.protected),
                 },
             )
@@ -1124,22 +1140,12 @@ fn validate_fields(
         return invalid_plan(format!("{name} is too large"));
     }
     Ok(ValidatedFields {
-        dto: EntryFieldsDto {
-            title: fields.title.clone(),
-            username: fields.username.clone(),
-            password: fields.password.clone(),
-            url: fields.url.clone(),
-            notes: fields.notes.clone(),
-            totp_uri: fields.totp_uri.clone(),
-            custom_fields: fields
-                .custom_fields
-                .iter()
-                .map(|field| vaultkern_runtime_protocol::EntryCustomFieldDto {
-                    key: field.key.clone(),
-                    value: field.value.clone(),
-                    protected: field.protected,
-                })
-                .collect(),
+        values: ValidatedEntryFields {
+            title: Zeroizing::new(fields.title.as_str().to_owned()),
+            username: Zeroizing::new(fields.username.as_str().to_owned()),
+            password: Zeroizing::new(fields.password.as_str().to_owned()),
+            url: Zeroizing::new(fields.url.as_str().to_owned()),
+            notes: Zeroizing::new(fields.notes.as_str().to_owned()),
         },
         custom_fields,
         totp,
@@ -1193,10 +1199,10 @@ fn validate_desired_fields(
     name: &str,
     fields: &ValidatedFields,
 ) -> Result<(), AutofillPersistEngineError> {
-    if fields.dto.password.is_empty() {
+    if fields.values.password.is_empty() {
         return invalid_plan(format!("{name}.password must not be empty"));
     }
-    http_origin(&format!("{name}.url"), &fields.dto.url)?;
+    http_origin(&format!("{name}.url"), &fields.values.url)?;
     Ok(())
 }
 
@@ -1268,11 +1274,11 @@ fn hash_count(hasher: &mut Sha256, count: usize) {
 
 fn hash_fields(hasher: &mut Sha256, fields: &ValidatedFields) {
     for value in [
-        &fields.dto.title,
-        &fields.dto.username,
-        &fields.dto.password,
-        &fields.dto.url,
-        &fields.dto.notes,
+        &fields.values.title,
+        &fields.values.username,
+        &fields.values.password,
+        &fields.values.url,
+        &fields.values.notes,
     ] {
         hash_component(hasher, value.as_bytes());
     }
@@ -1591,11 +1597,11 @@ fn apply_idempotent_mutation(
                     parent_group_id,
                     planned_entry_id,
                     EntryCreate {
-                        title: desired_fields.dto.title.clone(),
-                        username: desired_fields.dto.username.clone(),
-                        password: desired_fields.dto.password.clone(),
-                        url: desired_fields.dto.url.clone(),
-                        notes: desired_fields.dto.notes.clone(),
+                        title: desired_fields.values.title.as_str().to_owned(),
+                        username: desired_fields.values.username.as_str().to_owned(),
+                        password: desired_fields.values.password.as_str().to_owned(),
+                        url: desired_fields.values.url.as_str().to_owned(),
+                        notes: desired_fields.values.notes.as_str().to_owned(),
                     },
                 )
                 .map_err(|error| match error {
@@ -1615,17 +1621,17 @@ fn apply_idempotent_mutation(
 }
 
 fn same_validated_fields(left: &ValidatedFields, right: &ValidatedFields) -> bool {
-    left.dto.title == right.dto.title
-        && left.dto.username == right.dto.username
-        && left.dto.password == right.dto.password
-        && left.dto.url == right.dto.url
-        && left.dto.notes == right.dto.notes
+    left.values.title == right.values.title
+        && left.values.username == right.values.username
+        && left.values.password == right.values.password
+        && left.values.url == right.values.url
+        && left.values.notes == right.values.notes
         && totp_specs_semantically_equal(
-            &left.dto.title,
-            &left.dto.username,
+            &left.values.title,
+            &left.values.username,
             left.totp.as_ref(),
-            &right.dto.title,
-            &right.dto.username,
+            &right.values.title,
+            &right.values.username,
             right.totp.as_ref(),
         )
         && left.custom_fields == right.custom_fields
@@ -1636,11 +1642,11 @@ fn apply_fields(entry: &mut Entry, fields: &ValidatedFields, now_epoch_ms: u64) 
     let preserve_raw_totp = entry.totp.is_none() && fields.totp.is_none();
     let preserve_raw_passkey = entry.passkey.is_none();
     let previous_attributes = std::mem::take(&mut entry.attributes);
-    entry.title = fields.dto.title.clone();
-    entry.username = fields.dto.username.clone();
-    entry.password = fields.dto.password.clone();
-    entry.url = fields.dto.url.clone();
-    entry.notes = fields.dto.notes.clone();
+    entry.title = fields.values.title.as_str().to_owned();
+    entry.username = fields.values.username.as_str().to_owned();
+    entry.password = fields.values.password.as_str().to_owned();
+    entry.url = fields.values.url.as_str().to_owned();
+    entry.notes = fields.values.notes.as_str().to_owned();
     entry.totp = fields.totp.clone();
     entry.attributes = fields.custom_fields.clone();
     entry
@@ -1699,17 +1705,17 @@ fn live_entry_matches_fields(vault: &Vault, entry_id: &str, fields: &ValidatedFi
 }
 
 fn entry_matches_validated(entry: &Entry, fields: &ValidatedFields) -> bool {
-    entry.title == fields.dto.title
-        && entry.username == fields.dto.username
-        && entry.password == fields.dto.password
-        && entry.url == fields.dto.url
-        && entry.notes == fields.dto.notes
+    entry.title == fields.values.title.as_str()
+        && entry.username == fields.values.username.as_str()
+        && entry.password == fields.values.password.as_str()
+        && entry.url == fields.values.url.as_str()
+        && entry.notes == fields.values.notes.as_str()
         && totp_specs_semantically_equal(
             &entry.title,
             &entry.username,
             entry.totp.as_ref(),
-            &fields.dto.title,
-            &fields.dto.username,
+            &fields.values.title,
+            &fields.values.username,
             fields.totp.as_ref(),
         )
         && custom_fields_match(&entry.attributes, &fields.custom_fields)
@@ -2002,7 +2008,6 @@ fn conflict<T>(code: AutofillPersistConflictCodeDto) -> Result<T, AutofillPersis
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::{Serialize, de::DeserializeOwned};
     use vaultkern_core::{DeletedObject, EntryCreate, EntryUpdate, KeepassCore, TotpSpec, Vault};
     use vaultkern_runtime_protocol::{
         AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryCustomFieldDto, EntryFieldsDto,
@@ -2020,17 +2025,6 @@ mod tests {
     const OPERATION_ID: &str = "operation-1";
     const NOW_MS: u64 = 1_800_000_000_000;
     const TOTP_URI: &str = "otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&issuer=Example&algorithm=SHA256&digits=8&period=45";
-
-    trait DuplicateForTest: Sized + Serialize + DeserializeOwned {
-        fn duplicate_for_test(&self) -> Self {
-            serde_json::from_slice(
-                &serde_json::to_vec(self).expect("serialize test value for explicit duplication"),
-            )
-            .expect("deserialize explicitly duplicated test value")
-        }
-    }
-
-    impl<T> DuplicateForTest for T where T: Sized + Serialize + DeserializeOwned {}
 
     fn fields(password: &str) -> EntryFieldsDto {
         EntryFieldsDto {
@@ -2085,6 +2079,26 @@ mod tests {
         }
     }
 
+    fn duplicate_fields(fields: &EntryFieldsDto) -> EntryFieldsDto {
+        EntryFieldsDto {
+            title: fields.title.as_str().into(),
+            username: fields.username.as_str().into(),
+            password: fields.password.as_str().into(),
+            url: fields.url.as_str().into(),
+            notes: fields.notes.as_str().into(),
+            totp_uri: fields.totp_uri.as_ref().map(|value| value.as_str().into()),
+            custom_fields: fields
+                .custom_fields
+                .iter()
+                .map(|field| EntryCustomFieldDto {
+                    key: field.key.clone(),
+                    value: field.value.as_str().into(),
+                    protected: field.protected,
+                })
+                .collect(),
+        }
+    }
+
     fn update_plan(expected: EntryFieldsDto, desired: EntryFieldsDto) -> AutofillPersistPlanDto {
         AutofillPersistPlanDto::Update {
             entry_id: ENTRY_ID.into(),
@@ -2118,11 +2132,11 @@ mod tests {
             &parent_group_id,
             entry_id,
             EntryCreate {
-                title: fields.title.clone(),
-                username: fields.username.clone(),
-                password: fields.password.clone(),
-                url: fields.url.clone(),
-                notes: fields.notes.clone(),
+                title: fields.title.as_str().to_owned(),
+                username: fields.username.as_str().to_owned(),
+                password: fields.password.as_str().to_owned(),
+                url: fields.url.as_str().to_owned(),
+                notes: fields.notes.as_str().to_owned(),
             },
         )
         .expect("add fixture entry");
@@ -2132,7 +2146,7 @@ mod tests {
                 entry_id,
                 vaultkern_core::EntryCustomFieldInput {
                     key: field.key.clone(),
-                    value: field.value.clone(),
+                    value: field.value.as_str().to_owned(),
                     protected: field.protected,
                 },
             )
@@ -2142,7 +2156,7 @@ mod tests {
             core.set_entry_totp(
                 vault,
                 entry_id,
-                TotpSpec::parse_otpauth(uri).expect("parse fixture TOTP"),
+                TotpSpec::parse_otpauth(uri.as_str()).expect("parse fixture TOTP"),
             )
             .expect("add fixture TOTP");
         }
@@ -2243,7 +2257,7 @@ mod tests {
         KeepassCore::new()
             .project_entry_detail(vault, entry_id)
             .ok()
-            .map(|entry| entry.password)
+            .map(|mut entry| std::mem::take(&mut entry.password))
     }
 
     fn history_count(vault: &Vault, entry_id: &str) -> usize {
@@ -2296,7 +2310,7 @@ mod tests {
     fn plan_digest_is_domain_separated_length_prefixed_and_canonical() {
         let expected = fields_with_custom("old-secret", true);
         let desired = fields_with_custom("new-secret", false);
-        let plan = update_plan(expected.duplicate_for_test(), desired.duplicate_for_test());
+        let plan = update_plan(duplicate_fields(&expected), duplicate_fields(&desired));
 
         let digest = plan_sha256(TRANSACTION_ID, VAULT_ID, SOURCE_SHA, &plan).unwrap();
         assert_eq!(
@@ -2379,8 +2393,11 @@ mod tests {
         );
         let inferred_issuer = create_plan(parent_group_id, Vec::new(), inferred_issuer_fields);
         let mut normalized_secret_fields = fields("secret");
-        normalized_secret_fields.totp_uri =
-            Some(TOTP_URI.replace("JBSWY3DPEHPK3PXP", "jbswy3dpehpk3pxp===="));
+        normalized_secret_fields.totp_uri = Some(
+            TOTP_URI
+                .replace("JBSWY3DPEHPK3PXP", "jbswy3dpehpk3pxp====")
+                .into(),
+        );
         let normalized_secret = create_plan(parent_group_id, Vec::new(), normalized_secret_fields);
 
         let canonical_digest =
@@ -2399,7 +2416,7 @@ mod tests {
         );
 
         let mut changed_fields = fields("secret");
-        changed_fields.totp_uri = Some(TOTP_URI.replace("period=45", "period=46"));
+        changed_fields.totp_uri = Some(TOTP_URI.replace("period=45", "period=46").into());
         let changed = create_plan(parent_group_id, Vec::new(), changed_fields);
         assert_ne!(
             canonical_digest,
@@ -2448,7 +2465,7 @@ mod tests {
             update_plan(
                 fields("old-secret"),
                 EntryFieldsDto {
-                    title: "x".repeat(MAX_FIELD_BYTES + 1),
+                    title: "x".repeat(MAX_FIELD_BYTES + 1).into(),
                     ..fields("new-secret")
                 },
             ),
@@ -2512,7 +2529,7 @@ mod tests {
         let mut invalid_value = fields("new-secret");
         invalid_value.custom_fields.push(EntryCustomFieldDto {
             key: "Oversized".into(),
-            value: "x".repeat(MAX_FIELD_BYTES + 1),
+            value: "x".repeat(MAX_FIELD_BYTES + 1).into(),
             protected: false,
         });
         let plans = [
@@ -2624,16 +2641,16 @@ mod tests {
         let current = vault_with_entry(&expected);
         let parent = current.root.id.to_string();
         let invalid_plans = [
-            update_plan(expected.duplicate_for_test(), fields("")),
+            update_plan(duplicate_fields(&expected), fields("")),
             update_plan(
-                expected.duplicate_for_test(),
+                duplicate_fields(&expected),
                 EntryFieldsDto {
                     url: "javascript:alert(1)".into(),
                     ..fields("new-secret")
                 },
             ),
             update_plan(
-                expected.duplicate_for_test(),
+                duplicate_fields(&expected),
                 EntryFieldsDto {
                     url: "https://other.example/login".into(),
                     ..fields("new-secret")
@@ -2683,7 +2700,7 @@ mod tests {
         let prepared = execute(
             &current,
             &current,
-            &update_plan(expected.duplicate_for_test(), desired.duplicate_for_test()),
+            &update_plan(duplicate_fields(&expected), duplicate_fields(&desired)),
         )
         .unwrap();
 
@@ -2703,10 +2720,8 @@ mod tests {
     #[test]
     fn update_preserves_hidden_unprojectable_credential_sources() {
         let expected = fields("old-secret");
-        let desired = EntryFieldsDto {
-            password: "new-secret".into(),
-            ..expected.duplicate_for_test()
-        };
+        let mut desired = duplicate_fields(&expected);
+        desired.password = "new-secret".into();
         let mut current = vault_with_entry(&expected);
         let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
         entry.attributes.insert(
@@ -2737,10 +2752,8 @@ mod tests {
     #[test]
     fn update_rejects_nonpersistent_entry_totp_fallback_state() {
         let expected = fields_with_custom_and_totp("old-secret");
-        let desired = EntryFieldsDto {
-            password: "new-secret".into(),
-            ..expected.duplicate_for_test()
-        };
+        let mut desired = duplicate_fields(&expected);
+        desired.password = "new-secret".into();
         let mut current = vault_with_entry(&expected);
         let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
         let totp = entry.totp.as_mut().unwrap();
@@ -2763,7 +2776,7 @@ mod tests {
         let prepared = execute(
             &current,
             &current,
-            &update_plan(desired.duplicate_for_test(), desired),
+            &update_plan(duplicate_fields(&desired), desired),
         )
         .unwrap();
 
@@ -2815,7 +2828,7 @@ mod tests {
         });
         let mut current = vault_with_entry(&fields("secret"));
         let entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
-        entry.username.clone_from(&desired.username);
+        entry.username = desired.username.as_str().to_owned();
         entry.attributes.insert(
             "UnsafeValue".into(),
             CustomField {
@@ -2827,7 +2840,7 @@ mod tests {
         let prepared = execute(
             &current,
             &current,
-            &update_plan(desired.duplicate_for_test(), desired),
+            &update_plan(duplicate_fields(&desired), desired),
         )
         .unwrap();
         let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
@@ -2847,7 +2860,7 @@ mod tests {
             &create_plan(
                 &current.root.id.to_string(),
                 vec![],
-                desired.duplicate_for_test(),
+                duplicate_fields(&desired),
             ),
         )
         .unwrap();
@@ -2957,7 +2970,7 @@ mod tests {
         let desired = fields("new-secret");
         let desired_current = vault_with_entry(&desired);
         let base = desired_current.clone();
-        let plan = update_plan(expected.duplicate_for_test(), desired.duplicate_for_test());
+        let plan = update_plan(duplicate_fields(&expected), duplicate_fields(&desired));
 
         let prepared = execute(&base, &desired_current, &plan).unwrap();
         assert_eq!(history_count(&prepared.candidate, ENTRY_ID), 0);
@@ -3154,7 +3167,7 @@ mod tests {
             &original,
             &local,
             &deleted,
-            &update_plan(expected.duplicate_for_test(), desired.duplicate_for_test()),
+            &update_plan(duplicate_fields(&expected), duplicate_fields(&desired)),
         )
         .unwrap()
         .candidate;
@@ -3382,15 +3395,10 @@ mod tests {
         let core = KeepassCore::new();
 
         let mut edited = committed.clone();
-        core.update_entry_fields(
-            &mut edited,
-            ENTRY_ID,
-            EntryUpdate {
-                password: Some("later-edit".into()),
-                ..EntryUpdate::default()
-            },
-        )
-        .unwrap();
+        let mut later_edit = EntryUpdate::default();
+        later_edit.password = Some("later-edit".into());
+        core.update_entry_fields(&mut edited, ENTRY_ID, later_edit)
+            .unwrap();
         let replayed = execute(&original, &edited, &plan).unwrap();
         assert_eq!(
             replayed.outcome,
@@ -3450,15 +3458,10 @@ mod tests {
         let committed = execute(&original, &original, &plan).unwrap().candidate;
 
         let mut locally_edited = committed.clone();
+        let mut local_later_edit = EntryUpdate::default();
+        local_later_edit.password = Some("local-later-edit".into());
         KeepassCore::new()
-            .update_entry_fields(
-                &mut locally_edited,
-                ENTRY_ID,
-                EntryUpdate {
-                    password: Some("local-later-edit".into()),
-                    ..EntryUpdate::default()
-                },
-            )
+            .update_entry_fields(&mut locally_edited, ENTRY_ID, local_later_edit)
             .unwrap();
         let replayed =
             execute_with_baseline(&committed, &locally_edited, &committed, &plan).unwrap();
@@ -3614,7 +3617,7 @@ mod tests {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let original = vault_with_entry(&expected);
-        let plan = update_plan(expected.duplicate_for_test(), desired.duplicate_for_test());
+        let plan = update_plan(duplicate_fields(&expected), duplicate_fields(&desired));
         let base_with_receipt = execute(&original, &original, &plan).unwrap().candidate;
 
         let mut current_desired = base_with_receipt.clone();
@@ -3747,7 +3750,7 @@ mod tests {
         let collision_plan = create_plan(
             &collision.root.id.to_string(),
             vec![],
-            desired.duplicate_for_test(),
+            duplicate_fields(&desired),
         );
         assert_eq!(
             execute(&collision, &collision, &collision_plan),
@@ -3777,7 +3780,7 @@ mod tests {
         let adopted = execute(
             &current,
             &current,
-            &create_plan(&parent, vec![], desired.duplicate_for_test()),
+            &create_plan(&parent, vec![], duplicate_fields(&desired)),
         )
         .unwrap();
         assert_eq!(entry_count(&adopted.candidate), 1);
@@ -3831,15 +3834,10 @@ mod tests {
         let core = KeepassCore::new();
 
         let mut edited = committed.clone();
-        core.update_entry_fields(
-            &mut edited,
-            PLANNED_ID,
-            EntryUpdate {
-                password: Some("later-edit".into()),
-                ..EntryUpdate::default()
-            },
-        )
-        .unwrap();
+        let mut later_edit = EntryUpdate::default();
+        later_edit.password = Some("later-edit".into());
+        core.update_entry_fields(&mut edited, PLANNED_ID, later_edit)
+            .unwrap();
         assert_eq!(execute(&current, &edited, &plan).unwrap().candidate, edited);
 
         let mut deleted = committed;

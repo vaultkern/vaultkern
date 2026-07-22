@@ -32,7 +32,8 @@ it("persists extension settings in the memory store", async () => {
     idleLockMinutes: 5,
     clearClipboardSeconds: 20,
     autofillOnPageLoadEnabled: true,
-    passkeyProviderEnabled: false,
+    browserPasskeyProxyEnabled: false,
+    windowsPasskeyProviderEnabled: false,
     quickUnlockEnabled: true
   });
 
@@ -42,7 +43,8 @@ it("persists extension settings in the memory store", async () => {
     idleLockMinutes: 5,
     clearClipboardSeconds: 20,
     autofillOnPageLoadEnabled: true,
-    passkeyProviderEnabled: false,
+    browserPasskeyProxyEnabled: false,
+    windowsPasskeyProviderEnabled: false,
     quickUnlockEnabled: true
   });
 });

@@ -536,7 +536,10 @@ fn read_browser_messages(sender: mpsc::Sender<BrowserEvent>) {
             Ok(NativeMessage::Eof) => BrowserEvent::Eof,
             Err(error) => BrowserEvent::ReadFailed(error.to_string()),
         };
-        let terminal = matches!(event, BrowserEvent::Eof | BrowserEvent::ReadFailed(_));
+        let terminal = matches!(
+            event,
+            BrowserEvent::Oversized { .. } | BrowserEvent::Eof | BrowserEvent::ReadFailed(_)
+        );
         if sender.send(event).is_err() || terminal {
             return;
         }
