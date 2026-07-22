@@ -139,7 +139,10 @@ describe("createNegotiatedRuntimeTransport", () => {
 
     await expect(
       transport.send({ version: 1, command: { type: "get_session_state" } })
-    ).rejects.toThrow("temporary: not ready");
+    ).rejects.toMatchObject({
+      code: "temporary",
+      message: "not ready"
+    });
     await expect(
       transport.send({ version: 1, command: { type: "get_session_state" } })
     ).resolves.toEqual({ type: "session_state" });

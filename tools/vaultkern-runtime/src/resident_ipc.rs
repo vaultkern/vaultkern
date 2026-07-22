@@ -9,8 +9,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use vaultkern_runtime_protocol::{ProtocolEnvelope, RuntimeResponse};
+use zeroize::Zeroizing;
 
+use crate::command_loop::encode_zeroizing_json;
 use crate::state_paths::extension_id_from_browser_origin;
 
 #[cfg(windows)]
@@ -21,7 +23,10 @@ pub use windows::{
 };
 
 pub type ResidentIpcRequestHandler = Arc<
-    dyn Fn(Value, Arc<AtomicBool>, Arc<AtomicBool>, Option<usize>) -> Value + Send + Sync + 'static,
+    dyn Fn(ProtocolEnvelope, Arc<AtomicBool>, Arc<AtomicBool>, Option<usize>) -> RuntimeResponse
+        + Send
+        + Sync
+        + 'static,
 >;
 
 pub const RESIDENT_IPC_PROTOCOL_VERSION: u32 = 1;
@@ -173,14 +178,14 @@ pub(crate) enum ResidentIpcFrame {
     Request {
         request_id: String,
         timeout_ms: u64,
-        message: Value,
+        message: ProtocolEnvelope,
     },
     Cancel {
         request_id: String,
     },
     Response {
         request_id: String,
-        message: Value,
+        message: RuntimeResponse,
     },
     Error {
         request_id: Option<String>,
@@ -319,7 +324,7 @@ pub(crate) fn read_frame_with_limit(
     if length > max_frame_bytes {
         anyhow::bail!("resident IPC frame exceeds maximum length: {length} > {max_frame_bytes}");
     }
-    let mut payload = vec![0_u8; length];
+    let mut payload = Zeroizing::new(vec![0_u8; length]);
     reader
         .read_exact(&mut payload)
         .context("failed to read resident IPC frame payload")?;
@@ -329,14 +334,7 @@ pub(crate) fn read_frame_with_limit(
 }
 
 pub(crate) fn write_frame(writer: &mut impl Write, frame: &ResidentIpcFrame) -> Result<()> {
-    let payload = serde_json::to_vec(frame).context("failed to encode resident IPC frame")?;
-    if payload.len() > RESIDENT_IPC_MAX_FRAME_BYTES {
-        anyhow::bail!(
-            "resident IPC frame exceeds maximum length: {} > {}",
-            payload.len(),
-            RESIDENT_IPC_MAX_FRAME_BYTES
-        );
-    }
+    let payload = encode_frame(frame)?;
     let length = u32::try_from(payload.len()).context("resident IPC frame length overflow")?;
     writer
         .write_all(&length.to_le_bytes())
@@ -347,15 +345,28 @@ pub(crate) fn write_frame(writer: &mut impl Write, frame: &ResidentIpcFrame) -> 
     writer.flush().context("failed to flush resident IPC frame")
 }
 
+fn encode_frame(frame: &ResidentIpcFrame) -> Result<Zeroizing<Vec<u8>>> {
+    let payload = encode_zeroizing_json(frame).context("failed to encode resident IPC frame")?;
+    if payload.len() > RESIDENT_IPC_MAX_FRAME_BYTES {
+        anyhow::bail!(
+            "resident IPC frame exceeds maximum length: {} > {}",
+            payload.len(),
+            RESIDENT_IPC_MAX_FRAME_BYTES
+        );
+    }
+    Ok(payload)
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
 
-    use serde_json::json;
+    use vaultkern_runtime_protocol::{ProtocolEnvelope, RuntimeCommand};
+    use zeroize::Zeroizing;
 
     use super::{
         ClientHello, PendingRequests, RESIDENT_IPC_MAX_FRAME_BYTES, RESIDENT_IPC_PROTOCOL_VERSION,
-        ResidentIpcFrame, negotiate_client_hello, read_frame_with_limit,
+        ResidentIpcFrame, encode_frame, negotiate_client_hello, read_frame_with_limit,
         validate_browser_origin_for_extension, write_frame,
     };
 
@@ -467,13 +478,12 @@ mod tests {
     }
 
     #[test]
-    fn length_prefixed_frames_round_trip_without_losing_the_request_id() {
+    fn length_prefixed_frames_keep_secret_requests_in_typed_protocol_buffers() {
         let frame = ResidentIpcFrame::Request {
             request_id: "native-41".into(),
             timeout_ms: 30_000,
-            message: json!({
-                "version": 1,
-                "command": { "type": "get_session_state" }
+            message: ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithPassword {
+                password: "native-secret".into(),
             }),
         };
         let mut bytes = Vec::new();
@@ -491,10 +501,39 @@ mod tests {
             } => {
                 assert_eq!(request_id, "native-41");
                 assert_eq!(timeout_ms, 30_000);
-                assert_eq!(message["command"]["type"], "get_session_state");
+                match message.command {
+                    RuntimeCommand::UnlockCurrentVaultWithPassword { password } => {
+                        assert_eq!(password.as_str(), "native-secret");
+                    }
+                    _ => panic!("expected typed secret-bearing runtime command"),
+                }
             }
             _ => panic!("expected request frame"),
         }
+    }
+
+    #[test]
+    fn resident_frame_serialization_uses_a_zeroizing_payload_buffer() {
+        let frame = ResidentIpcFrame::Request {
+            request_id: "native-42".into(),
+            timeout_ms: 30_000,
+            message: ProtocolEnvelope::new(RuntimeCommand::UnlockCurrentVaultWithPassword {
+                password: "serialized-secret".into(),
+            }),
+        };
+
+        let payload: Zeroizing<Vec<u8>> = encode_frame(&frame).expect("encode frame payload");
+
+        assert_eq!(
+            payload.capacity(),
+            payload.len(),
+            "secret serialization must allocate its final buffer exactly once"
+        );
+        assert!(
+            payload
+                .windows("serialized-secret".len())
+                .any(|window| window == b"serialized-secret")
+        );
     }
 
     #[test]

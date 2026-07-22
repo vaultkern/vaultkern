@@ -287,12 +287,15 @@ impl RuntimeBridge {
 
     pub fn request_browser_cancellable(
         &self,
-        message: Value,
+        envelope: ProtocolEnvelope,
         cancelled: Arc<AtomicBool>,
         execution_started: Arc<AtomicBool>,
         parent_window: Option<usize>,
-    ) -> Value {
-        self.request_value(message, cancelled, execution_started, true, parent_window)
+    ) -> RuntimeResponse {
+        if cancelled.load(Ordering::Acquire) {
+            return cancelled_response();
+        }
+        self.request_protocol(envelope, cancelled, execution_started, true, parent_window)
     }
 
     fn request_value(
@@ -692,7 +695,9 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
-    use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse, VaultSourceStatusDto};
+    use vaultkern_runtime_protocol::{
+        ProtocolEnvelope, RuntimeCommand, RuntimeResponse, VaultSourceStatusDto,
+    };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
         serde_json::from_value(value).expect("deserialize test runtime response")
@@ -739,25 +744,22 @@ mod tests {
     fn browser_secret_request_uses_the_fresh_verification_runtime_entrypoint() {
         let bridge = RuntimeBridge::new_for_tests();
         let response = bridge.request_browser_cancellable(
-            json!({
-                "version": 1,
-                "command": {
-                    "type": "get_entry_detail",
-                    "vault_id": "missing-vault",
-                    "entry_id": "missing-entry"
-                }
+            ProtocolEnvelope::new(RuntimeCommand::GetEntryDetail {
+                vault_id: "missing-vault".into(),
+                entry_id: "missing-entry".into(),
             }),
             Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             None,
         );
 
-        assert_eq!(response["type"], "error");
-        assert_eq!(response["code"], "runtime_error");
+        let RuntimeResponse::Error(error) = response else {
+            panic!("expected browser verification error");
+        };
+        assert_eq!(error.code, "runtime_error");
         assert!(
-            response["message"]
-                .as_str()
-                .unwrap_or_default()
+            error
+                .message
                 .contains("fresh browser request verification failed")
         );
     }

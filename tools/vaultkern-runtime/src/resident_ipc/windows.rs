@@ -9,8 +9,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::Deserialize;
+#[cfg(test)]
 use serde_json::{Value, json};
+use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_NO_DATA, ERROR_PIPE_BUSY, ERROR_PIPE_CONNECTED, GENERIC_READ, GENERIC_WRITE,
     GetLastError, HANDLE, INVALID_HANDLE_VALUE, LocalFree,
@@ -35,6 +37,7 @@ use windows_sys::Win32::System::Threading::{
     GetCurrentProcess, OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{
     PendingRequest, PendingRequests, RESIDENT_IPC_DEFAULT_TIMEOUT_MS, ResidentIpcFrame,
@@ -43,7 +46,8 @@ use super::{
 };
 use crate::command_loop::{
     MAX_NATIVE_REQUEST_BYTES, MAX_NATIVE_RESPONSE_BYTES, NativeMessage,
-    configure_stdio_for_native_messaging, read_native_message_or_eof_with_limit,
+    configure_stdio_for_native_messaging, encode_native_response,
+    read_native_message_or_eof_with_limit, write_native_message,
 };
 
 mod peer_auth;
@@ -169,18 +173,22 @@ fn write_startup_failure_to(
     code: &str,
     message: &str,
 ) -> Result<()> {
-    let request_id =
-        match read_native_message_or_eof_with_limit::<Value>(reader, MAX_NATIVE_REQUEST_BYTES)? {
-            NativeMessage::Message(message) => request_id_from_value(&message),
-            NativeMessage::DecodeError { request_id, .. } => request_id,
-            NativeMessage::Oversized { .. } => None,
-            NativeMessage::Eof => return Ok(()),
-        };
-    write_native_value(
-        writer,
-        &runtime_error_value(code, message),
-        request_id.as_deref(),
-    )
+    let request_id = match read_native_message_or_eof_with_limit::<NativeRequestId>(
+        reader,
+        MAX_NATIVE_REQUEST_BYTES,
+    )? {
+        NativeMessage::Message(message) => message.request_id,
+        NativeMessage::DecodeError { request_id, .. } => request_id,
+        NativeMessage::Oversized { .. } => None,
+        NativeMessage::Eof => return Ok(()),
+    };
+    write_native_message(writer, &runtime_error(code, message), request_id.as_deref())
+}
+
+#[derive(Deserialize)]
+struct NativeRequestId {
+    #[serde(default, rename = "requestId")]
+    request_id: Option<String>,
 }
 
 fn run_server_listener(
@@ -357,7 +365,7 @@ fn serve_connection(
 fn dispatch_request(
     request: PendingRequest,
     timeout_ms: u64,
-    message: Value,
+    message: ProtocolEnvelope,
     parent_window: Option<usize>,
     writer: Arc<Mutex<PipeWriter>>,
     handler: ResidentIpcRequestHandler,
@@ -500,8 +508,16 @@ fn perform_client_handshake(
     }
 }
 
+#[derive(Deserialize)]
+struct NativeProtocolRequest {
+    #[serde(flatten)]
+    message: ProtocolEnvelope,
+    #[serde(default, rename = "requestTimeoutMs")]
+    request_timeout_ms: Option<u64>,
+}
+
 enum BrowserEvent {
-    Message(Value),
+    Message(NativeProtocolRequest),
     DecodeError {
         message: String,
         request_id: Option<String>,
@@ -518,7 +534,7 @@ fn read_browser_messages(sender: mpsc::Sender<BrowserEvent>) {
     let stdin = std::io::stdin();
     let mut stdin = stdin.lock();
     loop {
-        let event = match read_native_message_or_eof_with_limit::<Value>(
+        let event = match read_native_message_or_eof_with_limit::<NativeProtocolRequest>(
             &mut stdin,
             MAX_NATIVE_REQUEST_BYTES,
         ) {
@@ -585,23 +601,23 @@ fn handle_browser_event(
     pending: &mut HashSet<String>,
 ) -> Result<bool> {
     match event {
-        BrowserEvent::Message(mut message) => {
-            let response_request_id = request_id_from_value(&message);
-            let (request_id, timeout_ms) = match native_request_metadata(&mut message) {
+        BrowserEvent::Message(message) => {
+            let response_request_id = message.message.request_id.clone();
+            let (request_id, timeout_ms, message) = match native_request_metadata(message) {
                 Ok(metadata) => metadata,
                 Err(error) => {
-                    write_native_value(
+                    write_native_message(
                         stdout,
-                        &runtime_error_value("invalid_request", error.to_string()),
+                        &runtime_error("invalid_request", error.to_string()),
                         response_request_id.as_deref(),
                     )?;
                     return Ok(false);
                 }
             };
             if !pending.insert(request_id.clone()) {
-                write_native_value(
+                write_native_message(
                     stdout,
-                    &runtime_error_value("duplicate_request", "duplicate native request ID"),
+                    &runtime_error("duplicate_request", "duplicate native request ID"),
                     Some(&request_id),
                 )?;
                 return Ok(false);
@@ -621,14 +637,14 @@ fn handle_browser_event(
         BrowserEvent::DecodeError {
             message,
             request_id,
-        } => write_native_value(
+        } => write_native_message(
             stdout,
-            &runtime_error_value("invalid_request", message),
+            &runtime_error("invalid_request", message),
             request_id.as_deref(),
         )?,
-        BrowserEvent::Oversized { length, max_length } => write_native_value(
+        BrowserEvent::Oversized { length, max_length } => write_native_message(
             stdout,
-            &runtime_error_value(
+            &runtime_error(
                 "invalid_request",
                 format!("native message exceeds maximum length: {length} > {max_length}"),
             ),
@@ -655,7 +671,7 @@ fn handle_server_frame(
             if !pending.remove(&request_id) {
                 anyhow::bail!("resident IPC response used an unknown request ID");
             }
-            write_native_value(stdout, &message, Some(&request_id))
+            write_native_message(stdout, &message, Some(&request_id))
         }
         ResidentIpcFrame::Error {
             request_id: Some(request_id),
@@ -665,11 +681,7 @@ fn handle_server_frame(
             if !pending.remove(&request_id) {
                 anyhow::bail!("resident IPC error used an unknown request ID");
             }
-            write_native_value(
-                stdout,
-                &runtime_error_value(code, message),
-                Some(&request_id),
-            )
+            write_native_message(stdout, &runtime_error(code, message), Some(&request_id))
         }
         ResidentIpcFrame::Error {
             request_id: None,
@@ -680,86 +692,26 @@ fn handle_server_frame(
     }
 }
 
-fn native_request_metadata(message: &mut Value) -> Result<(String, u64)> {
-    let fields = message
-        .as_object_mut()
-        .context("native request must be a JSON object")?;
-    let request_id = fields
-        .remove("requestId")
-        .and_then(|value| value.as_str().map(str::to_owned))
+fn native_request_metadata(
+    mut request: NativeProtocolRequest,
+) -> Result<(String, u64, ProtocolEnvelope)> {
+    let request_id = request
+        .message
+        .request_id
+        .take()
         .context("native request is missing a request ID")?;
-    let timeout_ms = fields
-        .remove("requestTimeoutMs")
-        .map(|value| {
-            value
-                .as_u64()
-                .context("native request timeout must be an unsigned integer")
-        })
-        .transpose()?
+    let timeout_ms = request
+        .request_timeout_ms
         .unwrap_or(RESIDENT_IPC_DEFAULT_TIMEOUT_MS);
     validate_request(&request_id, timeout_ms)?;
-    Ok((request_id, timeout_ms))
+    Ok((request_id, timeout_ms, request.message))
 }
 
-fn request_id_from_value(message: &Value) -> Option<String> {
-    message
-        .get("requestId")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-fn runtime_error_value(code: impl Into<String>, message: impl Into<String>) -> Value {
-    json!({
-        "type": "error",
-        "code": code.into(),
-        "message": message.into(),
+fn runtime_error(code: impl Into<String>, message: impl Into<String>) -> RuntimeResponse {
+    RuntimeResponse::Error(ErrorDto {
+        code: code.into(),
+        message: message.into(),
     })
-}
-
-fn write_native_value(
-    writer: &mut impl Write,
-    message: &Value,
-    request_id: Option<&str>,
-) -> Result<()> {
-    let mut payload = encode_native_value(message, request_id)?;
-    if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
-        let error = runtime_error_value(
-            "response_too_large",
-            "native response exceeds Chrome's 1 MiB limit",
-        );
-        payload = encode_native_value(&error, request_id)?;
-        if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
-            payload = encode_native_value(&error, None)?;
-        }
-    }
-    let length = u32::try_from(payload.len()).context("native response length overflow")?;
-    writer.write_all(&length.to_le_bytes())?;
-    writer.write_all(&payload)?;
-    writer.flush().context("flush native response")
-}
-
-fn encode_native_value(message: &Value, request_id: Option<&str>) -> Result<Vec<u8>> {
-    match request_id {
-        Some(request_id) => {
-            if !message.is_object() {
-                anyhow::bail!("native response must be a JSON object");
-            }
-            serde_json::to_vec(&CorrelatedNativeResponse {
-                message,
-                request_id,
-            })
-        }
-        None => serde_json::to_vec(message),
-    }
-    .context("encode native response")
-}
-
-#[derive(Serialize)]
-struct CorrelatedNativeResponse<'a> {
-    #[serde(flatten)]
-    message: &'a Value,
-    #[serde(rename = "requestId")]
-    request_id: &'a str,
 }
 
 fn send_frame(writer: &Arc<Mutex<PipeWriter>>, frame: &ResidentIpcFrame) -> Result<()> {
@@ -770,9 +722,9 @@ fn send_frame(writer: &Arc<Mutex<PipeWriter>>, frame: &ResidentIpcFrame) -> Resu
 fn send_runtime_response(
     writer: &Arc<Mutex<PipeWriter>>,
     request_id: String,
-    message: Value,
+    message: RuntimeResponse,
 ) -> Result<()> {
-    if encode_native_value(&message, Some(&request_id))?.len() > MAX_NATIVE_RESPONSE_BYTES {
+    if encode_native_response(&message, Some(&request_id))?.len() > MAX_NATIVE_RESPONSE_BYTES {
         return send_frame(
             writer,
             &ResidentIpcFrame::Error {
@@ -919,10 +871,8 @@ fn resolve_request_parent_window(
 ) -> Option<usize> {
     let requested =
         requested_parent_window.and_then(|window| window_identity_for_sid(window, expected_sid));
-    let foreground = requested.as_ref().and_then(|(_, requested_process)| {
-        window_identity_for_sid(unsafe { GetForegroundWindow() } as usize, expected_sid)
-            .filter(|(_, foreground_process)| foreground_process == requested_process)
-    });
+    let foreground =
+        window_identity_for_sid(unsafe { GetForegroundWindow() } as usize, expected_sid);
     select_request_parent_window(requested, foreground)
 }
 
@@ -954,7 +904,8 @@ fn select_request_parent_window(
             Some(foreground_window)
         }
         (Some((requested_window, _)), _) => Some(requested_window),
-        (None, _) => None,
+        (None, Some((foreground_window, _))) => Some(foreground_window),
+        (None, None) => None,
     }
 }
 
@@ -1207,63 +1158,84 @@ impl Read for PipeReader {
 
 struct PipeFrameReader {
     pipe: Arc<Pipe>,
-    buffered: Vec<u8>,
+    length: [u8; 4],
+    length_read: usize,
+    payload: Zeroizing<Vec<u8>>,
+    payload_read: usize,
 }
 
 impl PipeFrameReader {
     fn new(pipe: Arc<Pipe>) -> Self {
         Self {
             pipe,
-            buffered: Vec::new(),
+            length: [0; 4],
+            length_read: 0,
+            payload: Zeroizing::new(Vec::new()),
+            payload_read: 0,
         }
     }
 
     fn try_read_frame(&mut self) -> Result<Option<ResidentIpcFrame>> {
         loop {
-            if let Some(frame) = self.try_decode_buffered_frame()? {
-                return Ok(Some(frame));
+            if self.length_read < self.length.len() {
+                let available = pipe_available_bytes(&self.pipe)?;
+                if available == 0 {
+                    return Ok(None);
+                }
+                let remaining = self.length.len() - self.length_read;
+                let chunk_length = (available as usize).min(remaining);
+                let read = PipeReader(self.pipe.clone())
+                    .read(&mut self.length[self.length_read..self.length_read + chunk_length])
+                    .context("read resident IPC frame length")?;
+                if read == 0 {
+                    anyhow::bail!("resident IPC pipe closed while reading a frame length");
+                }
+                self.length_read += read;
+                if self.length_read < self.length.len() {
+                    continue;
+                }
+
+                let payload_length = u32::from_le_bytes(self.length) as usize;
+                if payload_length > super::RESIDENT_IPC_MAX_FRAME_BYTES {
+                    anyhow::bail!(
+                        "resident IPC frame exceeds maximum length: {payload_length} > {}",
+                        super::RESIDENT_IPC_MAX_FRAME_BYTES
+                    );
+                }
+                self.payload = Zeroizing::new(vec![0_u8; payload_length]);
+                self.payload_read = 0;
             }
 
-            let available = pipe_available_bytes(&self.pipe)?;
-            if available == 0 {
-                return Ok(None);
+            if self.payload_read < self.payload.len() {
+                let available = pipe_available_bytes(&self.pipe)?;
+                if available == 0 {
+                    return Ok(None);
+                }
+                let remaining = self.payload.len() - self.payload_read;
+                let chunk_length = (available as usize)
+                    .min(PIPE_BUFFER_BYTES as usize)
+                    .min(remaining);
+                let read = PipeReader(self.pipe.clone())
+                    .read(&mut self.payload[self.payload_read..self.payload_read + chunk_length])
+                    .context("read resident IPC frame payload")?;
+                if read == 0 {
+                    anyhow::bail!("resident IPC pipe closed while reading a frame payload");
+                }
+                self.payload_read += read;
+                if self.payload_read < self.payload.len() {
+                    continue;
+                }
             }
-            let chunk_length = available.min(PIPE_BUFFER_BYTES) as usize;
-            let mut chunk = vec![0_u8; chunk_length];
-            let read = PipeReader(self.pipe.clone())
-                .read(&mut chunk)
-                .context("read available resident IPC frame bytes")?;
-            if read == 0 {
-                anyhow::bail!("resident IPC pipe closed while reading a frame");
-            }
-            chunk.truncate(read);
-            self.buffered.extend_from_slice(&chunk);
-        }
-    }
 
-    fn try_decode_buffered_frame(&mut self) -> Result<Option<ResidentIpcFrame>> {
-        if self.buffered.len() < 4 {
-            return Ok(None);
+            let frame = serde_json::from_slice(&self.payload)
+                .context("failed to decode resident IPC frame")?;
+            self.payload.as_mut_slice().zeroize();
+            self.payload = Zeroizing::new(Vec::new());
+            self.payload_read = 0;
+            self.length.zeroize();
+            self.length_read = 0;
+            return Ok(Some(frame));
         }
-        let payload_length = u32::from_le_bytes(
-            self.buffered[..4]
-                .try_into()
-                .expect("resident IPC prefix has four bytes"),
-        ) as usize;
-        if payload_length > super::RESIDENT_IPC_MAX_FRAME_BYTES {
-            anyhow::bail!(
-                "resident IPC frame exceeds maximum length: {payload_length} > {}",
-                super::RESIDENT_IPC_MAX_FRAME_BYTES
-            );
-        }
-        let frame_length = 4 + payload_length;
-        if self.buffered.len() < frame_length {
-            return Ok(None);
-        }
-        let frame = serde_json::from_slice(&self.buffered[4..frame_length])
-            .context("failed to decode resident IPC frame")?;
-        self.buffered.drain(..frame_length);
-        Ok(Some(frame))
     }
 }
 
@@ -1347,9 +1319,32 @@ mod tests {
 
     use super::*;
     use crate::resident_ipc::read_frame;
+    use vaultkern_runtime_protocol::{EntryAttachmentContentDto, RuntimeCommand, SessionStateDto};
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
     static PIPE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn request_frame(
+        request_id: &str,
+        timeout_ms: u64,
+        command: RuntimeCommand,
+    ) -> ResidentIpcFrame {
+        ResidentIpcFrame::Request {
+            request_id: request_id.into(),
+            timeout_ms,
+            message: ProtocolEnvelope::new(command),
+        }
+    }
+
+    fn locked_session_response() -> RuntimeResponse {
+        RuntimeResponse::SessionState(SessionStateDto {
+            unlocked: false,
+            active_vault_id: None,
+            current_vault_ref_id: None,
+            supports_biometric_unlock: true,
+            source_status: None,
+        })
+    }
 
     #[test]
     fn request_parent_tracks_the_foreground_window_in_the_same_browser_process() {
@@ -1363,8 +1358,8 @@ mod tests {
         );
         assert_eq!(
             select_request_parent_window(None, Some((0x4000, 99))),
-            None,
-            "an unrelated same-user foreground window is not a trusted prompt owner"
+            Some(0x4000),
+            "an authenticated foreground browser is the prompt owner when MV3 supplies no window"
         );
     }
 
@@ -1410,9 +1405,9 @@ mod tests {
         let request_id = "r".repeat(MAX_NATIVE_RESPONSE_BYTES);
         let mut output = Vec::new();
 
-        write_native_value(
+        write_native_message(
             &mut output,
-            &runtime_error_value("invalid_request", "invalid request ID"),
+            &runtime_error("invalid_request", "invalid request ID"),
             Some(&request_id),
         )
         .expect("write bounded native error");
@@ -1440,43 +1435,54 @@ mod tests {
         let handler_cancellations = observed_cancellations.clone();
         let running_mutation_started = Arc::new(AtomicBool::new(false));
         let handler_mutation_started = running_mutation_started.clone();
+        let consumed_blob_length = Arc::new(AtomicUsize::new(0));
+        let handler_consumed_blob_length = consumed_blob_length.clone();
         let server = start_windows_resident_ipc_server_with_authenticator(
             Arc::new(
-                move |message, cancelled, execution_started, _parent_window| {
-                    match message["command"]["type"].as_str() {
-                        Some("get_session_state") => {
-                            json!({ "type": "session_state", "unlocked": false })
-                        }
-                        Some("echo_blob") => json!({
-                            "type": "blob_echo",
-                            "payload": message["command"]["payload"].clone(),
-                        }),
-                        Some("consume_blob") => json!({
-                            "type": "blob_length",
-                            "length": message["command"]["payload"]
-                                .as_str()
-                                .map(str::len)
-                                .unwrap_or_default(),
-                        }),
-                        Some("oversized_response") => json!({
-                            "type": "oversized_response",
-                            "payload": "A".repeat(MAX_NATIVE_RESPONSE_BYTES),
-                        }),
-                        Some("block_until_cancelled") => {
-                            while !cancelled.load(Ordering::Acquire) {
-                                std::thread::sleep(Duration::from_millis(5));
-                            }
-                            handler_cancellations.fetch_add(1, Ordering::AcqRel);
-                            json!({ "type": "saved" })
-                        }
-                        Some("commit_after_dispatch") => {
-                            execution_started.store(true, Ordering::Release);
-                            handler_mutation_started.store(true, Ordering::Release);
-                            std::thread::sleep(Duration::from_millis(50));
-                            json!({ "type": "saved" })
-                        }
-                        command => panic!("unexpected test command: {command:?}"),
+                move |message, cancelled, execution_started, _parent_window| match message.command {
+                    RuntimeCommand::GetSessionState => locked_session_response(),
+                    RuntimeCommand::AddEntryAttachment {
+                        name,
+                        data_base64,
+                        protect_in_memory,
+                        ..
+                    } => RuntimeResponse::EntryAttachmentContent(EntryAttachmentContentDto {
+                        name,
+                        data_base64,
+                        protect_in_memory,
+                    }),
+                    RuntimeCommand::ReplaceEntryAttachmentContent { data_base64, .. } => {
+                        handler_consumed_blob_length
+                            .store(data_base64.as_str().len(), Ordering::Release);
+                        RuntimeResponse::Saved
                     }
+                    RuntimeCommand::GetEntryAttachmentContent { name, .. }
+                        if name == "oversized" =>
+                    {
+                        RuntimeResponse::EntryAttachmentContent(EntryAttachmentContentDto {
+                            name,
+                            data_base64: "A".repeat(MAX_NATIVE_RESPONSE_BYTES).into(),
+                            protect_in_memory: true,
+                        })
+                    }
+                    RuntimeCommand::GetEntryDetail { entry_id, .. }
+                        if entry_id == "block-until-cancelled" =>
+                    {
+                        while !cancelled.load(Ordering::Acquire) {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        handler_cancellations.fetch_add(1, Ordering::AcqRel);
+                        RuntimeResponse::Saved
+                    }
+                    RuntimeCommand::SaveVault { vault_id }
+                        if vault_id == "commit-after-dispatch" =>
+                    {
+                        execution_started.store(true, Ordering::Release);
+                        handler_mutation_started.store(true, Ordering::Release);
+                        std::thread::sleep(Duration::from_millis(50));
+                        RuntimeResponse::Saved
+                    }
+                    command => panic!("unexpected test command: {command:?}"),
                 },
             ),
             Arc::new(verify_pipe_client_sid_only),
@@ -1521,14 +1527,7 @@ mod tests {
 
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-test-1".into(),
-                timeout_ms: 5_000,
-                message: json!({
-                    "version": 1,
-                    "command": { "type": "get_session_state" }
-                }),
-            },
+            &request_frame("native-test-1", 5_000, RuntimeCommand::GetSessionState),
         )
         .expect("send resident IPC request");
 
@@ -1541,7 +1540,7 @@ mod tests {
                 message,
             } => {
                 assert_eq!(request_id, "native-test-1");
-                assert_eq!(message["type"], "session_state");
+                assert!(matches!(message, RuntimeResponse::SessionState(_)));
             }
             _ => panic!("expected correlated response"),
         }
@@ -1549,17 +1548,17 @@ mod tests {
         let large_blob = "A".repeat((PIPE_BUFFER_BYTES as usize) * 4);
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-large-1".into(),
-                timeout_ms: 5_000,
-                message: json!({
-                    "version": 1,
-                    "command": {
-                        "type": "echo_blob",
-                        "payload": large_blob.clone(),
-                    }
-                }),
-            },
+            &request_frame(
+                "native-large-1",
+                5_000,
+                RuntimeCommand::AddEntryAttachment {
+                    vault_id: "vault-1".into(),
+                    entry_id: "entry-1".into(),
+                    name: "large.bin".into(),
+                    data_base64: large_blob.clone().into(),
+                    protect_in_memory: true,
+                },
+            ),
         )
         .expect("send resident IPC request larger than the pipe buffer");
         let response = read_frame(&mut reader)
@@ -1571,11 +1570,10 @@ mod tests {
                 message,
             } => {
                 assert_eq!(request_id, "native-large-1");
-                assert_eq!(message["type"], "blob_echo");
-                assert_eq!(
-                    message["payload"].as_str().map(str::len),
-                    Some(large_blob.len())
-                );
+                let RuntimeResponse::EntryAttachmentContent(content) = message else {
+                    panic!("expected attachment echo response");
+                };
+                assert_eq!(content.data_base64.as_str().len(), large_blob.len());
             }
             _ => panic!("expected correlated large response"),
         }
@@ -1584,17 +1582,16 @@ mod tests {
         let started = Instant::now();
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-multi-buffer-1".into(),
-                timeout_ms: 5_000,
-                message: json!({
-                    "version": 1,
-                    "command": {
-                        "type": "consume_blob",
-                        "payload": multi_buffer_blob,
-                    }
-                }),
-            },
+            &request_frame(
+                "native-multi-buffer-1",
+                5_000,
+                RuntimeCommand::ReplaceEntryAttachmentContent {
+                    vault_id: "vault-1".into(),
+                    entry_id: "entry-1".into(),
+                    name: "multi-buffer.bin".into(),
+                    data_base64: multi_buffer_blob.into(),
+                },
+            ),
         )
         .expect("send resident IPC request spanning many pipe buffers");
         let response = read_frame(&mut reader)
@@ -1606,10 +1603,7 @@ mod tests {
                 message,
             } => {
                 assert_eq!(request_id, "native-multi-buffer-1");
-                assert_eq!(
-                    message["length"].as_u64(),
-                    Some((PIPE_BUFFER_BYTES as u64) * 64)
-                );
+                assert!(matches!(message, RuntimeResponse::Saved));
             }
             _ => panic!("expected correlated multi-buffer response"),
         }
@@ -1617,17 +1611,22 @@ mod tests {
             started.elapsed() < Duration::from_millis(1_200),
             "resident IPC reader must drain available pipe buffers without one poll sleep per chunk"
         );
+        assert_eq!(
+            consumed_blob_length.load(Ordering::Acquire),
+            (PIPE_BUFFER_BYTES as usize) * 64
+        );
 
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-oversized-response-1".into(),
-                timeout_ms: 5_000,
-                message: json!({
-                    "version": 1,
-                    "command": { "type": "oversized_response" }
-                }),
-            },
+            &request_frame(
+                "native-oversized-response-1",
+                5_000,
+                RuntimeCommand::GetEntryAttachmentContent {
+                    vault_id: "vault-1".into(),
+                    entry_id: "entry-1".into(),
+                    name: "oversized".into(),
+                },
+            ),
         )
         .expect("send resident IPC request with an oversized response");
         assert_request_error(
@@ -1640,14 +1639,14 @@ mod tests {
 
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-cancel-1".into(),
-                timeout_ms: 5_000,
-                message: json!({
-                    "version": 1,
-                    "command": { "type": "block_until_cancelled" }
-                }),
-            },
+            &request_frame(
+                "native-cancel-1",
+                5_000,
+                RuntimeCommand::GetEntryDetail {
+                    vault_id: "vault-1".into(),
+                    entry_id: "block-until-cancelled".into(),
+                },
+            ),
         )
         .expect("send cancellable resident IPC request");
         write_frame(
@@ -1667,14 +1666,13 @@ mod tests {
 
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-running-cancel-1".into(),
-                timeout_ms: 5_000,
-                message: json!({
-                    "version": 1,
-                    "command": { "type": "commit_after_dispatch" }
-                }),
-            },
+            &request_frame(
+                "native-running-cancel-1",
+                5_000,
+                RuntimeCommand::SaveVault {
+                    vault_id: "commit-after-dispatch".into(),
+                },
+            ),
         )
         .expect("send running mutation request");
         let deadline = Instant::now() + Duration::from_secs(1);
@@ -1698,21 +1696,21 @@ mod tests {
                 message,
             } => {
                 assert_eq!(request_id, "native-running-cancel-1");
-                assert_eq!(message["type"], "saved");
+                assert!(matches!(message, RuntimeResponse::Saved));
             }
             _ => panic!("expected committed mutation response"),
         }
 
         write_frame(
             &mut writer,
-            &ResidentIpcFrame::Request {
-                request_id: "native-timeout-1".into(),
-                timeout_ms: 50,
-                message: json!({
-                    "version": 1,
-                    "command": { "type": "block_until_cancelled" }
-                }),
-            },
+            &request_frame(
+                "native-timeout-1",
+                50,
+                RuntimeCommand::GetEntryDetail {
+                    vault_id: "vault-1".into(),
+                    entry_id: "block-until-cancelled".into(),
+                },
+            ),
         )
         .expect("send timing out resident IPC request");
         assert_request_error(

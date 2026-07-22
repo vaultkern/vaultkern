@@ -192,7 +192,7 @@ fn main() {
 
             let ipc_bridge = plugin_bridge.clone();
             let ipc_handler = Arc::new(
-                move |message: Value, cancelled, execution_started, parent_window| {
+                move |message, cancelled, execution_started, parent_window| {
                     ipc_bridge.request_browser_cancellable(
                         message,
                         cancelled,

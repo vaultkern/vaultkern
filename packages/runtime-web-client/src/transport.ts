@@ -82,7 +82,9 @@ async function negotiateRuntimeTransport(
     }
   });
   if (isRuntimeError(response)) {
-    throw new Error(`${response.code}: ${response.message}`);
+    const error = new Error(response.message) as Error & { code: string };
+    error.code = response.code;
+    throw error;
   }
   if (
     typeof response !== "object" ||

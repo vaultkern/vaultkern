@@ -297,7 +297,7 @@ fn request_id_from_native_payload(payload: &[u8]) -> Option<String> {
         .filter(|request_id| request_id.len() <= MAX_NATIVE_REQUEST_ID_BYTES)
 }
 
-fn write_native_message(
+pub(crate) fn write_native_message(
     writer: &mut impl Write,
     response: &RuntimeResponse,
     request_id: Option<&str>,
@@ -331,7 +331,7 @@ fn native_message_length_prefix(length: usize) -> Result<[u8; 4]> {
     Ok(length.to_le_bytes())
 }
 
-fn encode_native_response(
+pub(crate) fn encode_native_response(
     response: &RuntimeResponse,
     request_id: Option<&str>,
 ) -> Result<Zeroizing<Vec<u8>>> {
@@ -343,15 +343,49 @@ fn encode_native_response(
         request_id: &'a str,
     }
 
-    let payload = match request_id {
-        Some(request_id) => serde_json::to_vec(&ResponseWithRequestId {
+    match request_id {
+        Some(request_id) => encode_zeroizing_json(&ResponseWithRequestId {
             response,
             request_id,
         }),
-        None => serde_json::to_vec(response),
+        None => encode_zeroizing_json(response),
     }
-    .context("failed to encode native response")?;
-    Ok(Zeroizing::new(payload))
+    .context("failed to encode native response")
+}
+
+pub(crate) fn encode_zeroizing_json<T: serde::Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>> {
+    #[derive(Default)]
+    struct SerializedLength {
+        bytes: usize,
+    }
+
+    impl Write for SerializedLength {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(buffer.len())
+                .ok_or_else(|| std::io::Error::other("serialized JSON length overflow"))?;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut length = SerializedLength::default();
+    serde_json::to_writer(&mut length, value).context("measure JSON payload")?;
+
+    let mut payload = Zeroizing::new(Vec::with_capacity(length.bytes));
+    serde_json::to_writer(&mut *payload, value).context("encode JSON payload")?;
+    if payload.len() != length.bytes {
+        anyhow::bail!(
+            "serialized JSON length changed between measurement and encoding: {} != {}",
+            payload.len(),
+            length.bytes
+        );
+    }
+    Ok(payload)
 }
 
 #[cfg(not(windows))]
