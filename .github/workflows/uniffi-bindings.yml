@@ -81,6 +81,7 @@ jobs:
           native="$GITHUB_WORKSPACE/target/release"
           fixture="$GITHUB_WORKSPACE/crates/vaultkern-kdbx/tests/fixtures/keepassxc-2.7.6-kdbx4.1.kdbx"
           mkdir -p "$output"
+          output="$(cd "$output" && pwd -P)"
 
           swiftc -emit-library -emit-module -module-name VaultKernCore \
             -Xcc "-fmodule-map-file=$bindings/VaultKernCoreFFI.modulemap" \
