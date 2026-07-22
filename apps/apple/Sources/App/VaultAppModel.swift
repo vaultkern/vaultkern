@@ -51,6 +51,7 @@ final class VaultAppModel: ObservableObject {
   private var vaultURL: URL?
   private var loadedVaultID: String?
   private var pendingKDF: PendingKDFOperation?
+  private var residentIPC: ResidentIPCController?
 
   init() {
     do {
@@ -59,6 +60,17 @@ final class VaultAppModel: ObservableObject {
       let state = try liveRuntime.sessionState()
       runtime = liveRuntime
       bootError = nil
+      if ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil {
+        let controller = ResidentIPCController {
+          liveRuntime.makeProtocolSession()
+        }
+        do {
+          try controller.start()
+          residentIPC = controller
+        } catch {
+          fputs("VaultKern native messaging unavailable: \(error.localizedDescription)\n", stderr)
+        }
+      }
       apply(state)
       if let reference, reference.sourceKind == "onedrive" {
         selectedRemoteVault = reference

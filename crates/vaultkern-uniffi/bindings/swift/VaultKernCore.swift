@@ -1471,6 +1471,132 @@ public func FfiConverterTypeVaultPasskeyOperation_lower(_ value: VaultPasskeyOpe
 
 
 
+public protocol VaultProtocolSessionProtocol: AnyObject, Sendable {
+
+    func cancel()
+
+    func handleMessage(message: SensitiveBytes) throws  -> SensitiveBytes
+
+}
+open class VaultProtocolSession: VaultProtocolSessionProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_vaultkern_uniffi_fn_clone_vaultprotocolsession(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_vaultkern_uniffi_fn_free_vaultprotocolsession(handle, $0) }
+    }
+
+
+
+
+open func cancel()  {try! rustCall() {
+    uniffi_vaultkern_uniffi_fn_method_vaultprotocolsession_cancel(
+            self.uniffiCloneHandle(),$0
+    )
+}
+}
+
+open func handleMessage(message: SensitiveBytes)throws  -> SensitiveBytes  {
+    return try  FfiConverterTypeSensitiveBytes_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultprotocolsession_handle_message(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeSensitiveBytes_lower(message),$0
+    )
+})
+}
+
+
+
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeVaultProtocolSession: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = VaultProtocolSession
+
+    public static func lift(_ handle: UInt64) throws -> VaultProtocolSession {
+        return VaultProtocolSession(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: VaultProtocolSession) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> VaultProtocolSession {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: VaultProtocolSession, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultProtocolSession_lift(_ handle: UInt64) throws -> VaultProtocolSession {
+    return try FfiConverterTypeVaultProtocolSession.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeVaultProtocolSession_lower(_ value: VaultProtocolSession) -> UInt64 {
+    return FfiConverterTypeVaultProtocolSession.lower(value)
+}
+
+
+
+
+
+
 public protocol VaultSessionProtocol: AnyObject, Sendable {
 
     func beginPasskeyOperation(operationId: Data) throws  -> VaultPasskeyOperation
@@ -1488,6 +1614,8 @@ public protocol VaultSessionProtocol: AnyObject, Sendable {
     func lockSession() throws  -> SessionStateDto
 
     func openVault(path: String) throws  -> VaultHandleDto
+
+    func protocolSession()  -> VaultProtocolSession
 
     func readEntry(vaultId: String, entryId: String) throws  -> EntryDetailDto
 
@@ -1632,6 +1760,14 @@ open func openVault(path: String)throws  -> VaultHandleDto  {
     uniffi_vaultkern_uniffi_fn_method_vaultsession_open_vault(
             self.uniffiCloneHandle(),
         FfiConverterString.lower(path),$0
+    )
+})
+}
+
+open func protocolSession() -> VaultProtocolSession  {
+    return try!  FfiConverterTypeVaultProtocolSession_lift(try! rustCall() {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_protocol_session(
+            self.uniffiCloneHandle(),$0
     )
 })
 }
@@ -4881,6 +5017,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_register_passkey() != 64246) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultprotocolsession_cancel() != 57708) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultprotocolsession_handle_message() != 4373) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_begin_passkey_operation() != 62156) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4903,6 +5045,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_open_vault() != 65313) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_protocol_session() != 49336) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532) {

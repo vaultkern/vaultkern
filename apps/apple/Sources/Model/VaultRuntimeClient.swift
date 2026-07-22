@@ -173,6 +173,10 @@ final class LiveVaultRuntimeClient: VaultRuntimeClient, @unchecked Sendable {
   func syncStatus() throws -> VaultSourceStatusDto? {
     try syncClient.status()
   }
+
+  func makeProtocolSession() -> VaultProtocolSession {
+    session.protocolSession()
+  }
 }
 
 enum BackgroundWork {

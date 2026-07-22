@@ -19,6 +19,7 @@ vaultkern-runtime-protocol = { path = "../vaultkern-runtime-protocol" }
 zeroize.workspace = true
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile = "3.10"
 vaultkern-core = { path = "../vaultkern-core" }
 
