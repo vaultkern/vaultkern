@@ -5,7 +5,7 @@ use super::durable_file::{
     sync_published_target, unique_sibling_path, write_verified_temp,
 };
 use serde::{Deserialize, Serialize};
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
@@ -408,7 +408,7 @@ impl LocalFileWriteTxn {
     }
 
     fn publish_backup(&self, faults: &DurableFaultInjector) -> io::Result<PathBuf> {
-        #[cfg(unix)]
+        #[cfg(all(unix, not(target_os = "android")))]
         {
             let mut published = None;
             for _ in 0..128 {
@@ -437,7 +437,7 @@ impl LocalFileWriteTxn {
             }
             Ok(backup)
         }
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "android"))]
         {
             let mut published = None;
             for _ in 0..128 {
@@ -455,6 +455,8 @@ impl LocalFileWriteTxn {
                 let copy_result = (|| {
                     let mut source = File::open(&self.target)?;
                     io::copy(&mut source, &mut backup_file)?;
+                    #[cfg(target_os = "android")]
+                    preserve_android_backup_metadata(&source, &backup_file)?;
                     backup_file.sync_all()?;
                     sync_parent(&self.target)?;
                     faults.check(DurableFaultPoint::BackupPublished)
@@ -488,6 +490,26 @@ impl LocalFileWriteTxn {
             Ok(backup)
         }
     }
+}
+
+#[cfg(target_os = "android")]
+fn preserve_android_backup_metadata(original: &File, backup: &File) -> io::Result<()> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let original_metadata = original.metadata()?;
+    backup.set_permissions(fs::Permissions::from_mode(original_metadata.mode()))?;
+    preserve_extended_attributes(original, backup)?;
+    let backup_metadata = backup.metadata()?;
+    if backup_metadata.uid() != original_metadata.uid()
+        || backup_metadata.gid() != original_metadata.gid()
+        || backup_metadata.mode() != original_metadata.mode()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "durable Android backup did not preserve ownership and mode",
+        ));
+    }
+    Ok(())
 }
 
 fn reconcile_published_commit(
@@ -798,7 +820,7 @@ fn verify_backup_generation(
     expected: &VaultSourceFingerprint,
 ) -> io::Result<()> {
     let opened = read_opened_snapshot(backup, false)?;
-    #[cfg(unix)]
+    #[cfg(all(unix, not(target_os = "android")))]
     if opened.identity != expected_identity {
         return Err(io::Error::new(
             io::ErrorKind::WouldBlock,
@@ -819,7 +841,7 @@ fn same_content(left: &VaultSourceFingerprint, right: &VaultSourceFingerprint) -
     left.content_sha256 == right.content_sha256 && left.size_bytes == right.size_bytes
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn preserve_extended_attributes(original: &File, replacement: &File) -> io::Result<()> {
     use std::os::fd::AsRawFd;
 
@@ -841,6 +863,9 @@ fn preserve_extended_attributes(original: &File, replacement: &File) -> io::Resu
         }
     }
     for (name, value) in &original_xattrs {
+        if replacement_xattrs.get(name) == Some(value) {
+            continue;
+        }
         let name = std::ffi::CString::new(name.clone()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -893,7 +918,10 @@ fn preserve_extended_attributes(original: &File, replacement: &File) -> io::Resu
     }
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+#[cfg(all(
+    unix,
+    not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+))]
 fn preserve_extended_attributes(_original: &File, _replacement: &File) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -901,7 +929,7 @@ fn preserve_extended_attributes(_original: &File, _replacement: &File) -> io::Re
     ))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn read_file_xattrs(file: &File) -> io::Result<BTreeMap<Vec<u8>, Vec<u8>>> {
     use std::os::fd::AsRawFd;
 
