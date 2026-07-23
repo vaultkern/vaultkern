@@ -59,7 +59,7 @@ use crate::autofill_persist::{
     plan_sha256, prepare_autofill_persist, totp_specs_semantically_equal,
 };
 use crate::command_loop::format_error_chain;
-use crate::match_fill::{FillMatchScore, score_entry_match};
+use crate::match_fill::{FillMatchScore, score_origin_scoped_entry_match};
 use crate::passkey::{
     PasskeyAssertionRequest, PasskeyRegistrationRequest, PlatformPasskeyAssertionInput,
     PlatformPasskeyAssertionOutput, PlatformPasskeyAssertionRequest, PlatformPasskeyCredential,
@@ -2617,10 +2617,10 @@ impl Runtime {
         );
 
         entries.sort_by(|left, right| {
-            left.score
-                .host_match
-                .cmp(&right.score.host_match)
-                .then_with(|| right.score.exact_path.cmp(&left.score.exact_path))
+            right
+                .score
+                .exact_path
+                .cmp(&left.score.exact_path)
                 .then_with(|| {
                     right
                         .score
@@ -9223,7 +9223,7 @@ fn collect_fill_candidates(
             continue;
         }
 
-        if let Some(score) = score_entry_match(url, &entry.url) {
+        if let Some(score) = score_origin_scoped_entry_match(url, &entry.url) {
             output.push(RankedFillCandidate {
                 index,
                 entry: EntrySummaryDto {

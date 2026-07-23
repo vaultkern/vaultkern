@@ -188,7 +188,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
     let fill = runtime
         .handle(RuntimeCommand::FindFillCandidates {
             vault_id: handle.vault_id.clone(),
-            url: "https://example.com/dashboard".into(),
+            url: "https://app.example.com/dashboard".into(),
         })
         .unwrap();
     assert_eq!(
@@ -209,7 +209,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
         .handle(RuntimeCommand::GetAutofillCredential {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            url: "https://example.com/dashboard".into(),
+            url: "https://app.example.com/dashboard".into(),
         })
         .unwrap();
     assert_eq!(
@@ -226,7 +226,7 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
         .handle(RuntimeCommand::GetAutofillEntryFields {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
-            url: "https://example.com/dashboard".into(),
+            url: "https://app.example.com/dashboard".into(),
         })
         .unwrap();
     let RuntimeResponse::AutofillEntryFields(scoped_fields) = scoped_fields else {
@@ -277,10 +277,94 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
         .handle(RuntimeCommand::GetAutofillCredential {
             vault_id: handle.vault_id,
             entry_id,
-            url: "https://example.com/dashboard".into(),
+            url: "https://app.example.com/dashboard".into(),
         })
         .unwrap();
     assert!(matches!(locked, RuntimeResponse::Error(_)));
+}
+
+#[test]
+fn runtime_releases_autofill_secrets_only_to_the_exact_http_origin() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Admin");
+    entry.username = "alice".into();
+    entry.password = "secret".into();
+    entry.url = "https://admin.example.com/login".into();
+    let entry_id = entry.id.to_string();
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin-scoped.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let exact_origin = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://ADMIN.EXAMPLE.COM:443/account".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        exact_origin,
+        RuntimeResponse::AutofillCredential(_)
+    ));
+
+    for cross_origin_url in [
+        "https://evil.example.com/login",
+        "http://admin.example.com/login",
+        "https://admin.example.com:444/login",
+    ] {
+        let candidates = runtime
+            .handle(RuntimeCommand::FindFillCandidates {
+                vault_id: handle.vault_id.clone(),
+                url: cross_origin_url.into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                candidates,
+                RuntimeResponse::FillCandidates(ref candidates) if candidates.entries.is_empty()
+            ),
+            "credential summaries crossed into {cross_origin_url}"
+        );
+
+        let credential = runtime
+            .handle(RuntimeCommand::GetAutofillCredential {
+                vault_id: handle.vault_id.clone(),
+                entry_id: entry_id.clone(),
+                url: cross_origin_url.into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(credential, RuntimeResponse::Error(_)),
+            "credential secret crossed into {cross_origin_url}"
+        );
+
+        let fields = runtime
+            .handle(RuntimeCommand::GetAutofillEntryFields {
+                vault_id: handle.vault_id.clone(),
+                entry_id: entry_id.clone(),
+                url: cross_origin_url.into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(fields, RuntimeResponse::Error(_)),
+            "editable secret fields crossed into {cross_origin_url}"
+        );
+    }
 }
 
 #[test]
@@ -477,7 +561,7 @@ fn runtime_deletes_quick_unlock_credentials_when_stored_password_is_stale() {
 }
 
 #[test]
-fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
+fn runtime_scopes_fill_candidates_to_exact_origin_then_sorts_by_path_similarity() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -488,7 +572,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let mut descendant = Entry::new("Descendant Host");
     descendant.username = "descendant".into();
     descendant.url = "https://auth.app.example.com/login/reset".into();
-    let descendant_id = descendant.id.to_string();
     vault.root.entries.push(descendant);
 
     let mut exact_path = Entry::new("Exact Path");
@@ -500,7 +583,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let mut ancestor = Entry::new("Parent Domain");
     ancestor.username = "ancestor".into();
     ancestor.url = "https://example.com/login/reset".into();
-    let ancestor_id = ancestor.id.to_string();
     vault.root.entries.push(ancestor);
 
     let mut exact_host_broader_path = Entry::new("Broader Path");
@@ -512,7 +594,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let mut sibling = Entry::new("Sibling Host");
     sibling.username = "sibling".into();
     sibling.url = "https://admin.example.com/login/reset".into();
-    let sibling_id = sibling.id.to_string();
     vault.root.entries.push(sibling);
 
     let mut invalid = Entry::new("Invalid Url");
@@ -557,30 +638,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     title: "Broader Path".into(),
                     username: "broad".into(),
                     url: "https://app.example.com/login".into(),
-                    group_id: root_id.clone(),
-                    has_totp: false,
-                },
-                vaultkern_runtime_protocol::EntrySummaryDto {
-                    id: ancestor_id,
-                    title: "Parent Domain".into(),
-                    username: "ancestor".into(),
-                    url: "https://example.com/login/reset".into(),
-                    group_id: root_id.clone(),
-                    has_totp: false,
-                },
-                vaultkern_runtime_protocol::EntrySummaryDto {
-                    id: descendant_id,
-                    title: "Descendant Host".into(),
-                    username: "descendant".into(),
-                    url: "https://auth.app.example.com/login/reset".into(),
-                    group_id: root_id.clone(),
-                    has_totp: false,
-                },
-                vaultkern_runtime_protocol::EntrySummaryDto {
-                    id: sibling_id,
-                    title: "Sibling Host".into(),
-                    username: "sibling".into(),
-                    url: "https://admin.example.com/login/reset".into(),
                     group_id: root_id,
                     has_totp: false,
                 },
