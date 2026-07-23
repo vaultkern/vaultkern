@@ -1,12 +1,9 @@
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use vaultkern_runtime::{
     PlatformPasskeyAssertionInput, PlatformPasskeyAssertionOutput, PlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
@@ -14,9 +11,8 @@ use vaultkern_runtime::{
 };
 use vaultkern_runtime_protocol::{
     BrowserIntegrationSettingsDto, ErrorDto, ProtocolEnvelope, ResidentAppRouteDto, RuntimeCommand,
-    RuntimeResponse, SaveVaultStatusDto, SessionStateDto,
+    RuntimeResponse, SessionStateDto,
 };
-use zeroize::Zeroizing;
 
 #[derive(Clone)]
 pub struct RuntimeBridge {
@@ -55,7 +51,6 @@ enum RuntimeRequest {
     },
     Protocol {
         command: RuntimeCommand,
-        operation_id: Option<String>,
         cancelled: Arc<AtomicBool>,
         browser_client: bool,
         parent_window: Option<usize>,
@@ -112,241 +107,6 @@ enum RuntimeRequest {
 struct ResidentIdleLock {
     timeout: Option<Duration>,
     last_activity: Instant,
-}
-
-#[derive(Default)]
-struct ResidentMutationState {
-    unsaved_vault_ids: BTreeSet<String>,
-    pending_save_receipts: BTreeMap<(String, String), RuntimeResponse>,
-    pending_save_receipt_order: VecDeque<(String, String)>,
-    operation_receipts: BTreeMap<(String, String), ResidentOperationReceipt>,
-    operation_receipt_order: VecDeque<(String, String)>,
-}
-
-const MAX_PENDING_SAVE_RECEIPTS: usize = 256;
-const MAX_OPERATION_RECEIPTS: usize = 256;
-const MAX_LOGICAL_OPERATION_ID_BYTES: usize = 256;
-
-struct ResidentOperationReceipt {
-    command_digest: [u8; 32],
-    response_json: Option<Zeroizing<Vec<u8>>>,
-}
-
-struct OperationReceiptIdentity {
-    key: (String, String),
-    command_digest: [u8; 32],
-}
-
-enum OperationReceiptLookup {
-    Miss,
-    Replay(RuntimeResponse),
-    Expired,
-    Conflict,
-}
-
-impl ResidentMutationState {
-    fn lookup_operation_receipt(
-        &self,
-        identity: Option<&OperationReceiptIdentity>,
-    ) -> Result<OperationReceiptLookup, String> {
-        let Some(identity) = identity else {
-            return Ok(OperationReceiptLookup::Miss);
-        };
-        let Some(receipt) = self.operation_receipts.get(&identity.key) else {
-            return Ok(OperationReceiptLookup::Miss);
-        };
-        if receipt.command_digest != identity.command_digest {
-            return Ok(OperationReceiptLookup::Conflict);
-        }
-        let Some(response_json) = receipt.response_json.as_deref() else {
-            return Ok(OperationReceiptLookup::Expired);
-        };
-        let response = serde_json::from_slice(response_json)
-            .map_err(|error| format!("failed to decode resident operation receipt: {error}"))?;
-        Ok(OperationReceiptLookup::Replay(response))
-    }
-
-    fn record_operation_receipt(
-        &mut self,
-        identity: Option<OperationReceiptIdentity>,
-        response: &RuntimeResponse,
-    ) -> Result<(), String> {
-        let Some(identity) = identity else {
-            return Ok(());
-        };
-        let receipt = ResidentOperationReceipt {
-            command_digest: identity.command_digest,
-            response_json: Some(vaultkern_runtime::encode_zeroizing_json(response).map_err(
-                |error| format!("failed to encode resident operation receipt: {error}"),
-            )?),
-        };
-        if self
-            .operation_receipts
-            .insert(identity.key.clone(), receipt)
-            .is_some()
-        {
-            self.operation_receipt_order
-                .retain(|key| key != &identity.key);
-        }
-        self.operation_receipt_order.push_back(identity.key);
-        while self.operation_receipts.len() > MAX_OPERATION_RECEIPTS {
-            if let Some(oldest) = self.operation_receipt_order.pop_front() {
-                self.operation_receipts.remove(&oldest);
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn note_dispatch(&mut self, command: &RuntimeCommand) {
-        if let Some(vault_id) = command_unsaved_vault_id(command) {
-            self.unsaved_vault_ids.insert(vault_id.to_owned());
-        }
-    }
-
-    #[cfg(test)]
-    fn note_response(&mut self, command: &RuntimeCommand, response: &RuntimeResponse) {
-        if matches!(response, RuntimeResponse::Error(_)) {
-            return;
-        }
-        self.note_dispatch(command);
-        if response_recoverably_persists_active_vault(response)
-            && let Some(vault_id) = command_persists_vault_id(command)
-        {
-            self.unsaved_vault_ids.remove(vault_id);
-        }
-    }
-
-    fn preflight_error(&self, command: &RuntimeCommand) -> Option<RuntimeResponse> {
-        (!self.unsaved_vault_ids.is_empty() && command_can_discard_unsaved_changes(command)).then(
-            || {
-                error_response(
-                    "unsaved_changes",
-                    "save the active vault before locking or changing the resident session",
-                )
-            },
-        )
-    }
-
-    fn record_inline_save(
-        &mut self,
-        vault_id: String,
-        operation_id: Option<String>,
-        response: RuntimeResponse,
-    ) {
-        if response_recoverably_persists_active_vault(&response) {
-            self.unsaved_vault_ids.remove(&vault_id);
-            self.record_save_receipt(vault_id, operation_id, &response);
-        } else {
-            self.unsaved_vault_ids.insert(vault_id.clone());
-        }
-    }
-
-    fn record_save_receipt(
-        &mut self,
-        vault_id: String,
-        operation_id: Option<String>,
-        response: &RuntimeResponse,
-    ) {
-        let RuntimeResponse::SaveVaultResult(result) = response else {
-            return;
-        };
-        if let Some(operation_id) = operation_id {
-            let key = (vault_id, operation_id);
-            if self
-                .pending_save_receipts
-                .insert(
-                    key.clone(),
-                    RuntimeResponse::SaveVaultResult(result.clone()),
-                )
-                .is_some()
-            {
-                self.pending_save_receipt_order
-                    .retain(|candidate| candidate != &key);
-            }
-            self.pending_save_receipt_order.push_back(key);
-            while self.pending_save_receipts.len() > MAX_PENDING_SAVE_RECEIPTS {
-                if let Some(oldest) = self.pending_save_receipt_order.pop_front() {
-                    self.pending_save_receipts.remove(&oldest);
-                }
-            }
-        }
-    }
-
-    fn save_receipt(
-        &self,
-        vault_id: &str,
-        operation_id: Option<&str>,
-    ) -> Result<Option<RuntimeResponse>, String> {
-        let Some(operation_id) = operation_id else {
-            return Ok(None);
-        };
-        let key = (vault_id.to_owned(), operation_id.to_owned());
-        let Some(receipt) = self.pending_save_receipts.get(&key) else {
-            return Ok(None);
-        };
-        let encoded = vaultkern_runtime::encode_zeroizing_json(receipt)
-            .map_err(|error| format!("failed to encode resident save receipt: {error}"))?;
-        serde_json::from_slice(&encoded)
-            .map(Some)
-            .map_err(|error| format!("failed to decode resident save receipt: {error}"))
-    }
-
-    fn clear_save_receipts(&mut self, vault_id: &str) {
-        self.pending_save_receipts
-            .retain(|(receipt_vault_id, _), _| receipt_vault_id != vault_id);
-        self.pending_save_receipt_order
-            .retain(|(receipt_vault_id, _)| receipt_vault_id != vault_id);
-    }
-
-    fn scrub_session_secrets(&mut self) {
-        for receipt in self.operation_receipts.values_mut() {
-            receipt.response_json = None;
-        }
-    }
-}
-
-fn operation_receipt_identity(
-    command: &RuntimeCommand,
-    operation_id: Option<&str>,
-) -> Result<Option<OperationReceiptIdentity>, String> {
-    let Some(vault_id) = command_unsaved_vault_id(command) else {
-        return Ok(None);
-    };
-    let Some(operation_id) = operation_id else {
-        return Ok(None);
-    };
-    Ok(Some(OperationReceiptIdentity {
-        key: (vault_id.to_owned(), operation_id.to_owned()),
-        command_digest: runtime_command_digest(command)?,
-    }))
-}
-
-fn valid_logical_operation_id(operation_id: &str) -> bool {
-    !operation_id.is_empty()
-        && operation_id.len() <= MAX_LOGICAL_OPERATION_ID_BYTES
-        && operation_id.trim() == operation_id
-        && !operation_id.chars().any(char::is_control)
-}
-
-fn runtime_command_digest(command: &RuntimeCommand) -> Result<[u8; 32], String> {
-    struct DigestWriter<'a>(&'a mut Sha256);
-
-    impl Write for DigestWriter<'_> {
-        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-            self.0.update(buffer);
-            Ok(buffer.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut hasher = Sha256::new();
-    serde_json::to_writer(DigestWriter(&mut hasher), command)
-        .map_err(|error| format!("failed to fingerprint resident operation: {error}"))?;
-    Ok(hasher.finalize().into())
 }
 
 impl ResidentIdleLock {
@@ -413,7 +173,6 @@ impl RuntimeBridge {
             autofill_on_page_load_enabled: false,
             browser_passkey_proxy_enabled: false,
         }));
-        let worker_reconciliation_notifier = Arc::clone(&reconciliation_notifier);
         let worker_session_state_notifier = Arc::clone(&session_state_notifier);
         let worker_quick_unlock_enabled = Arc::clone(&quick_unlock_enabled);
         let worker_browser_integration_settings = Arc::clone(&browser_integration_settings);
@@ -423,7 +182,6 @@ impl RuntimeBridge {
                 let mut runtime = factory();
                 runtime.bind_quick_unlock_policy_gate(worker_quick_unlock_enabled);
                 let mut idle_lock = ResidentIdleLock::new();
-                let mut mutation_state = ResidentMutationState::default();
                 loop {
                     let unlocked = runtime.platform_passkey_is_unlocked();
                     let platform_passkey_operation_active =
@@ -432,15 +190,6 @@ impl RuntimeBridge {
                         unlocked,
                         platform_passkey_operation_active,
                     ) {
-                        if !persist_unsaved_before_idle_lock(
-                            &mut runtime,
-                            &mut mutation_state,
-                            &worker_reconciliation_notifier,
-                        ) {
-                            idle_lock.record_activity();
-                            continue;
-                        }
-                        mutation_state.scrub_session_secrets();
                         runtime.lock_session();
                         publish_session_state(
                             &worker_session_state_notifier,
@@ -455,15 +204,6 @@ impl RuntimeBridge {
                         Some(wait) => match receiver.recv_timeout(wait) {
                             Ok(request) => request,
                             Err(mpsc::RecvTimeoutError::Timeout) => {
-                                if !persist_unsaved_before_idle_lock(
-                                    &mut runtime,
-                                    &mut mutation_state,
-                                    &worker_reconciliation_notifier,
-                                ) {
-                                    idle_lock.record_activity();
-                                    continue;
-                                }
-                                mutation_state.scrub_session_secrets();
                                 runtime.lock_session();
                                 publish_session_state(
                                     &worker_session_state_notifier,
@@ -503,7 +243,6 @@ impl RuntimeBridge {
                         }
                         RuntimeRequest::Protocol {
                             command,
-                            operation_id,
                             cancelled,
                             browser_client,
                             parent_window,
@@ -525,71 +264,8 @@ impl RuntimeBridge {
                                 });
                                 continue;
                             }
-                            if operation_id
-                                .as_deref()
-                                .is_some_and(|value| !valid_logical_operation_id(value))
-                            {
-                                let _ = response.send(RuntimeProtocolResponse {
-                                    response: error_response(
-                                        "invalid_request",
-                                        "invalid logical operation ID",
-                                    ),
-                                    quick_unlock_credentials: None,
-                                });
-                                continue;
-                            }
-                            let operation_identity =
-                                match operation_receipt_identity(&command, operation_id.as_deref())
-                                {
-                                    Ok(identity) => identity,
-                                    Err(error) => {
-                                        let _ = response.send(RuntimeProtocolResponse {
-                                            response: error_response(
-                                                "runtime_unavailable",
-                                                error,
-                                            ),
-                                            quick_unlock_credentials: None,
-                                        });
-                                        continue;
-                                    }
-                                };
-                            let operation_lookup = match mutation_state
-                                .lookup_operation_receipt(operation_identity.as_ref())
-                            {
-                                Ok(lookup) => lookup,
-                                Err(error) => {
-                                    let _ = response.send(RuntimeProtocolResponse {
-                                        response: error_response(
-                                            "runtime_unavailable",
-                                            error,
-                                        ),
-                                        quick_unlock_credentials: None,
-                                    });
-                                    continue;
-                                }
-                            };
                             let publishes_session_state =
                                 command_can_change_session_state(&command);
-                            let pending_save_vault_id =
-                                save_command_vault_id(&command).map(ToOwned::to_owned);
-                            let pending_save_receipt = match pending_save_vault_id.as_deref() {
-                                Some(vault_id) => match mutation_state
-                                    .save_receipt(vault_id, operation_id.as_deref())
-                                {
-                                    Ok(receipt) => receipt,
-                                    Err(error) => {
-                                        let _ = response.send(RuntimeProtocolResponse {
-                                            response: error_response(
-                                                "runtime_unavailable",
-                                                error,
-                                            ),
-                                            quick_unlock_credentials: None,
-                                        });
-                                        continue;
-                                    }
-                                },
-                                None => None,
-                            };
                             let records_activity = matches!(
                                 &command,
                                 RuntimeCommand::RecordUserActivity
@@ -602,58 +278,6 @@ impl RuntimeBridge {
                             let (value, quick_unlock_credentials) =
                                 if cancelled.load(Ordering::Acquire) {
                                     (cancelled_response(), None)
-                                } else if let Some(receipt) = pending_save_receipt {
-                                    (receipt, None)
-                                } else if matches!(operation_lookup, OperationReceiptLookup::Conflict)
-                                {
-                                    (
-                                        error_response(
-                                            "operation_id_conflict",
-                                            "logical operation ID was already used for a different mutation",
-                                        ),
-                                        None,
-                                    )
-                                } else if matches!(operation_lookup, OperationReceiptLookup::Expired)
-                                {
-                                    (
-                                        error_response(
-                                            "operation_outcome_expired",
-                                            "the logical operation completed in an earlier resident session; reload the vault instead of repeating it",
-                                        ),
-                                        None,
-                                    )
-                                } else if let OperationReceiptLookup::Replay(receipt) = operation_lookup
-                                {
-                                    let previous_parent = browser_client.then(|| {
-                                        runtime.replace_parent_window_handle(parent_window)
-                                    });
-                                    let authorization = if browser_client {
-                                        runtime.authorize_browser_command_only(
-                                            &command,
-                                            cancelled.as_ref(),
-                                        )
-                                    } else {
-                                        Ok(())
-                                    };
-                                    if let Some(previous_parent) = previous_parent {
-                                        runtime.set_parent_window_handle(previous_parent);
-                                    }
-                                    match authorization {
-                                        Ok(()) => (receipt, None),
-                                        Err(error)
-                                            if error.to_string()
-                                                == "browser request was cancelled" =>
-                                        {
-                                            (cancelled_response(), None)
-                                        }
-                                        Err(error) => (
-                                            error_response(
-                                                "runtime_error",
-                                                format!("{error:#}"),
-                                            ),
-                                            None,
-                                        ),
-                                    }
                                 } else if let Some(error) =
                                     platform_passkey_operation_preflight_error(
                                         runtime.has_active_platform_passkey_operations(),
@@ -661,15 +285,7 @@ impl RuntimeBridge {
                                     )
                                 {
                                     (error, None)
-                                } else if let Some(error) =
-                                    mutation_state.preflight_error(&command)
-                                {
-                                    (error, None)
                                 } else {
-                                    let unsaved_vault_id =
-                                        command_unsaved_vault_id(&command).map(ToOwned::to_owned);
-                                    let persisted_vault_id =
-                                        command_persists_vault_id(&command).map(ToOwned::to_owned);
                                     let previous_parent = browser_client.then(|| {
                                         runtime.replace_parent_window_handle(parent_window)
                                     });
@@ -685,7 +301,7 @@ impl RuntimeBridge {
                                     if let Some(previous_parent) = previous_parent {
                                         runtime.set_parent_window_handle(previous_parent);
                                     }
-                                    let mut outcome = match result {
+                                    match result {
                                         Ok((response, credentials)) => (response, credentials),
                                         Err(error)
                                             if error.to_string()
@@ -700,70 +316,7 @@ impl RuntimeBridge {
                                             ),
                                             None,
                                         ),
-                                    };
-                                    if !matches!(&outcome.0, RuntimeResponse::Error(_)) {
-                                        if let Some(vault_id) = unsaved_vault_id {
-                                            mutation_state
-                                                .unsaved_vault_ids
-                                                .insert(vault_id.clone());
-                                            let inline_save = match runtime
-                                                .handle_with_quick_unlock_handoff(
-                                                    RuntimeCommand::SaveVault {
-                                                        vault_id: vault_id.clone(),
-                                                    },
-                                                )
-                                            {
-                                                Ok((response, _)) => response,
-                                                Err(error) => error_response(
-                                                    "runtime_error",
-                                                    format!("{error:#}"),
-                                                ),
-                                            };
-                                            let inline_save_committed =
-                                                response_commits_active_vault(&inline_save);
-                                            mutation_state
-                                                .record_inline_save(
-                                                    vault_id,
-                                                    operation_id.clone(),
-                                                    inline_save,
-                                                );
-                                            if inline_save_committed {
-                                                notify_reconciliation_slot(
-                                                    &worker_reconciliation_notifier,
-                                                );
-                                            }
-                                        }
-                                        if response_recoverably_persists_active_vault(&outcome.0)
-                                            && let Some(vault_id) = persisted_vault_id
-                                        {
-                                            mutation_state.unsaved_vault_ids.remove(&vault_id);
-                                            mutation_state.clear_save_receipts(&vault_id);
-                                            if pending_save_vault_id.as_deref()
-                                                == Some(vault_id.as_str())
-                                            {
-                                                mutation_state.record_save_receipt(
-                                                    vault_id,
-                                                    operation_id.clone(),
-                                                    &outcome.0,
-                                                );
-                                            }
-                                        }
-                                        if let Err(error) = mutation_state
-                                            .record_operation_receipt(
-                                                operation_identity,
-                                                &outcome.0,
-                                            )
-                                        {
-                                            outcome = (
-                                                error_response(
-                                                    "request_outcome_unknown",
-                                                    error,
-                                                ),
-                                                None,
-                                            );
-                                        }
                                     }
-                                    outcome
                                 };
                             if records_activity
                                 && !matches!(&value, RuntimeResponse::Error(_))
@@ -773,7 +326,6 @@ impl RuntimeBridge {
                             if publishes_session_state
                                 && !matches!(&value, RuntimeResponse::Error(_))
                             {
-                                mutation_state.scrub_session_secrets();
                                 publish_session_state(
                                     &worker_session_state_notifier,
                                     runtime.session_state(),
@@ -804,7 +356,6 @@ impl RuntimeBridge {
                             if result.is_ok() {
                                 let next_state = runtime.session_state();
                                 if next_state != previous_state {
-                                    mutation_state.scrub_session_secrets();
                                     publish_session_state(
                                         &worker_session_state_notifier,
                                         next_state,
@@ -818,7 +369,6 @@ impl RuntimeBridge {
                             runtime.end_platform_passkey_operation(&operation_id);
                             let next_state = runtime.session_state();
                             if next_state != previous_state {
-                                mutation_state.scrub_session_secrets();
                                 publish_session_state(
                                     &worker_session_state_notifier,
                                     next_state,
@@ -1027,7 +577,7 @@ impl RuntimeBridge {
         let ProtocolEnvelope {
             version,
             request_id,
-            operation_id,
+            operation_id: _,
             command,
         } = envelope;
         let dispatch = match self.desktop_protocol_session.lock() {
@@ -1047,7 +597,7 @@ impl RuntimeBridge {
             ProtocolEnvelope {
                 version,
                 request_id,
-                operation_id,
+                operation_id: None,
                 command,
             },
             Arc::new(AtomicBool::new(false)),
@@ -1070,7 +620,6 @@ impl RuntimeBridge {
             );
         }
 
-        let operation_id = envelope.operation_id;
         let command = envelope.command;
         let reconciliation_reasons = reconciliation_reasons(&command);
         let (response, receiver) = mpsc::channel();
@@ -1078,7 +627,6 @@ impl RuntimeBridge {
             .requests
             .send(RuntimeRequest::Protocol {
                 command,
-                operation_id,
                 cancelled,
                 browser_client,
                 parent_window,
@@ -1457,106 +1005,7 @@ fn publish_session_state(
     }
 }
 
-fn notify_reconciliation_slot(
-    notifier: &Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
-) {
-    let sender = notifier.lock().ok().and_then(|slot| slot.clone());
-    if let Some(sender) = sender {
-        let request = SettingsReconciliationRequest {
-            quick_unlock_credentials: None,
-            quick_unlock_completion: None,
-        };
-        match sender.try_send(request) {
-            Ok(()) | Err(TrySendError::Full(_)) => {}
-            Err(TrySendError::Disconnected(_)) => {
-                if let Ok(mut slot) = notifier.lock() {
-                    *slot = None;
-                }
-            }
-        }
-    }
-}
-
-fn persist_unsaved_before_idle_lock(
-    runtime: &mut Runtime,
-    mutation_state: &mut ResidentMutationState,
-    reconciliation_notifier: &Arc<Mutex<Option<SyncSender<SettingsReconciliationRequest>>>>,
-) -> bool {
-    if mutation_state.unsaved_vault_ids.is_empty() {
-        return true;
-    }
-    let mut committed_active_vault = false;
-    for vault_id in mutation_state
-        .unsaved_vault_ids
-        .iter()
-        .cloned()
-        .collect::<Vec<_>>()
-    {
-        let response = match runtime.handle_with_quick_unlock_handoff(RuntimeCommand::SaveVault {
-            vault_id: vault_id.clone(),
-        }) {
-            Ok((response, _)) => response,
-            Err(_) => return false,
-        };
-        if !response_recoverably_persists_active_vault(&response) {
-            return false;
-        }
-        committed_active_vault |= response_commits_active_vault(&response);
-        mutation_state.unsaved_vault_ids.remove(&vault_id);
-        mutation_state.clear_save_receipts(&vault_id);
-    }
-    if committed_active_vault {
-        notify_reconciliation_slot(reconciliation_notifier);
-    }
-    true
-}
-
-fn command_unsaved_vault_id(command: &RuntimeCommand) -> Option<&str> {
-    match command {
-        RuntimeCommand::CreateEntry { vault_id, .. }
-        | RuntimeCommand::UpdateEntryFields { vault_id, .. }
-        | RuntimeCommand::CompareAndUpdateEntryFields { vault_id, .. }
-        | RuntimeCommand::ClearEntryTotp { vault_id, .. }
-        | RuntimeCommand::SetEntryPasskey { vault_id, .. }
-        | RuntimeCommand::ClearEntryPasskey { vault_id, .. }
-        | RuntimeCommand::DeleteEntry { vault_id, .. }
-        | RuntimeCommand::AddEntryAttachment { vault_id, .. }
-        | RuntimeCommand::UpdateEntryAttachmentMetadata { vault_id, .. }
-        | RuntimeCommand::ReplaceEntryAttachmentContent { vault_id, .. }
-        | RuntimeCommand::DeleteEntryAttachment { vault_id, .. }
-        | RuntimeCommand::UpdateEntry { vault_id, .. } => Some(vault_id),
-        _ => None,
-    }
-}
-
-fn command_persists_vault_id(command: &RuntimeCommand) -> Option<&str> {
-    match command {
-        RuntimeCommand::SaveVault { vault_id }
-        | RuntimeCommand::UpdateDatabaseSettings { vault_id, .. }
-        | RuntimeCommand::CreateGroup { vault_id, .. }
-        | RuntimeCommand::RenameGroup { vault_id, .. }
-        | RuntimeCommand::MoveGroup { vault_id, .. }
-        | RuntimeCommand::DeleteGroup { vault_id, .. }
-        | RuntimeCommand::MoveEntryToGroup { vault_id, .. }
-        | RuntimeCommand::RestoreEntryHistory { vault_id, .. }
-        | RuntimeCommand::ClearEntryHistory { vault_id, .. }
-        | RuntimeCommand::RecycleEntry { vault_id, .. }
-        | RuntimeCommand::RestoreRecycledEntry { vault_id, .. }
-        | RuntimeCommand::CreateAutofillEntry { vault_id, .. }
-        | RuntimeCommand::UpdateAutofillEntryFields { vault_id, .. }
-        | RuntimeCommand::SavePasskeyRegistration { vault_id, .. } => Some(vault_id),
-        _ => None,
-    }
-}
-
-fn save_command_vault_id(command: &RuntimeCommand) -> Option<&str> {
-    match command {
-        RuntimeCommand::SaveVault { vault_id } => Some(vault_id),
-        _ => None,
-    }
-}
-
-fn command_can_discard_unsaved_changes(command: &RuntimeCommand) -> bool {
+fn command_can_invalidate_platform_operation(command: &RuntimeCommand) -> bool {
     matches!(
         command,
         RuntimeCommand::PreloadCurrentVault
@@ -1579,7 +1028,7 @@ fn platform_passkey_operation_preflight_error(
     operation_active: bool,
     command: &RuntimeCommand,
 ) -> Option<RuntimeResponse> {
-    (operation_active && command_can_discard_unsaved_changes(command)).then(|| {
+    (operation_active && command_can_invalidate_platform_operation(command)).then(|| {
         error_response(
             "platform_operation_active",
             "finish the active Windows passkey operation before changing the resident session",
@@ -1601,29 +1050,6 @@ fn command_can_change_session_state(command: &RuntimeCommand) -> bool {
             | RuntimeCommand::LockSession
             | RuntimeCommand::UnlockWithPassword { .. }
             | RuntimeCommand::UnlockVault { .. }
-    )
-}
-
-fn response_recoverably_persists_active_vault(response: &RuntimeResponse) -> bool {
-    match response {
-        RuntimeResponse::SaveVaultResult(result) => recoverable_save_status(&result.status),
-        RuntimeResponse::DatabaseSettingsCommitResult(result) => {
-            recoverable_save_status(&result.save_result.status)
-        }
-        RuntimeResponse::VaultMutationResult(result) => {
-            recoverable_save_status(&result.publication.status)
-        }
-        _ => false,
-    }
-}
-
-fn recoverable_save_status(status: &SaveVaultStatusDto) -> bool {
-    matches!(
-        status,
-        SaveVaultStatusDto::Saved
-            | SaveVaultStatusDto::Merged
-            | SaveVaultStatusDto::SavedToCache
-            | SaveVaultStatusDto::ConflictCopy
     )
 }
 
@@ -1680,8 +1106,7 @@ fn response_schedules_reconciliation(
 #[cfg(test)]
 mod tests {
     use super::{
-        OperationReceiptLookup, ResidentIdleLock, ResidentMutationState, RuntimeBridge,
-        RuntimeRequest, operation_receipt_identity, reconciliation_reasons,
+        ResidentIdleLock, RuntimeBridge, RuntimeRequest, reconciliation_reasons,
         response_schedules_reconciliation,
     };
     use serde_json::json;
@@ -1725,6 +1150,29 @@ mod tests {
         assert!(!handshake.capabilities.contains(&"browser-extension".into()));
         assert!(matches!(
             bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::GetSessionState)),
+            RuntimeResponse::SessionState(_)
+        ));
+    }
+
+    #[test]
+    fn deprecated_logical_operation_id_is_inert_after_handshake() {
+        let bridge = RuntimeBridge::new_for_tests();
+        assert!(matches!(
+            bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::Handshake {
+                protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
+                capabilities: vec![
+                    "runtime-core".into(),
+                    "resident-app".into(),
+                    "quick-unlock".into(),
+                ],
+            })),
+            RuntimeResponse::Handshake(_)
+        ));
+        let mut envelope = ProtocolEnvelope::new(RuntimeCommand::GetSessionState);
+        envelope.operation_id = Some("\nretired logical identity".into());
+
+        assert!(matches!(
+            bridge.request_envelope(envelope),
             RuntimeResponse::SessionState(_)
         ));
     }
@@ -2002,7 +1450,6 @@ mod tests {
             .requests
             .send(RuntimeRequest::Protocol {
                 command: RuntimeCommand::GetPasskeyUserVerificationCapability,
-                operation_id: None,
                 cancelled: Arc::new(AtomicBool::new(false)),
                 browser_client: true,
                 parent_window: None,
@@ -2099,334 +1546,6 @@ mod tests {
     }
 
     #[test]
-    fn unsaved_mutations_block_destructive_session_changes_until_recoverable_save() {
-        let mut state = ResidentMutationState::default();
-        let mutation = RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-        };
-        state.note_dispatch(&mutation);
-
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::LockSession)
-                .is_some()
-        );
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::SetCurrentVault {
-                    vault_ref_id: "vault-ref-2".into(),
-                })
-                .is_some()
-        );
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::RetryVaultSourceSync {
-                    vault_id: "vault-1".into(),
-                })
-                .is_some()
-        );
-
-        state.note_response(
-            &RuntimeCommand::SaveVault {
-                vault_id: "vault-2".into(),
-            },
-            &RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
-                merge_summary: None,
-                conflict_copy_path: Some("vault-2.conflict.kdbx".into()),
-            }),
-        );
-
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::LockSession)
-                .is_some()
-        );
-
-        state.note_response(
-            &RuntimeCommand::SaveVault {
-                vault_id: "vault-1".into(),
-            },
-            &RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
-                merge_summary: None,
-                conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
-            }),
-        );
-
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::LockSession)
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn inline_mutation_save_receipt_survives_an_ambiguous_followup_response() {
-        let mut state = ResidentMutationState::default();
-        state.note_dispatch(&RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-        });
-        state.record_inline_save(
-            "vault-1".into(),
-            Some("operation-1".into()),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
-                merge_summary: None,
-                conflict_copy_path: None,
-            }),
-        );
-
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::LockSession)
-                .is_none()
-        );
-        let first = state
-            .save_receipt("vault-1", Some("operation-1"))
-            .expect("decode follow-up save receipt")
-            .expect("follow-up save receives the inline result");
-        let replay = state
-            .save_receipt("vault-1", Some("operation-1"))
-            .expect("decode replayed save receipt")
-            .expect("an ambiguous transport can replay the same inline result");
-        assert!(matches!(
-            first,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
-                ..
-            })
-        ));
-        assert!(matches!(
-            replay,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn failed_inline_save_remains_retryable_instead_of_becoming_a_receipt() {
-        let mut state = ResidentMutationState::default();
-        state.note_dispatch(&RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-        });
-        state.record_inline_save(
-            "vault-1".into(),
-            Some("operation-1".into()),
-            super::error_response("runtime_error", "disk temporarily unavailable"),
-        );
-
-        assert!(
-            state
-                .save_receipt("vault-1", Some("operation-1"))
-                .expect("lookup failed inline save")
-                .is_none(),
-            "a cached failure would make every retry replay the stale error"
-        );
-        assert!(
-            state
-                .preflight_error(&RuntimeCommand::LockSession)
-                .is_some(),
-            "the in-memory mutation must remain protected until a retry persists it"
-        );
-    }
-
-    #[test]
-    fn inline_save_receipts_for_the_same_vault_do_not_overwrite_each_other() {
-        let mut state = ResidentMutationState::default();
-        state.record_inline_save(
-            "vault-1".into(),
-            Some("operation-a".into()),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
-                merge_summary: None,
-                conflict_copy_path: None,
-            }),
-        );
-        state.record_inline_save(
-            "vault-1".into(),
-            Some("operation-b".into()),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
-                merge_summary: None,
-                conflict_copy_path: None,
-            }),
-        );
-
-        let first = state
-            .save_receipt("vault-1", Some("operation-b"))
-            .expect("decode latest save receipt")
-            .expect("latest logical operation keeps its receipt");
-        let second = state
-            .save_receipt("vault-1", Some("operation-a"))
-            .expect("decode earlier save receipt")
-            .expect("earlier logical operation also keeps its receipt");
-        assert!(matches!(
-            first,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
-                ..
-            })
-        ));
-        assert!(matches!(
-            second,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
-                ..
-            })
-        ));
-    }
-
-    #[test]
-    fn logical_mutation_receipts_replay_only_the_identical_command() {
-        let mut state = ResidentMutationState::default();
-        let original = RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-        };
-        let original_identity = operation_receipt_identity(&original, Some("operation-1"))
-            .expect("fingerprint original operation");
-        state
-            .record_operation_receipt(original_identity, &RuntimeResponse::Saved)
-            .expect("record operation receipt");
-
-        let replay_identity =
-            operation_receipt_identity(&original, Some("operation-1")).expect("fingerprint replay");
-        assert!(matches!(
-            state
-                .lookup_operation_receipt(replay_identity.as_ref())
-                .expect("lookup replay"),
-            OperationReceiptLookup::Replay(RuntimeResponse::Saved)
-        ));
-
-        let different = RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-2".into(),
-        };
-        let conflicting_identity = operation_receipt_identity(&different, Some("operation-1"))
-            .expect("fingerprint conflicting operation");
-        assert!(matches!(
-            state
-                .lookup_operation_receipt(conflicting_identity.as_ref())
-                .expect("lookup conflict"),
-            OperationReceiptLookup::Conflict
-        ));
-    }
-
-    #[test]
-    fn session_invalidation_scrubs_secret_receipts_without_reopening_the_operation() {
-        let mut state = ResidentMutationState::default();
-        let command = RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-        };
-        let identity = operation_receipt_identity(&command, Some("operation-1"))
-            .expect("fingerprint operation");
-        state
-            .record_operation_receipt(identity, &RuntimeResponse::Saved)
-            .expect("record operation receipt");
-
-        state.scrub_session_secrets();
-
-        let replay_identity =
-            operation_receipt_identity(&command, Some("operation-1")).expect("fingerprint replay");
-        assert!(matches!(
-            state
-                .lookup_operation_receipt(replay_identity.as_ref())
-                .expect("lookup scrubbed operation"),
-            OperationReceiptLookup::Expired
-        ));
-    }
-
-    #[test]
-    fn logical_mutation_receipts_evict_by_age_not_operation_id_sort_order() {
-        let mut state = ResidentMutationState::default();
-        let command = RuntimeCommand::ClearEntryTotp {
-            vault_id: "vault-1".into(),
-            entry_id: "entry-1".into(),
-        };
-        for index in 0..super::MAX_OPERATION_RECEIPTS {
-            let operation_id = format!("z-{index:04}");
-            let identity = operation_receipt_identity(&command, Some(&operation_id))
-                .expect("fingerprint retained operation");
-            state
-                .record_operation_receipt(identity, &RuntimeResponse::Saved)
-                .expect("record retained operation");
-        }
-        let newest_id = "a-newest";
-        state
-            .record_operation_receipt(
-                operation_receipt_identity(&command, Some(newest_id))
-                    .expect("fingerprint newest operation"),
-                &RuntimeResponse::Saved,
-            )
-            .expect("record newest operation");
-
-        assert!(matches!(
-            state
-                .lookup_operation_receipt(
-                    operation_receipt_identity(&command, Some(newest_id))
-                        .expect("fingerprint newest lookup")
-                        .as_ref(),
-                )
-                .expect("lookup newest operation"),
-            OperationReceiptLookup::Replay(RuntimeResponse::Saved)
-        ));
-        assert!(matches!(
-            state
-                .lookup_operation_receipt(
-                    operation_receipt_identity(&command, Some("z-0000"))
-                        .expect("fingerprint oldest lookup")
-                        .as_ref(),
-                )
-                .expect("lookup oldest operation"),
-            OperationReceiptLookup::Miss
-        ));
-    }
-
-    #[test]
-    fn followup_save_receipts_evict_by_age_not_operation_id_sort_order() {
-        fn saved_response() -> RuntimeResponse {
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
-                merge_summary: None,
-                conflict_copy_path: None,
-            })
-        }
-
-        let mut state = ResidentMutationState::default();
-        for index in 0..super::MAX_PENDING_SAVE_RECEIPTS {
-            state.record_inline_save(
-                "vault-1".into(),
-                Some(format!("z-{index:04}")),
-                saved_response(),
-            );
-        }
-        state.record_inline_save("vault-1".into(), Some("a-newest".into()), saved_response());
-
-        assert!(matches!(
-            state
-                .save_receipt("vault-1", Some("a-newest"))
-                .expect("decode newest save receipt"),
-            Some(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
-                ..
-            }))
-        ));
-        assert!(
-            state
-                .save_receipt("vault-1", Some("z-0000"))
-                .expect("lookup evicted save receipt")
-                .is_none()
-        );
-    }
-
-    #[test]
     fn conflict_copy_recovers_edits_without_reconciling_live_vault_metadata() {
         let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::ConflictCopy,
@@ -2434,42 +1553,7 @@ mod tests {
             conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
         });
 
-        assert!(super::response_recoverably_persists_active_vault(&response));
         assert!(!super::response_commits_active_vault(&response));
-    }
-
-    #[test]
-    fn resident_persistence_commands_supersede_an_older_inline_save_receipt() {
-        assert_eq!(
-            super::command_persists_vault_id(&RuntimeCommand::CreateAutofillEntry {
-                vault_id: "vault-1".into(),
-                parent_group_id: "group-1".into(),
-                title: "Title".into(),
-                username: "alice".into(),
-                password: "secret".into(),
-                url: "https://example.com".into(),
-                notes: "".into(),
-                totp_uri: None,
-            }),
-            Some("vault-1")
-        );
-        assert_eq!(
-            super::command_persists_vault_id(&RuntimeCommand::SavePasskeyRegistration {
-                ceremony_token: "ceremony-1".into(),
-                expected_phase:
-                    vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::CompletionAndMutation,
-                vault_id: "vault-1".into(),
-            }),
-            Some("vault-1")
-        );
-        assert_eq!(
-            super::command_persists_vault_id(&RuntimeCommand::CreateGroup {
-                vault_id: "vault-1".into(),
-                parent_group_id: "group-root".into(),
-                title: "Work".into(),
-            }),
-            Some("vault-1")
-        );
     }
 
     #[test]
@@ -2484,7 +1568,6 @@ mod tests {
             created_group_id: Some("group-created".into()),
         });
 
-        assert!(super::response_recoverably_persists_active_vault(&response));
         assert!(super::response_commits_active_vault(&response));
     }
 

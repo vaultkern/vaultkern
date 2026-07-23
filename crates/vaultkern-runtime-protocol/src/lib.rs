@@ -125,6 +125,10 @@ pub struct ProtocolEnvelope {
     pub version: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// Deprecated logical mutation identity retained only for wire compatibility.
+    ///
+    /// Resident runtimes ignore this field. Transport request correlation uses
+    /// `request_id` and the resident IPC request frame instead.
     #[serde(
         default,
         rename = "operationId",
@@ -282,6 +286,7 @@ pub enum RuntimeCommand {
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
+        /// Deprecated compatibility field. Runtime ignores this value.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         entry_id: Option<String>,
         title: SensitiveString,

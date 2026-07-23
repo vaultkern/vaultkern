@@ -267,7 +267,6 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .create_entry(
             &handle.vault_id,
             &root_id,
-            None,
             "Exact Login".into(),
             "alice".into(),
             "old-secret".into(),
@@ -281,7 +280,6 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .create_entry(
             &handle.vault_id,
             &root_id,
-            None,
             "Parent Login".into(),
             "parent".into(),
             "parent-secret".into(),
@@ -294,7 +292,6 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .create_entry(
             &handle.vault_id,
             &root_id,
-            None,
             "Unrelated Tenant".into(),
             "mallory".into(),
             "tenant-secret".into(),
@@ -768,7 +765,6 @@ fn runtime_history_settings_limit_entry_history_after_updates() {
         .create_entry(
             &handle.vault_id,
             &root_id,
-            None,
             "First".into(),
             "alice".into(),
             "secret".into(),
@@ -854,7 +850,6 @@ fn runtime_history_settings_limit_total_history_size_after_updates() {
         .create_entry(
             &handle.vault_id,
             &root_id,
-            None,
             "Tiny".into(),
             "alice".into(),
             "secret".into(),

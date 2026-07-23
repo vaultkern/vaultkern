@@ -3030,7 +3030,6 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         parent_group_id: &str,
-        requested_entry_id: Option<String>,
         title: SensitiveString,
         username: SensitiveString,
         password: SensitiveString,
@@ -3050,63 +3049,22 @@ impl Runtime {
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
 
-            if let Some(entry_id) = requested_entry_id.as_deref()
-                && let Ok(existing) = self.core.project_entry_detail(vault, entry_id)
-            {
-                let in_requested_parent = self
-                    .core
-                    .find_group_view_by_id(vault, parent_group_id)
-                    .is_some_and(|group| group.entries.iter().any(|entry| entry.id == entry_id));
-                let existing_totp = self.core.project_entry_totp(vault, entry_id)?;
-                let same_totp = match (existing_totp.as_ref(), totp.as_ref()) {
-                    (None, None) => true,
-                    (Some(existing), Some(requested)) => {
-                        existing.secret_base32 == requested.secret_base32
-                            && existing.algorithm == requested.algorithm
-                            && existing.digits == requested.digits
-                            && existing.period_seconds == requested.period_seconds
-                            && existing.issuer == requested.issuer
-                            && existing.account_name == requested.account_name
-                    }
-                    _ => false,
-                };
-                if !in_requested_parent
-                    || existing.title != title.as_str()
-                    || existing.username != username.as_str()
-                    || existing.password != password.as_str()
-                    || existing.url != url.as_str()
-                    || existing.notes != notes.as_str()
-                    || !same_totp
-                {
-                    anyhow::bail!(
-                        "planned entry id collision: {entry_id} does not match the requested entry"
-                    );
-                }
-                entry_id.to_owned()
-            } else {
-                let create = EntryCreate {
-                    title: take_sensitive_string(title),
-                    username: take_sensitive_string(username),
-                    password: take_sensitive_string(password),
-                    url: take_sensitive_string(url),
-                    notes: take_sensitive_string(notes),
-                };
-                let created = match requested_entry_id {
-                    Some(entry_id) => {
-                        self.core
-                            .add_entry_with_id(vault, parent_group_id, &entry_id, create)?
-                    }
-                    None => self.core.add_entry(vault, parent_group_id, create)?,
-                };
+            let create = EntryCreate {
+                title: take_sensitive_string(title),
+                username: take_sensitive_string(username),
+                password: take_sensitive_string(password),
+                url: take_sensitive_string(url),
+                notes: take_sensitive_string(notes),
+            };
+            let created = self.core.add_entry(vault, parent_group_id, create)?;
 
-                initialize_entry_creation_times(&self.core, vault, &created.id, modified_at)?;
+            initialize_entry_creation_times(&self.core, vault, &created.id, modified_at)?;
 
-                if let Some(totp) = totp {
-                    self.core.set_entry_totp(vault, &created.id, totp)?;
-                }
-
-                created.id
+            if let Some(totp) = totp {
+                self.core.set_entry_totp(vault, &created.id, totp)?;
             }
+
+            created.id
         };
 
         self.get_entry_detail(vault_id, &entry_id)
@@ -5324,7 +5282,7 @@ impl Runtime {
             RuntimeCommand::CreateEntry {
                 vault_id,
                 parent_group_id,
-                entry_id,
+                entry_id: _,
                 title,
                 username,
                 password,
@@ -5337,7 +5295,6 @@ impl Runtime {
                         .create_entry(
                             &vault_id,
                             &parent_group_id,
-                            entry_id,
                             title,
                             username,
                             password,
@@ -5414,7 +5371,6 @@ impl Runtime {
                     runtime.create_entry(
                         &vault_id,
                         &parent_group_id,
-                        None,
                         title,
                         username,
                         password,
@@ -12633,7 +12589,6 @@ mod tests {
             .create_entry(
                 vault_id,
                 &root_group_id,
-                None,
                 "Example".into(),
                 "alice".into(),
                 "secret".into(),
@@ -13356,7 +13311,6 @@ mod tests {
                 .create_entry(
                     &opened.vault_id,
                     &root_group_id,
-                    None,
                     "Invalid TOTP".into(),
                     "alice".into(),
                     "secret".into(),
@@ -13374,67 +13328,6 @@ mod tests {
                 .entries
                 .len(),
             before
-        );
-    }
-
-    #[test]
-    fn planned_create_id_replays_only_the_same_entry_intent() {
-        let mut runtime = Runtime::for_tests();
-        let (_directory, opened) = open_unlocked_demo_vault(&mut runtime);
-        let root_group_id = runtime.list_groups(&opened.vault_id).unwrap().root.id;
-        let planned_id = "12345678-1234-4abc-8def-1234567890ad";
-
-        let created = runtime
-            .create_entry(
-                &opened.vault_id,
-                &root_group_id,
-                Some(planned_id.into()),
-                "Example".into(),
-                "alice".into(),
-                "secret".into(),
-                "https://example.com".into(),
-                "notes".into(),
-                None,
-            )
-            .expect("create planned entry");
-        let replayed = runtime
-            .create_entry(
-                &opened.vault_id,
-                &root_group_id,
-                Some(planned_id.into()),
-                "Example".into(),
-                "alice".into(),
-                "secret".into(),
-                "https://example.com".into(),
-                "notes".into(),
-                None,
-            )
-            .expect("replay identical planned entry");
-
-        assert_eq!(created, replayed);
-        assert_eq!(runtime.list_entries(&opened.vault_id).unwrap().len(), 1);
-
-        let error = runtime
-            .create_entry(
-                &opened.vault_id,
-                &root_group_id,
-                Some(planned_id.into()),
-                "Different entry".into(),
-                "mallory".into(),
-                "different-secret".into(),
-                "https://attacker.example".into(),
-                String::new().into(),
-                None,
-            )
-            .expect_err("the same planned UUID must not alias a different entry intent");
-
-        assert!(error.to_string().contains("planned entry id collision"));
-        assert_eq!(
-            runtime
-                .get_entry_detail(&opened.vault_id, planned_id)
-                .unwrap()
-                .title,
-            "Example"
         );
     }
 
@@ -14766,7 +14659,6 @@ mod tests {
             .create_entry(
                 &opened.vault_id,
                 &root_id,
-                None,
                 "Example".into(),
                 "alice".into(),
                 "secret".into(),

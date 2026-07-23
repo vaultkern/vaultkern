@@ -246,12 +246,10 @@ export type SaveVaultResult = {
 export interface CommittedMutation<T> {
   value: T;
   saveResult: SaveVaultResult;
-  operationId: string;
 }
 
 export interface CommittedVaultMutation {
   saveResult: SaveVaultResult;
-  operationId: string;
   createdGroupId?: string;
 }
 
@@ -579,18 +577,14 @@ export class RuntimeClient {
   async createGroup(
     vaultId: string,
     parentGroupId: string,
-    title: string,
-    operationId?: string
+    title: string
   ): Promise<CommittedVaultMutation & { createdGroupId: string }> {
-    const result = await this.sendVaultMutationCommand(
-      {
-        type: "create_group",
-        vault_id: vaultId,
-        parent_group_id: parentGroupId,
-        title
-      },
-      operationId
-    );
+    const result = await this.sendVaultMutationCommand({
+      type: "create_group",
+      vault_id: vaultId,
+      parent_group_id: parentGroupId,
+      title
+    });
     if (result.createdGroupId === undefined) {
       throw new TypeError("runtime omitted the created group id");
     }
@@ -600,67 +594,51 @@ export class RuntimeClient {
   async renameGroup(
     vaultId: string,
     groupId: string,
-    title: string,
-    operationId?: string
+    title: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "rename_group",
-        vault_id: vaultId,
-        group_id: groupId,
-        title
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "rename_group",
+      vault_id: vaultId,
+      group_id: groupId,
+      title
+    });
   }
 
   async moveGroup(
     vaultId: string,
     groupId: string,
-    targetParentGroupId: string,
-    operationId?: string
+    targetParentGroupId: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "move_group",
-        vault_id: vaultId,
-        group_id: groupId,
-        target_parent_group_id: targetParentGroupId
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "move_group",
+      vault_id: vaultId,
+      group_id: groupId,
+      target_parent_group_id: targetParentGroupId
+    });
   }
 
   async deleteGroup(
     vaultId: string,
-    groupId: string,
-    operationId?: string
+    groupId: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "delete_group",
-        vault_id: vaultId,
-        group_id: groupId
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "delete_group",
+      vault_id: vaultId,
+      group_id: groupId
+    });
   }
 
   async moveEntryToGroup(
     vaultId: string,
     entryId: string,
-    targetGroupId: string,
-    operationId?: string
+    targetGroupId: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "move_entry_to_group",
-        vault_id: vaultId,
-        entry_id: entryId,
-        target_group_id: targetGroupId
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "move_entry_to_group",
+      vault_id: vaultId,
+      entry_id: entryId,
+      target_group_id: targetGroupId
+    });
   }
 
   async getEntryDetail(
@@ -743,8 +721,7 @@ export class RuntimeClient {
 
   async createEntry(
     vaultId: string,
-    input: EntryCreateInput,
-    operationId?: string
+    input: EntryCreateInput
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -758,7 +735,6 @@ export class RuntimeClient {
         notes: input.notes,
         totp_uri: input.totpUri
       },
-      operationId,
       true
     );
   }
@@ -766,8 +742,7 @@ export class RuntimeClient {
   async updateEntryFields(
     vaultId: string,
     entryId: string,
-    input: EntryDraft,
-    operationId?: string
+    input: EntryDraft
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -782,30 +757,13 @@ export class RuntimeClient {
         totp_uri: input.totpUri,
         custom_fields: input.customFields
       },
-      operationId,
       true
     );
   }
 
-  async compareAndUpdateEntryFields(
-    vaultId: string,
-    entryId: string,
-    expectedFields: EntryDraft,
-    desiredFields: EntryDraft
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "compare_and_update_entry_fields",
-      vault_id: vaultId,
-      entry_id: entryId,
-      expected_fields: entryFieldsCommand(expectedFields),
-      desired_fields: entryFieldsCommand(desiredFields)
-    });
-  }
-
   async clearEntryTotp(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -813,7 +771,6 @@ export class RuntimeClient {
         vault_id: vaultId,
         entry_id: entryId
       },
-      operationId,
       true
     );
   }
@@ -821,8 +778,7 @@ export class RuntimeClient {
   async setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskeyUpdate,
-    operationId?: string
+    passkey: EntryPasskeyUpdate
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -831,15 +787,13 @@ export class RuntimeClient {
         entry_id: entryId,
         passkey
       },
-      operationId,
       true
     );
   }
 
   async clearEntryPasskey(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -847,15 +801,13 @@ export class RuntimeClient {
         vault_id: vaultId,
         entry_id: entryId
       },
-      operationId,
       true
     );
   }
 
   async deleteEntry(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<CommittedMutation<void>> {
     const result = await this.sendEntryMutationCommand<undefined>(
       {
@@ -863,7 +815,6 @@ export class RuntimeClient {
         vault_id: vaultId,
         entry_id: entryId
       },
-      operationId,
       false
     );
     return { ...result, value: undefined };
@@ -876,13 +827,6 @@ export class RuntimeClient {
     });
   }
 
-  async retryMutationSave(
-    vaultId: string,
-    operationId: string
-  ): Promise<SaveVaultResult> {
-    return this.sendMutationSave(vaultId, operationId);
-  }
-
   async getDatabaseSettings(vaultId: string): Promise<DatabaseSettings> {
     return this.sendCommand<DatabaseSettings>({
       type: "get_database_settings",
@@ -892,17 +836,13 @@ export class RuntimeClient {
 
   async updateDatabaseSettings(
     vaultId: string,
-    update: DatabaseSettingsUpdate,
-    operationId?: string
+    update: DatabaseSettingsUpdate
   ): Promise<DatabaseSettingsCommitResult> {
-    return this.sendDatabaseSettingsMutationCommand(
-      {
-        type: "update_database_settings",
-        vault_id: vaultId,
-        update
-      },
-      operationId
-    );
+    return this.sendDatabaseSettingsMutationCommand({
+      type: "update_database_settings",
+      vault_id: vaultId,
+      update
+    });
   }
 
   async getEntryAttachmentContent(
@@ -921,8 +861,7 @@ export class RuntimeClient {
   async addEntryAttachment(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentInput,
-    operationId?: string
+    input: EntryAttachmentInput
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -933,7 +872,6 @@ export class RuntimeClient {
         data_base64: input.dataBase64,
         protect_in_memory: input.protectInMemory
       },
-      operationId,
       true
     );
   }
@@ -941,8 +879,7 @@ export class RuntimeClient {
   async updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentMetadataUpdate,
-    operationId?: string
+    input: EntryAttachmentMetadataUpdate
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -953,7 +890,6 @@ export class RuntimeClient {
         new_name: input.newName,
         protect_in_memory: input.protectInMemory
       },
-      operationId,
       true
     );
   }
@@ -961,8 +897,7 @@ export class RuntimeClient {
   async replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentContentUpdate,
-    operationId?: string
+    input: EntryAttachmentContentUpdate
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -972,7 +907,6 @@ export class RuntimeClient {
         name: input.name,
         data_base64: input.dataBase64
       },
-      operationId,
       true
     );
   }
@@ -980,8 +914,7 @@ export class RuntimeClient {
   async deleteEntryAttachment(
     vaultId: string,
     entryId: string,
-    name: string,
-    operationId?: string
+    name: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendEntryMutationCommand<EntryDetail>(
       {
@@ -990,7 +923,6 @@ export class RuntimeClient {
         entry_id: entryId,
         name
       },
-      operationId,
       true
     );
   }
@@ -1023,65 +955,49 @@ export class RuntimeClient {
   async restoreEntryHistory(
     vaultId: string,
     entryId: string,
-    historyIndex: number,
-    operationId?: string
+    historyIndex: number
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "restore_entry_history",
-        vault_id: vaultId,
-        entry_id: entryId,
-        history_index: historyIndex
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "restore_entry_history",
+      vault_id: vaultId,
+      entry_id: entryId,
+      history_index: historyIndex
+    });
   }
 
   async clearEntryHistory(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "clear_entry_history",
-        vault_id: vaultId,
-        entry_id: entryId
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "clear_entry_history",
+      vault_id: vaultId,
+      entry_id: entryId
+    });
   }
 
   async recycleEntry(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "recycle_entry",
-        vault_id: vaultId,
-        entry_id: entryId
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "recycle_entry",
+      vault_id: vaultId,
+      entry_id: entryId
+    });
   }
 
   async restoreRecycledEntry(
     vaultId: string,
     entryId: string,
-    targetGroupId?: string,
-    operationId?: string
+    targetGroupId?: string
   ): Promise<CommittedVaultMutation> {
-    return this.sendVaultMutationCommand(
-      {
-        type: "restore_recycled_entry",
-        vault_id: vaultId,
-        entry_id: entryId,
-        target_group_id: targetGroupId
-      },
-      operationId
-    );
+    return this.sendVaultMutationCommand({
+      type: "restore_recycled_entry",
+      vault_id: vaultId,
+      entry_id: entryId,
+      target_group_id: targetGroupId
+    });
   }
 
   async findFillCandidates(
@@ -1111,74 +1027,12 @@ export class RuntimeClient {
     return response.entryIds;
   }
 
-  private async sendMutationCommand<T>(
-    vaultId: string,
-    command: Record<string, unknown>,
-    requestedOperationId?: string
-  ): Promise<CommittedMutation<T>> {
-    const operationId = requestedOperationId ?? createLogicalOperationId();
-    const replayableCommand =
-      command.type === "create_entry"
-        ? { ...command, entry_id: operationId }
-        : command;
-    let response: T;
-    try {
-      response = await this.sendCommand<T>(replayableCommand, operationId);
-    } catch (error) {
-      if (!isAmbiguousMutationFailure(error)) {
-        throw error;
-      }
-      try {
-        response = await this.sendCommand<T>(replayableCommand, operationId);
-      } catch (retryError) {
-        // Once an attempt may have reached the resident writer, a later
-        // business error cannot prove that the first attempt did not commit.
-        // Preserve the logical operation identity so the caller can reload or
-        // retry the same operation instead of treating the replay as a
-        // definitive failure.
-        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
-      }
-    }
-    try {
-      const saveResult = await this.sendMutationSave(vaultId, operationId);
-      return { value: response, saveResult, operationId };
-    } catch (error) {
-      if (error instanceof RuntimeMutationSaveError) {
-        throw error.withMutationResult(response);
-      }
-      throw error;
-    }
-  }
-
   private async sendEntryMutationCommand<T>(
     command: Record<string, unknown>,
-    requestedOperationId: string | undefined,
     requiresEntry: boolean
   ): Promise<CommittedMutation<T>> {
-    const operationId = requestedOperationId ?? createLogicalOperationId();
-    const replayableCommand =
-      command.type === "create_entry"
-        ? { ...command, entry_id: operationId }
-        : command;
-    let response: EntryMutationResponse<T>;
-    try {
-      response = await this.sendCommand<EntryMutationResponse<T>>(
-        replayableCommand,
-        operationId
-      );
-    } catch (error) {
-      if (!isAmbiguousMutationFailure(error)) {
-        throw error;
-      }
-      try {
-        response = await this.sendCommand<EntryMutationResponse<T>>(
-          replayableCommand,
-          operationId
-        );
-      } catch (retryError) {
-        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
-      }
-    }
+    const response =
+      await this.sendCommand<EntryMutationResponse<T>>(command);
     if (
       response.type !== "entry_mutation_result" ||
       response.commit !== "committed" ||
@@ -1197,8 +1051,7 @@ export class RuntimeClient {
       saveResult: {
         type: "save_vault_result",
         ...response.publication
-      },
-      operationId
+      }
     };
   }
 
@@ -1223,14 +1076,9 @@ export class RuntimeClient {
   }
 
   private async sendVaultMutationCommand(
-    command: Record<string, unknown>,
-    requestedOperationId?: string
+    command: Record<string, unknown>
   ): Promise<CommittedVaultMutation> {
-    const operationId = requestedOperationId ?? createLogicalOperationId();
-    const response = await this.sendCommittedCommand<VaultMutationResponse>(
-      command,
-      operationId
-    );
+    const response = await this.sendCommand<VaultMutationResponse>(command);
     if (
       response.type !== "vault_mutation_result" ||
       response.commit !== "committed"
@@ -1242,7 +1090,6 @@ export class RuntimeClient {
         type: "save_vault_result",
         ...response.publication
       },
-      operationId,
       ...(response.createdGroupId === undefined
         ? {}
         : { createdGroupId: response.createdGroupId })
@@ -1250,15 +1097,10 @@ export class RuntimeClient {
   }
 
   private async sendDatabaseSettingsMutationCommand(
-    command: Record<string, unknown>,
-    requestedOperationId?: string
+    command: Record<string, unknown>
   ): Promise<DatabaseSettingsCommitResult> {
-    const operationId = requestedOperationId ?? createLogicalOperationId();
     const response =
-      await this.sendCommittedCommand<DatabaseSettingsMutationResponse>(
-        command,
-        operationId
-      );
+      await this.sendCommand<DatabaseSettingsMutationResponse>(command);
     if (
       response.type !== "database_settings_commit_result" ||
       response.commit !== "committed"
@@ -1276,50 +1118,9 @@ export class RuntimeClient {
     };
   }
 
-  private async sendCommittedCommand<T>(
-    command: Record<string, unknown>,
-    operationId: string
-  ): Promise<T> {
-    try {
-      return await this.sendCommand<T>(command, operationId);
-    } catch (error) {
-      if (!isAmbiguousMutationFailure(error)) {
-        throw error;
-      }
-      try {
-        return await this.sendCommand<T>(command, operationId);
-      } catch (retryError) {
-        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
-      }
-    }
-  }
-
-  private async sendMutationSave(
-    vaultId: string,
-    operationId: string
-  ): Promise<SaveVaultResult> {
-    const command = { type: "save_vault", vault_id: vaultId };
-    try {
-      return await this.sendCommand<SaveVaultResult>(command, operationId);
-    } catch (error) {
-      if (!isAmbiguousMutationFailure(error)) {
-        throw new RuntimeMutationSaveError(operationId, error);
-      }
-      try {
-        return await this.sendCommand<SaveVaultResult>(command, operationId);
-      } catch (retryError) {
-        throw new RuntimeMutationSaveError(operationId, retryError);
-      }
-    }
-  }
-
-  private async sendCommand<T>(
-    command: Record<string, unknown>,
-    operationId?: string
-  ): Promise<T> {
+  private async sendCommand<T>(command: Record<string, unknown>): Promise<T> {
     const response = await this.transport.send({
       version: RUNTIME_PROTOCOL_VERSION,
-      ...(operationId ? { operationId } : {}),
       command
     });
 
@@ -1329,108 +1130,6 @@ export class RuntimeClient {
 
     return response as T;
   }
-}
-
-class RuntimeMutationOutcomeUnknownError extends Error {
-  readonly code: string;
-
-  constructor(
-    readonly operationId: string,
-    cause: unknown
-  ) {
-    super(
-      cause instanceof Error
-        ? `runtime mutation outcome is unknown: ${cause.message}`
-        : "runtime mutation outcome is unknown",
-      { cause }
-    );
-    this.name = "RuntimeMutationOutcomeUnknownError";
-    this.code = "request_outcome_unknown";
-  }
-}
-
-class RuntimeMutationSaveError extends Error {
-  readonly code: string;
-
-  constructor(
-    readonly operationId: string,
-    cause: unknown,
-    readonly mutationResult?: unknown
-  ) {
-    super(cause instanceof Error ? cause.message : "runtime mutation save failed", {
-      cause
-    });
-    this.name = "RuntimeMutationSaveError";
-    this.code =
-      typeof cause === "object" &&
-      cause !== null &&
-      "code" in cause &&
-      typeof (cause as { code?: unknown }).code === "string"
-        ? (cause as { code: string }).code
-        : "mutation_save_failed";
-  }
-
-  withMutationResult(result: unknown) {
-    return new RuntimeMutationSaveError(this.operationId, this.cause, result);
-  }
-}
-
-export function runtimeMutationOperationId(error: unknown): string | null {
-  if (
-    typeof error !== "object" ||
-    error === null ||
-    !("operationId" in error) ||
-    typeof (error as { operationId?: unknown }).operationId !== "string"
-  ) {
-    return null;
-  }
-  const operationId = (error as { operationId: string }).operationId;
-  return isCanonicalNonNilUuid(operationId) ? operationId : null;
-}
-
-export function runtimeMutationResult<T>(error: unknown): T | null {
-  if (!(error instanceof RuntimeMutationSaveError)) {
-    return null;
-  }
-  return (error.mutationResult as T | undefined) ?? null;
-}
-
-let logicalOperationSequence = 0;
-
-function createLogicalOperationId(): string {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
-  }
-  const bytes = new Uint8Array(16);
-  if (typeof globalThis.crypto?.getRandomValues === "function") {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    logicalOperationSequence += 1;
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-    const sequence = logicalOperationSequence;
-    bytes[0] ^= sequence & 0xff;
-    bytes[1] ^= (sequence >>> 8) & 0xff;
-  }
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
-  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
-    .slice(6, 8)
-    .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
-}
-
-function isAmbiguousMutationFailure(error: unknown) {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
-  return (
-    code === "native_port_disconnected" ||
-    code === "native_timeout" ||
-    code === "request_outcome_unknown"
-  );
 }
 
 export type { RuntimeTransport };
@@ -1479,11 +1178,4 @@ function autofillUpdateFieldsCommand(fields: AutofillUpdateFields) {
     password: fields.password,
     url: fields.url
   };
-}
-
-function isCanonicalNonNilUuid(value: string): boolean {
-  return (
-    value !== "00000000-0000-0000-0000-000000000000" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
-  );
 }

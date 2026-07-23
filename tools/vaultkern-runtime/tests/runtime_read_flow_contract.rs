@@ -1002,7 +1002,7 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
 }
 
 #[test]
-fn runtime_replays_a_create_with_the_same_planned_entry_id_without_duplication() {
+fn runtime_treats_the_deprecated_planned_entry_id_as_inert() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -1018,14 +1018,15 @@ fn runtime_replays_a_create_with_the_same_planned_entry_id_without_duplication()
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
     let root_id = runtime.list_groups(&handle.vault_id).unwrap().root.id;
-    let entry_id = "11111111-1111-4111-8111-111111111111";
+    let deprecated_entry_id = "11111111-1111-4111-8111-111111111111";
+    let mut created_entry_ids = Vec::new();
 
     for _ in 0..2 {
         let response = runtime
             .handle(RuntimeCommand::CreateEntry {
                 vault_id: handle.vault_id.clone(),
                 parent_group_id: root_id.clone(),
-                entry_id: Some(entry_id.into()),
+                entry_id: Some(deprecated_entry_id.into()),
                 title: "Original".into(),
                 username: "alice".into(),
                 password: "secret".into(),
@@ -1036,31 +1037,15 @@ fn runtime_replays_a_create_with_the_same_planned_entry_id_without_duplication()
             .unwrap();
         let detail = expect_committed_entry_mutation(response)
             .entry
-            .expect("create replay returns the committed entry");
-        assert_eq!(detail.id, entry_id);
+            .expect("manual create returns a committed entry");
+        assert_ne!(detail.id, deprecated_entry_id);
         assert_eq!(detail.title, "Original");
+        created_entry_ids.push(detail.id);
     }
-
-    let collision = runtime.handle(RuntimeCommand::CreateEntry {
-        vault_id: handle.vault_id.clone(),
-        parent_group_id: root_id,
-        entry_id: Some(entry_id.into()),
-        title: "must not overwrite the committed entry".into(),
-        username: "alice".into(),
-        password: "secret".into(),
-        url: "https://example.com".into(),
-        notes: String::new().into(),
-        totp_uri: None,
-    });
-    assert!(
-        collision
-            .unwrap_err()
-            .to_string()
-            .contains("planned entry id collision")
-    );
+    assert_ne!(created_entry_ids[0], created_entry_ids[1]);
 
     let entries = runtime.list_entries(&handle.vault_id).unwrap();
-    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.len(), 2);
 }
 
 #[test]

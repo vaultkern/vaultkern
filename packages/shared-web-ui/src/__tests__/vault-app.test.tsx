@@ -149,8 +149,7 @@ function committedMutation<T>(
     saveResult: {
       type: "save_vault_result" as const,
       status
-    },
-    operationId: "11111111-1111-4111-8111-111111111111"
+    }
   };
 }
 
@@ -177,7 +176,6 @@ function createVaultSelectionMethods() {
     createEntry: vi.fn(),
     updateEntryFields: vi.fn(),
     deleteEntry: vi.fn(),
-    saveVault: vi.fn(),
     setEntryPasskey: vi.fn(),
     clearEntryPasskey: vi.fn(),
     getEntryAttachmentContent: vi.fn(),
@@ -2537,7 +2535,6 @@ it("loads database settings and preserves a conflict-copy warning after saving",
       autosaveDelaySeconds: 45
     });
   });
-  expect(client.saveVault).not.toHaveBeenCalled();
   expect(
     await screen.findByText(/Local edits were saved to a conflict copy:/)
   ).toHaveTextContent("C:\\Vaults\\Archive.conflict.kdbx");
@@ -2889,7 +2886,6 @@ it("applies a newer database settings draft before leaving after a failed save",
       }
     })
   );
-  expect(vaultMethods.saveVault).not.toHaveBeenCalled();
   expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
 });
 
@@ -2936,7 +2932,6 @@ it("confirms before leaving unsaved database settings", async () => {
       })
     );
   });
-  expect(client.saveVault).not.toHaveBeenCalled();
   await waitFor(() => {
     expect(screen.queryByLabelText("Database Name")).not.toBeInTheDocument();
   });
@@ -3133,7 +3128,6 @@ it("coalesces save-and-continue with a database settings save already in flight"
 
   expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
   expect(vaultMethods.updateDatabaseSettings).toHaveBeenCalledTimes(1);
-  expect(vaultMethods.saveVault).not.toHaveBeenCalled();
 });
 
 it("hides password actions until the authenticated credential flow exists", async () => {
@@ -3166,8 +3160,7 @@ it("hides password actions until the authenticated credential flow exists", asyn
       autosaveDelaySeconds: null,
       hasPassword: false
     }),
-    updateDatabaseSettings: vi.fn().mockResolvedValue({}),
-    saveVault: vi.fn().mockResolvedValue({ type: "save_vault_result", status: "saved" })
+    updateDatabaseSettings: vi.fn().mockResolvedValue({})
   };
 
   render(<App client={client as RuntimeClientLike} />);
@@ -3210,8 +3203,7 @@ it("shows the current kdf parameters as read-only", async () => {
       autosaveDelaySeconds: null,
       hasPassword: true
     }),
-    updateDatabaseSettings: vi.fn().mockResolvedValue({}),
-    saveVault: vi.fn().mockResolvedValue({ type: "save_vault_result", status: "saved" })
+    updateDatabaseSettings: vi.fn().mockResolvedValue({})
   };
 
   render(<App client={client as RuntimeClientLike} />);
@@ -3329,7 +3321,7 @@ it("manages an entry passkey from the detail pane", async () => {
     credentialId: "credential-new",
     backupState: true
   };
-  const setEntryPasskey = vi.fn(async () => ({
+  const setEntryPasskey = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "GitHub",
@@ -3343,7 +3335,7 @@ it("manages an entry passkey from the detail pane", async () => {
     customFields: [],
     attachments: []
   }));
-  const clearEntryPasskey = vi.fn(async () => ({
+  const clearEntryPasskey = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "GitHub",
@@ -3357,7 +3349,6 @@ it("manages an entry passkey from the detail pane", async () => {
     customFields: [],
     attachments: []
   }));
-  const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
@@ -3395,8 +3386,7 @@ it("manages an entry passkey from the detail pane", async () => {
       attachments: []
     }),
     setEntryPasskey,
-    clearEntryPasskey,
-    saveVault
+    clearEntryPasskey
   };
 
   render(<App client={client as any} />);
@@ -3437,7 +3427,6 @@ it("manages an entry passkey from the detail pane", async () => {
       editedPasskey
     );
   });
-  expect(saveVault).toHaveBeenCalledWith("vault-1");
   await waitFor(() => {
     expect(screen.queryByText("credential-new")).not.toBeInTheDocument();
   });
@@ -3449,12 +3438,11 @@ it("manages an entry passkey from the detail pane", async () => {
   await waitFor(() => {
     expect(clearEntryPasskey).toHaveBeenCalledWith("vault-1", "entry-1");
   });
-  expect(saveVault).toHaveBeenCalledTimes(2);
   expect(await screen.findByText("No passkey.")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Add passkey" })).not.toBeInTheDocument();
 });
 
-it("retries a failed passkey save without clearing the passkey again", async () => {
+it("reports a failed passkey commit without chaining a follow-up save", async () => {
   const passkey = {
     username: "alice@example.com",
     credentialId: "credential-old",
@@ -3464,24 +3452,9 @@ it("retries a failed passkey save without clearing the passkey again", async () 
     backupEligible: true,
     backupState: false
   };
-  const clearEntryPasskey = vi.fn(async () => ({
-    type: "entry_detail" as const,
-    id: "entry-1",
-    title: "GitHub",
-    username: "alice",
-    password: "secret",
-    url: "https://github.com",
-    notes: "",
-    totp: null,
-    totpUri: null,
-    passkey: null,
-    customFields: [],
-    attachments: []
-  }));
-  const saveVault = vi
+  const clearEntryPasskey = vi
     .fn()
-    .mockRejectedValueOnce(new Error("simulated passkey save failure"))
-    .mockResolvedValueOnce(undefined);
+    .mockRejectedValue(new Error("simulated passkey commit failure"));
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -3522,8 +3495,7 @@ it("retries a failed passkey save without clearing the passkey again", async () 
       customFields: [],
       attachments: []
     }),
-    clearEntryPasskey,
-    saveVault
+    clearEntryPasskey
   };
 
   render(<App client={client as any} />);
@@ -3531,18 +3503,12 @@ it("retries a failed passkey save without clearing the passkey again", async () 
   fireEvent.click(await screen.findByRole("button", { name: "GitHub" }));
   fireEvent.click(await screen.findByRole("button", { name: "Clear passkey" }));
 
-  expect(await screen.findByText("simulated passkey save failure")).toBeInTheDocument();
+  expect(await screen.findByText("simulated passkey commit failure")).toBeInTheDocument();
   expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
-
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
-
-  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
-  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Retry save" })).not.toBeInTheDocument();
 });
 
-it("replays an unknown passkey mutation with the same operation id before allowing navigation", async () => {
-  const operationId = "11111111-1111-4111-8111-111111111111";
+it("does not replay a passkey mutation whose transport outcome is unknown", async () => {
   const originalDetail = {
     type: "entry_detail" as const,
     id: "entry-1",
@@ -3565,24 +3531,13 @@ it("replays an unknown passkey mutation with the same operation id before allowi
     customFields: [],
     attachments: []
   };
-  const clearedDetail = { ...originalDetail, passkey: null };
   const clearEntryPasskey = vi
     .fn()
-    .mockRejectedValueOnce(
+    .mockRejectedValue(
       Object.assign(new Error("passkey mutation outcome is unknown"), {
-        code: "request_outcome_unknown",
-        operationId
+        code: "request_outcome_unknown"
       })
-    )
-    .mockResolvedValueOnce({
-      value: clearedDetail,
-      saveResult: {
-        type: "save_vault_result" as const,
-        status: "saved" as const
-      },
-      operationId
-    });
-  const retryMutationSave = vi.fn();
+    );
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -3610,8 +3565,7 @@ it("replays an unknown passkey mutation with the same operation id before allowi
       }
     ]),
     getEntryDetail: vi.fn().mockResolvedValue(originalDetail),
-    clearEntryPasskey,
-    retryMutationSave
+    clearEntryPasskey
   } satisfies RuntimeClientLike;
 
   render(<App client={client} />);
@@ -3622,18 +3576,8 @@ it("replays an unknown passkey mutation with the same operation id before allowi
   expect(
     await screen.findByText("passkey mutation outcome is unknown")
   ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
-
-  await waitFor(() =>
-    expect(clearEntryPasskey).toHaveBeenLastCalledWith(
-      "vault-1",
-      "entry-1",
-      operationId
-    )
-  );
-  expect(clearEntryPasskey).toHaveBeenCalledTimes(2);
-  expect(retryMutationSave).not.toHaveBeenCalled();
-  expect(await screen.findByText("No passkey.")).toBeInTheDocument();
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Retry save" })).not.toBeInTheDocument();
 });
 
 it("renders localized passkey reveal labels without English password fragments", () => {
@@ -4178,8 +4122,7 @@ it("shows each group's own entry count instead of child count", async () => {
   expect(screen.getByRole("button", { name: /Personal/ })).toHaveTextContent("1");
 });
 
-it("commits an entry edit without a follow-up save and confirms unsaved navigation", async () => {
-  const saveVault = vi.fn(async () => undefined);
+it("commits an entry edit and confirms unsaved navigation", async () => {
   const updateEntryFields = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
@@ -4257,8 +4200,7 @@ it("commits an entry edit without a follow-up save and confirms unsaved navigati
             ]
           : []
     })),
-    updateEntryFields,
-    saveVault
+    updateEntryFields
   };
 
   render(<App client={client as any} />);
@@ -4310,7 +4252,6 @@ it("commits an entry edit without a follow-up save and confirms unsaved navigati
     });
   });
   expect(updateEntryFields).toHaveBeenCalledTimes(1);
-  expect(saveVault).not.toHaveBeenCalled();
 });
 
 it("shows an animated saving indicator while entry changes are being saved", async () => {
@@ -4327,7 +4268,6 @@ it("shows an animated saving indicator while entry changes are being saved", asy
     customFields: [];
   }>();
   const updateEntryFields = vi.fn(() => update.promise);
-  const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({ unlocked: true, activeVaultId: "vault-1", currentVaultRefId: "vault-ref-1" }),
@@ -4362,8 +4302,7 @@ it("shows an animated saving indicator while entry changes are being saved", asy
       totpUri: null,
       customFields: []
     })),
-    updateEntryFields,
-    saveVault
+    updateEntryFields
   };
 
   render(<App client={client as any} />);
@@ -4394,9 +4333,10 @@ it("shows an animated saving indicator while entry changes are being saved", asy
     customFields: []
   });
 
-  await waitFor(() => {
-    expect(saveVault).toHaveBeenCalledWith("vault-1");
-  });
+  await waitFor(() =>
+    expect(screen.queryByRole("button", { name: "Saving..." })).not.toBeInTheDocument()
+  );
+  expect(updateEntryFields).toHaveBeenCalledTimes(1);
 });
 
 it("coalesces save-and-continue with an entry save already in flight", async () => {
@@ -4413,7 +4353,6 @@ it("coalesces save-and-continue with an entry save already in flight", async () 
     customFields: [];
   }>();
   const updateEntryFields = vi.fn(() => update.promise);
-  const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -4452,8 +4391,7 @@ it("coalesces save-and-continue with an entry save already in flight", async () 
       totpUri: null,
       customFields: []
     })),
-    updateEntryFields,
-    saveVault
+    updateEntryFields
   };
 
   render(<App client={client as any} />);
@@ -4487,21 +4425,12 @@ it("coalesces save-and-continue with an entry save already in flight", async () 
 
   expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
   expect(updateEntryFields).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
 });
 
 it("shows an auto-dismiss tip when save merges a changed source", async () => {
   const settingsStore = createSettingsStore();
   settingsStore.reconcile = vi.fn(async () => undefined);
-  const saveVault = vi.fn(async () => ({
-    type: "save_vault_result" as const,
-    status: "merged" as const,
-    mergeSummary: {
-      mergedEntries: 1,
-      historySnapshotsAdded: 0
-    }
-  }));
-  const updateEntryFields = vi.fn(async () => ({
+  const updateEntryFields = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Local Title",
@@ -4512,7 +4441,7 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
     totp: null,
     totpUri: null,
     customFields: []
-  }));
+  }, "merged"));
 
   const client = {
     ...createVaultSelectionMethods(),
@@ -4561,9 +4490,8 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
         totp: null,
         totpUri: null,
         customFields: []
-      }),
-    updateEntryFields,
-    saveVault
+    }),
+    updateEntryFields
   };
 
   render(
@@ -4602,12 +4530,7 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
 });
 
 it("shows a pending sync banner when save falls back to local cache", async () => {
-  const saveVault = vi.fn(async () => ({
-    type: "save_vault_result" as const,
-    status: "saved_to_cache" as const,
-    mergeSummary: null
-  }));
-  const updateEntryFields = vi.fn(async () => ({
+  const updateEntryFields = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Pending Local",
@@ -4618,7 +4541,7 @@ it("shows a pending sync banner when save falls back to local cache", async () =
     totp: null,
     totpUri: null,
     customFields: []
-  }));
+  }, "saved_to_cache"));
 
   const client = {
     ...createVaultSelectionMethods(),
@@ -4664,8 +4587,7 @@ it("shows a pending sync banner when save falls back to local cache", async () =
       totpUri: null,
       customFields: []
     })),
-    updateEntryFields,
-    saveVault
+    updateEntryFields
   };
 
   render(<App client={client as any} />);
@@ -5166,7 +5088,7 @@ it("shows remote cache info without failure copy before sync is retried", async 
   expect(screen.getByRole("button", { name: "Retry sync" })).toBeInTheDocument();
 });
 
-it("creates and deletes an entry without follow-up saves", async () => {
+it("creates and deletes an entry through single mutation calls", async () => {
   const listEntries = vi
     .fn()
     .mockResolvedValueOnce([
@@ -5215,7 +5137,6 @@ it("creates and deletes an entry without follow-up saves", async () => {
     totpUri: null
   }));
   const deleteEntry = vi.fn(async () => committedMutation(undefined));
-  const saveVault = vi.fn(async () => undefined);
 
   const client = {
     ...createVaultSelectionMethods(),
@@ -5243,8 +5164,7 @@ it("creates and deletes an entry without follow-up saves", async () => {
       totpUri: null
     })),
     createEntry,
-    deleteEntry,
-    saveVault
+    deleteEntry
   };
 
   render(<App client={client as any} />);
@@ -5274,7 +5194,6 @@ it("creates and deletes an entry without follow-up saves", async () => {
       customFields: []
     });
   });
-  expect(saveVault).not.toHaveBeenCalled();
 
   expect(await screen.findByRole("button", { name: "Created" })).toBeInTheDocument();
 
@@ -5285,26 +5204,12 @@ it("creates and deletes an entry without follow-up saves", async () => {
   await waitFor(() => {
     expect(deleteEntry).toHaveBeenCalledWith("vault-1", "entry-new");
   });
-  expect(saveVault).not.toHaveBeenCalled();
 });
 
-it("retries a failed create save without creating the entry again", async () => {
-  const createEntry = vi.fn(async () => ({
-    type: "entry_detail" as const,
-    id: "entry-new",
-    title: "Created once",
-    username: "",
-    password: "",
-    url: "",
-    notes: "",
-    totp: null,
-    totpUri: null,
-    customFields: []
-  }));
-  const saveVault = vi
+it("reports a failed create commit without chaining a follow-up save", async () => {
+  const createEntry = vi
     .fn()
-    .mockRejectedValueOnce(new Error("simulated durable save failure"))
-    .mockResolvedValueOnce(undefined);
+    .mockRejectedValue(new Error("simulated create commit failure"));
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -5324,8 +5229,7 @@ it("retries a failed create save without creating the entry again", async () => 
     }),
     listEntries: vi.fn(async () => []),
     getEntryDetail: vi.fn(),
-    createEntry,
-    saveVault
+    createEntry
   };
 
   render(<App client={client as any} />);
@@ -5337,37 +5241,21 @@ it("retries a failed create save without creating the entry again", async () => 
   });
   fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
 
-  expect(await screen.findByText("simulated durable save failure")).toBeInTheDocument();
+  expect(await screen.findByText("simulated create commit failure")).toBeInTheDocument();
   expect(createEntry).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
-
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(
-    await screen.findByText(
-      "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
-    )
-  ).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
-
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
-
-  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
-  expect(createEntry).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Retry save" })).not.toBeInTheDocument();
 });
 
-it("reuses the runtime logical operation after a create outcome stays unknown", async () => {
-  const operationId = "4f83153d-e91c-44f7-8395-02b603100e5a";
+it("submits a fresh create only after an explicit retry of an unknown outcome", async () => {
   const ambiguous = Object.assign(new Error("native request timed out"), {
-    code: "native_timeout",
-    operationId
+    code: "native_timeout"
   });
   const createEntry = vi
     .fn()
     .mockRejectedValueOnce(ambiguous)
-    .mockResolvedValueOnce({
+    .mockResolvedValueOnce(committedMutation({
       type: "entry_detail" as const,
-      id: operationId,
+      id: "entry-new",
       title: "Created once",
       username: "",
       password: "",
@@ -5376,8 +5264,7 @@ it("reuses the runtime logical operation after a create outcome stays unknown", 
       totp: null,
       totpUri: null,
       customFields: []
-    });
-  const saveVault = vi.fn(async () => undefined);
+    }));
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -5397,8 +5284,7 @@ it("reuses the runtime logical operation after a create outcome stays unknown", 
     }),
     listEntries: vi.fn(async () => []),
     getEntryDetail: vi.fn(),
-    createEntry,
-    saveVault
+    createEntry
   };
 
   render(<App client={client as any} />);
@@ -5412,20 +5298,12 @@ it("reuses the runtime logical operation after a create outcome stays unknown", 
 
   expect(await screen.findByText("native request timed out")).toBeInTheDocument();
   expect(screen.getByLabelText("Title")).toHaveAttribute("readonly");
-  fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-  expect(
-    await screen.findByText(
-      "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
-    )
-  ).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Continue editing" }));
+  expect(createEntry).toHaveBeenCalledTimes(1);
   fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
 
   await waitFor(() => expect(createEntry).toHaveBeenCalledTimes(2));
   expect(createEntry.mock.calls[0]).toHaveLength(2);
-  expect(createEntry.mock.calls[1]?.[2]).toBe(operationId);
-  expect(saveVault).toHaveBeenCalledTimes(1);
+  expect(createEntry.mock.calls[1]).toHaveLength(2);
 });
 
 it("does not let an ambiguous mutation from vault A become pending work in vault B", async () => {
@@ -5441,7 +5319,6 @@ it("does not let an ambiguous mutation from vault A become pending work in vault
     totpUri: null;
     customFields: never[];
   }>();
-  const operationId = "951249b2-7802-4999-b9a8-9285b0355efd";
   let publishSessionState!: (state: {
     unlocked: boolean;
     activeVaultId: string | null;
@@ -5481,8 +5358,7 @@ it("does not let an ambiguous mutation from vault A become pending work in vault
     })),
     listEntries: vi.fn(async () => []),
     getEntryDetail: vi.fn(),
-    createEntry,
-    saveVault: vi.fn(async () => undefined)
+    createEntry
   } satisfies RuntimeClientLike;
 
   render(
@@ -5515,8 +5391,7 @@ it("does not let an ambiguous mutation from vault A become pending work in vault
   await act(async () => {
     vaultACreate.reject(
       Object.assign(new Error("vault A request timed out"), {
-        code: "native_timeout",
-        operationId
+        code: "native_timeout"
       })
     );
     await Promise.resolve();
@@ -5534,12 +5409,10 @@ it("does not let an ambiguous mutation from vault A become pending work in vault
   expect(createEntry.mock.calls[1]?.[0]).toBe("vault-b");
 });
 
-it("retries a failed delete save without deleting the entry again", async () => {
-  const deleteEntry = vi.fn(async () => undefined);
-  const saveVault = vi
+it("reports a failed delete commit without chaining a follow-up save", async () => {
+  const deleteEntry = vi
     .fn()
-    .mockRejectedValueOnce(new Error("simulated delete save failure"))
-    .mockResolvedValueOnce(undefined);
+    .mockRejectedValue(new Error("simulated delete commit failure"));
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -5578,8 +5451,7 @@ it("retries a failed delete save without deleting the entry again", async () => 
       totpUri: null,
       customFields: []
     })),
-    deleteEntry,
-    saveVault
+    deleteEntry
   };
 
   render(<App client={client as any} />);
@@ -5588,33 +5460,19 @@ it("retries a failed delete save without deleting the entry again", async () => 
   fireEvent.click(await screen.findByRole("button", { name: "Delete Entry" }));
   fireEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
 
-  expect(await screen.findByText("simulated delete save failure")).toBeInTheDocument();
+  expect(await screen.findByText("simulated delete commit failure")).toBeInTheDocument();
   expect(deleteEntry).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
-
-  fireEvent.click(
-    screen.getByRole("button", { name: "Statistics", hidden: true })
-  );
-  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
-
-  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
-  expect(deleteEntry).toHaveBeenCalledTimes(1);
-  expect(await screen.findByRole("heading", { name: "Statistics" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Cancel" })).toBeInTheDocument();
 });
 
-it("reuses an unknown delete operation before allowing navigation", async () => {
-  const operationId = "5d924f4e-8af2-4515-99ba-bf616b16c976";
+it("submits a fresh delete only after explicit retry of an unknown outcome", async () => {
   const ambiguous = Object.assign(new Error("native request timed out"), {
-    code: "native_timeout",
-    operationId
+    code: "native_timeout"
   });
   const deleteEntry = vi
     .fn()
     .mockRejectedValueOnce(ambiguous)
     .mockResolvedValueOnce(undefined);
-  const saveVault = vi.fn(async () => undefined);
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -5654,8 +5512,7 @@ it("reuses an unknown delete operation before allowing navigation", async () => 
       customFields: [],
       attachments: []
     }),
-    deleteEntry,
-    saveVault
+    deleteEntry
   };
 
   render(<App client={client as any} />);
@@ -5664,16 +5521,13 @@ it("reuses an unknown delete operation before allowing navigation", async () => 
   fireEvent.click(await screen.findByRole("button", { name: "Delete Entry" }));
   fireEvent.click(await screen.findByRole("button", { name: "Delete permanently" }));
   expect(await screen.findByText("native request timed out")).toBeInTheDocument();
+  expect(deleteEntry).toHaveBeenCalledTimes(1);
 
-  fireEvent.click(screen.getByRole("button", { name: "Statistics", hidden: true }));
-  expect(await screen.findByText("You have unsaved changes")).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "Discard changes" })).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+  fireEvent.click(screen.getByRole("button", { name: "Delete permanently" }));
 
   await waitFor(() => expect(deleteEntry).toHaveBeenCalledTimes(2));
   expect(deleteEntry.mock.calls[0]).toHaveLength(2);
-  expect(deleteEntry.mock.calls[1]?.[2]).toBe(operationId);
-  expect(saveVault).toHaveBeenCalledTimes(1);
+  expect(deleteEntry.mock.calls[1]).toHaveLength(2);
 });
 
 it("generates a password into the entry editor only after explicit use", async () => {
@@ -5701,8 +5555,7 @@ it("generates a password into the entry editor only after explicit use", async (
         children: []
       }
     }),
-    listEntries: vi.fn(async () => []),
-    saveVault: vi.fn(async () => undefined)
+    listEntries: vi.fn(async () => [])
   };
 
   try {
@@ -5732,14 +5585,13 @@ it("generates a password into the entry editor only after explicit use", async (
 });
 
 it("manages entry attachments from the detail pane", async () => {
-  const saveVault = vi.fn(async () => undefined);
   const getEntryAttachmentContent = vi.fn(async () => ({
     type: "entry_attachment_content" as const,
     name: "backup.txt",
     dataBase64: "aGVsbG8=",
     protectInMemory: true
   }));
-  const updateEntryAttachmentMetadata = vi.fn(async () => ({
+  const updateEntryAttachmentMetadata = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Example",
@@ -5757,7 +5609,7 @@ it("manages entry attachments from the detail pane", async () => {
       }
     ]
   }));
-  const addEntryAttachment = vi.fn(async () => ({
+  const addEntryAttachment = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Example",
@@ -5775,7 +5627,7 @@ it("manages entry attachments from the detail pane", async () => {
       }
     ]
   }));
-  const deleteEntryAttachment = vi.fn(async () => ({
+  const deleteEntryAttachment = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Example",
@@ -5831,8 +5683,7 @@ it("manages entry attachments from the detail pane", async () => {
     getEntryAttachmentContent,
     updateEntryAttachmentMetadata,
     addEntryAttachment,
-    deleteEntryAttachment,
-    saveVault
+    deleteEntryAttachment
   };
 
   render(<App client={client as any} />);
@@ -5888,7 +5739,6 @@ it("manages entry attachments from the detail pane", async () => {
       "added.txt"
     );
   });
-  expect(saveVault).toHaveBeenCalledTimes(3);
 });
 
 it("does not deliver an attachment response after the selected entry changes", async () => {
@@ -6068,8 +5918,7 @@ it("does not project an attachment mutation result into a replacement entry", as
             : []
       });
     }),
-    deleteEntryAttachment: vi.fn(() => mutation.promise),
-    saveVault: vi.fn(async () => undefined)
+    deleteEntryAttachment: vi.fn(() => mutation.promise)
   } satisfies RuntimeClientLike;
 
   render(<App client={client} />);
@@ -6290,30 +6139,10 @@ it("does not deliver an attachment after authoritative session refresh fails", a
   }
 });
 
-it("retries a failed attachment save without adding the attachment again", async () => {
-  const addEntryAttachment = vi.fn(async () => ({
-    type: "entry_detail" as const,
-    id: "entry-1",
-    title: "Example",
-    username: "alice",
-    password: "secret-123",
-    url: "https://example.com",
-    notes: "demo note",
-    totp: null,
-    totpUri: null,
-    customFields: [],
-    attachments: [
-      {
-        name: "added.txt",
-        size: 5,
-        protectInMemory: false
-      }
-    ]
-  }));
-  const saveVault = vi
+it("reports a failed attachment commit without chaining a follow-up save", async () => {
+  const addEntryAttachment = vi
     .fn()
-    .mockRejectedValueOnce(new Error("simulated attachment save failure"))
-    .mockResolvedValueOnce(undefined);
+    .mockRejectedValue(new Error("simulated attachment commit failure"));
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -6353,8 +6182,7 @@ it("retries a failed attachment save without adding the attachment again", async
       customFields: [],
       attachments: []
     })),
-    addEntryAttachment,
-    saveVault
+    addEntryAttachment
   };
 
   render(<App client={client as any} />);
@@ -6366,19 +6194,13 @@ it("retries a failed attachment save without adding the attachment again", async
     target: { files: [file] }
   });
 
-  expect(await screen.findByText("simulated attachment save failure")).toBeInTheDocument();
+  expect(await screen.findByText("simulated attachment commit failure")).toBeInTheDocument();
   expect(addEntryAttachment).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
-
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
-
-  await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
-  expect(addEntryAttachment).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Retry save" })).not.toBeInTheDocument();
 });
 
-it("replays an unknown attachment mutation with its original payload and operation id", async () => {
-  const operationId = "22222222-2222-4222-8222-222222222222";
-  const addedDetail = {
+it("does not replay an attachment mutation whose transport outcome is unknown", async () => {
+  const originalDetail = {
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Example",
@@ -6389,31 +6211,15 @@ it("replays an unknown attachment mutation with its original payload and operati
     totp: null,
     totpUri: null,
     customFields: [],
-    attachments: [
-      {
-        name: "added.txt",
-        size: 5,
-        protectInMemory: false
-      }
-    ]
+    attachments: []
   };
   const addEntryAttachment = vi
     .fn()
-    .mockRejectedValueOnce(
+    .mockRejectedValue(
       Object.assign(new Error("attachment mutation outcome is unknown"), {
-        code: "request_outcome_unknown",
-        operationId
+        code: "request_outcome_unknown"
       })
-    )
-    .mockResolvedValueOnce({
-      value: addedDetail,
-      saveResult: {
-        type: "save_vault_result" as const,
-        status: "saved" as const
-      },
-      operationId
-    });
-  const retryMutationSave = vi.fn();
+    );
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -6440,12 +6246,8 @@ it("replays an unknown attachment mutation with its original payload and operati
         groupId: "group-root"
       }
     ]),
-    getEntryDetail: vi.fn().mockResolvedValue({
-      ...addedDetail,
-      attachments: []
-    }),
-    addEntryAttachment,
-    retryMutationSave
+    getEntryDetail: vi.fn().mockResolvedValue(originalDetail),
+    addEntryAttachment
   };
 
   render(<App client={client as any} />);
@@ -6460,25 +6262,8 @@ it("replays an unknown attachment mutation with its original payload and operati
   expect(
     await screen.findByText("attachment mutation outcome is unknown")
   ).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
-
-  await waitFor(() =>
-    expect(addEntryAttachment).toHaveBeenLastCalledWith(
-      "vault-1",
-      "entry-1",
-      {
-        name: "added.txt",
-        dataBase64: "aGVsbG8=",
-        protectInMemory: false
-      },
-      operationId
-    )
-  );
-  expect(addEntryAttachment).toHaveBeenCalledTimes(2);
-  expect(retryMutationSave).not.toHaveBeenCalled();
-  expect(
-    await screen.findByRole("button", { name: "Remove added.txt" })
-  ).toBeInTheDocument();
+  expect(addEntryAttachment).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: "Retry save" })).not.toBeInTheDocument();
 });
 
 it("shows read-only entry history details", async () => {

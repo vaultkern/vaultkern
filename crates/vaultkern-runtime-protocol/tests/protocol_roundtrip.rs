@@ -66,7 +66,7 @@ fn protocol_roundtrips_the_version_and_capability_handshake() {
 }
 
 #[test]
-fn protocol_envelope_preserves_a_logical_operation_id() {
+fn protocol_decodes_the_inert_logical_operation_id_for_compatibility() {
     let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
         "version": 2,
         "operationId": "client-a-save-1",
