@@ -8,6 +8,13 @@ output_directory="${repo_root}/target/xcode/${CONFIGURATION}"
 slice_directory="${TARGET_TEMP_DIR}/VaultKernRustSlices"
 architectures=("${(@s: :)ARCHS}")
 libraries=()
+cargo_profile_arguments=()
+rust_profile_directory="debug"
+
+if [[ "${CONFIGURATION}" != "Debug" ]]; then
+  cargo_profile_arguments=(--release)
+  rust_profile_directory="release"
+fi
 
 if (( ${#architectures} == 0 )); then
   echo "error: Xcode did not provide a target architecture" >&2
@@ -28,9 +35,11 @@ for architecture in "${architectures[@]}"; do
       ;;
   esac
 
-  cargo build --locked --release --target "${rust_target}" -p vaultkern-uniffi
+  cargo build --locked "${cargo_profile_arguments[@]}" --target "${rust_target}" -p vaultkern-uniffi
   architecture_library="${slice_directory}/${architecture}-${library_name}"
-  cp -f "${repo_root}/target/${rust_target}/release/${library_name}" "${architecture_library}"
+  cp -f \
+    "${repo_root}/target/${rust_target}/${rust_profile_directory}/${library_name}" \
+    "${architecture_library}"
   libraries+=("${architecture_library}")
 done
 

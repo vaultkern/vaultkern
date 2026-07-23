@@ -5,11 +5,11 @@ import XCTest
 
 @MainActor
 final class VaultAppModelTests: XCTestCase {
-  func testRetryAfterSaveFailureDoesNotApplyEditTwice() async {
+  func testRetryAfterSaveFailureDoesNotApplyEditTwice() async throws {
     let runtime = ModelTestRuntime(failFirstSave: true)
     let model = VaultAppModel(runtime: runtime)
 
-    await model.openVault(URL(fileURLWithPath: "/private/tmp/model-test.kdbx"))
+    try await openTestVault(model)
     let password = VaultKernSensitiveString("master-password")
     await model.unlockWithPassword(password, keyFileURL: nil)
     await model.selectEntry("entry")
@@ -27,10 +27,10 @@ final class VaultAppModelTests: XCTestCase {
     XCTAssertEqual(runtime.saveCount, 2)
   }
 
-  func testCancellingKDFConfirmationClosesRetainedCredential() async {
+  func testCancellingKDFConfirmationClosesRetainedCredential() async throws {
     let runtime = ModelTestRuntime(requiresKDFConfirmation: true)
     let model = VaultAppModel(runtime: runtime)
-    await model.openVault(URL(fileURLWithPath: "/private/tmp/model-test.kdbx"))
+    try await openTestVault(model)
     let password = VaultKernSensitiveString("master-password")
 
     await model.unlockWithPassword(password, keyFileURL: nil)
@@ -40,6 +40,102 @@ final class VaultAppModelTests: XCTestCase {
     model.cancelKDF()
     XCTAssertNil(model.kdfPrompt)
     XCTAssertEqual(password.reveal(), "")
+  }
+
+  func testVaultDirectoryScopeIsRetainedUntilClose() async throws {
+    let runtime = ModelTestRuntime()
+    let scopedAccess = ModelTestScopedAccess()
+    let model = VaultAppModel(runtime: runtime, scopedAccess: scopedAccess)
+    let location = try TestVaultLocation()
+    defer { location.remove() }
+
+    await model.openVault(
+      location.vaultURL,
+      authorizedDirectoryURL: location.directoryURL
+    )
+
+    XCTAssertEqual(scopedAccess.retained, [location.vaultURL, location.directoryURL])
+    XCTAssertTrue(scopedAccess.released.isEmpty)
+
+    await model.closeVault()
+
+    XCTAssertEqual(scopedAccess.released, [location.directoryURL, location.vaultURL])
+  }
+
+  func testRejectedVaultSelectionReleasesBothScopes() async throws {
+    let scopedAccess = ModelTestScopedAccess()
+    let model = VaultAppModel(runtime: ModelTestRuntime(), scopedAccess: scopedAccess)
+    let location = try TestVaultLocation()
+    defer { location.remove() }
+    let wrongDirectoryURL = location.directoryURL.deletingLastPathComponent()
+
+    await model.openVault(location.vaultURL, authorizedDirectoryURL: wrongDirectoryURL)
+
+    XCTAssertNil(model.currentVault)
+    XCTAssertEqual(scopedAccess.retained, [location.vaultURL, wrongDirectoryURL])
+    XCTAssertEqual(scopedAccess.released, [wrongDirectoryURL, location.vaultURL])
+  }
+
+  func testRejectedUnlockReleasesKeyFileScopeAndCredential() async {
+    let scopedAccess = ModelTestScopedAccess()
+    let model = VaultAppModel(runtime: ModelTestRuntime(), scopedAccess: scopedAccess)
+    let keyFileURL = URL(fileURLWithPath: "/private/tmp/model-test.key")
+    let password = VaultKernSensitiveString("master-password")
+
+    await model.unlockWithPassword(password, keyFileURL: keyFileURL)
+
+    XCTAssertEqual(password.reveal(), "")
+    XCTAssertEqual(scopedAccess.retained, [keyFileURL])
+    XCTAssertEqual(scopedAccess.released, [keyFileURL])
+  }
+
+  private func openTestVault(_ model: VaultAppModel) async throws {
+    let location = try TestVaultLocation()
+    defer { location.remove() }
+    await model.openVault(
+      location.vaultURL,
+      authorizedDirectoryURL: location.directoryURL
+    )
+  }
+}
+
+@MainActor
+private final class ModelTestScopedAccess: SecurityScopedAccessing {
+  private(set) var retained: [URL] = []
+  private(set) var released: [URL] = []
+
+  func retain(_ url: URL) {
+    retained.append(url)
+  }
+
+  func release(_ url: URL) {
+    released.append(url)
+  }
+
+  func releaseAll() {
+    for url in retained.reversed() where !released.contains(url) {
+      released.append(url)
+    }
+  }
+}
+
+private struct TestVaultLocation {
+  let directoryURL: URL
+  let vaultURL: URL
+
+  init() throws {
+    directoryURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("vaultkern-model-\(UUID().uuidString)", isDirectory: true)
+    vaultURL = directoryURL.appendingPathComponent("model-test.kdbx")
+    try FileManager.default.createDirectory(
+      at: directoryURL,
+      withIntermediateDirectories: false
+    )
+    try Data().write(to: vaultURL)
+  }
+
+  func remove() {
+    try? FileManager.default.removeItem(at: directoryURL)
   }
 }
 

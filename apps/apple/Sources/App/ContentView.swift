@@ -1,11 +1,7 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct ContentView: View {
   @ObservedObject var model: VaultAppModel
-  @State private var presentsVaultImporter = false
-
-  private let kdbxType = UTType(filenameExtension: "kdbx") ?? .data
 
   var body: some View {
     Group {
@@ -19,17 +15,9 @@ struct ContentView: View {
         vaultWorkspace
       }
     }
-    .fileImporter(
-      isPresented: $presentsVaultImporter,
-      allowedContentTypes: [kdbxType],
-      allowsMultipleSelection: false
-    ) { result in
-      guard case .success(let urls) = result, let url = urls.first else { return }
-      Task { await model.openVault(url) }
-    }
     .onReceive(NotificationCenter.default.publisher(for: .openVaultPicker)) { _ in
       guard model.canChangeVault, model.currentVault == nil else { return }
-      presentsVaultImporter = true
+      openVault()
     }
     .alert(
       "VaultKern",
@@ -123,7 +111,7 @@ struct ContentView: View {
         Label("Open a KDBX vault", systemImage: "folder.badge.plus")
       } actions: {
         Button("Open Vault", systemImage: "folder") {
-          presentsVaultImporter = true
+          openVault()
         }
         .buttonStyle(.borderedProminent)
         .disabled(!model.canChangeVault)
@@ -146,7 +134,7 @@ struct ContentView: View {
     ToolbarItemGroup(placement: .primaryAction) {
       if model.currentVault == nil {
         Button {
-          presentsVaultImporter = true
+          openVault()
         } label: {
           Label("Open Vault", systemImage: "folder")
         }
@@ -189,6 +177,16 @@ struct ContentView: View {
       }
     )
   }
+
+  private func openVault() {
+    guard let selection = VaultSelectionPanel.chooseVault() else { return }
+    Task {
+      await model.openVault(
+        selection.vaultURL,
+        authorizedDirectoryURL: selection.directoryURL
+      )
+    }
+  }
 }
 
 private struct UnlockView: View {
@@ -216,7 +214,7 @@ private struct UnlockView: View {
           }
           if keyFileURL != nil {
             Button {
-              keyFileURL = nil
+              clearKeyFileURL()
             } label: {
               Image(systemName: "xmark.circle.fill")
             }
@@ -245,26 +243,42 @@ private struct UnlockView: View {
       allowedContentTypes: [.data],
       allowsMultipleSelection: false
     ) { result in
-      guard case .success(let urls) = result else { return }
-      keyFileURL = urls.first
+      guard
+        case .success(let urls) = result,
+        let url = urls.first,
+        url.startAccessingSecurityScopedResource()
+      else {
+        model.errorMessage = "VaultKern could not access the selected key file."
+        return
+      }
+      clearKeyFileURL()
+      keyFileURL = url
     }
     .onDisappear {
       password.removeAll(keepingCapacity: false)
-      keyFileURL = nil
+      clearKeyFileURL()
     }
   }
 
   private func unlock() {
     guard !password.isEmpty || keyFileURL != nil else { return }
+    let selectedKeyFileURL = keyFileURL
+    keyFileURL = nil
     let owner = password.isEmpty ? nil : VaultKernSensitiveString(password)
     password.removeAll(keepingCapacity: false)
-    Task { await model.unlockWithPassword(owner, keyFileURL: keyFileURL) }
+    Task { await model.unlockWithPassword(owner, keyFileURL: selectedKeyFileURL) }
+  }
+
+  private func clearKeyFileURL() {
+    keyFileURL?.stopAccessingSecurityScopedResource()
+    keyFileURL = nil
   }
 }
 
 private struct EntryEditorView: View {
   @ObservedObject var model: VaultAppModel
   @State private var revealsPassword = false
+  @State private var revealsTOTP = false
   @State private var presentsEnrollment = false
 
   var body: some View {
@@ -289,7 +303,22 @@ private struct EntryEditorView: View {
           .help(revealsPassword ? "Hide Password" : "Show Password")
         }
         TextField("URL", text: draftBinding(\.url))
-        TextField("TOTP URI", text: draftBinding(\.totpURI))
+        HStack {
+          Group {
+            if revealsTOTP {
+              TextField("TOTP URI", text: draftBinding(\.totpURI))
+            } else {
+              SecureField("TOTP URI", text: draftBinding(\.totpURI))
+            }
+          }
+          Button {
+            revealsTOTP.toggle()
+          } label: {
+            Image(systemName: revealsTOTP ? "eye.slash" : "eye")
+          }
+          .buttonStyle(.plain)
+          .help(revealsTOTP ? "Hide TOTP URI" : "Show TOTP URI")
+        }
         TextEditor(text: draftBinding(\.notes))
           .frame(minHeight: 100)
       }
@@ -360,6 +389,10 @@ private struct EntryEditorView: View {
       QuickUnlockEnrollmentView(model: model, isPresented: $presentsEnrollment)
         .frame(width: 460)
     }
+    .onChange(of: model.selectedEntryID) {
+      revealsPassword = false
+      revealsTOTP = false
+    }
   }
 
   private func draftBinding(_ keyPath: WritableKeyPath<EntryDraft, String>) -> Binding<String> {
@@ -373,11 +406,27 @@ private struct EntryEditorView: View {
 private struct CustomFieldRow: View {
   let field: EntryCustomFieldDraft
   @ObservedObject var model: VaultAppModel
+  @State private var revealsProtectedValue = false
 
   var body: some View {
     HStack {
       TextField("Name", text: fieldBinding(\.key))
-      TextField("Value", text: fieldBinding(\.value))
+      Group {
+        if field.isProtected && !revealsProtectedValue {
+          SecureField("Value", text: fieldBinding(\.value))
+        } else {
+          TextField("Value", text: fieldBinding(\.value))
+        }
+      }
+      if field.isProtected {
+        Button {
+          revealsProtectedValue.toggle()
+        } label: {
+          Image(systemName: revealsProtectedValue ? "eye.slash" : "eye")
+        }
+        .buttonStyle(.plain)
+        .help(revealsProtectedValue ? "Hide Protected Value" : "Show Protected Value")
+      }
       Toggle("Protected", isOn: fieldBinding(\.isProtected))
         .labelsHidden()
         .help("Protected Field")
@@ -388,6 +437,9 @@ private struct CustomFieldRow: View {
       }
       .buttonStyle(.plain)
       .help("Remove Field")
+    }
+    .onChange(of: field.isProtected) {
+      revealsProtectedValue = false
     }
   }
 
@@ -431,13 +483,18 @@ private struct QuickUnlockEnrollmentView: View {
         Spacer()
         Button("Cancel") {
           password.removeAll(keepingCapacity: false)
+          clearKeyFileURL()
           isPresented = false
         }
         Button("Enable", systemImage: "touchid") {
+          let selectedKeyFileURL = keyFileURL
+          keyFileURL = nil
           let owner = password.isEmpty ? nil : VaultKernSensitiveString(password)
           password.removeAll(keepingCapacity: false)
           isPresented = false
-          Task { await model.enrollQuickUnlock(password: owner, keyFileURL: keyFileURL) }
+          Task {
+            await model.enrollQuickUnlock(password: owner, keyFileURL: selectedKeyFileURL)
+          }
         }
         .buttonStyle(.borderedProminent)
         .disabled(model.isBusy || (password.isEmpty && keyFileURL == nil))
@@ -449,13 +506,26 @@ private struct QuickUnlockEnrollmentView: View {
       allowedContentTypes: [.data],
       allowsMultipleSelection: false
     ) { result in
-      guard case .success(let urls) = result else { return }
-      keyFileURL = urls.first
+      guard
+        case .success(let urls) = result,
+        let url = urls.first,
+        url.startAccessingSecurityScopedResource()
+      else {
+        model.errorMessage = "VaultKern could not access the selected key file."
+        return
+      }
+      clearKeyFileURL()
+      keyFileURL = url
     }
     .interactiveDismissDisabled(model.isBusy)
     .onDisappear {
       password.removeAll(keepingCapacity: false)
-      keyFileURL = nil
+      clearKeyFileURL()
     }
+  }
+
+  private func clearKeyFileURL() {
+    keyFileURL?.stopAccessingSecurityScopedResource()
+    keyFileURL = nil
   }
 }

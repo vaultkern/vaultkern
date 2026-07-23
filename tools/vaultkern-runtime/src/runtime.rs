@@ -2696,11 +2696,24 @@ impl Runtime {
                 .vault
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
+            let mut candidate = vault.clone();
 
-            let had_projectable_totp = self.core.project_entry_totp(vault, entry_id)?.is_some();
-            self.core.snapshot_entry_to_history(vault, entry_id)?;
+            let current_totp = self.core.project_entry_totp(&candidate, entry_id)?;
+            let totp_is_unchanged = match (current_totp.as_ref(), totp_uri.as_deref()) {
+                (Some(current), Some(requested)) => {
+                    let entry = find_entry_by_id(&candidate.root, entry_id)
+                        .with_context(|| format!("entry not found: {entry_id}"))?;
+                    let current_uri =
+                        Zeroizing::new(totp_to_uri(&entry.title, &entry.username, current));
+                    current_uri.as_str() == requested
+                }
+                (None, None) => true,
+                _ => false,
+            };
+            self.core
+                .snapshot_entry_to_history(&mut candidate, entry_id)?;
             self.core.update_entry_fields(
-                vault,
+                &mut candidate,
                 entry_id,
                 EntryUpdate {
                     title: Some(take_sensitive_string(title)),
@@ -2712,18 +2725,19 @@ impl Runtime {
             )?;
 
             match requested_totp {
+                Some(_) if totp_is_unchanged => {}
                 Some(totp) => {
-                    self.core.set_entry_totp(vault, entry_id, totp)?;
+                    self.core.set_entry_totp(&mut candidate, entry_id, totp)?;
                 }
-                None if had_projectable_totp => {
-                    self.core.clear_entry_totp(vault, entry_id)?;
+                None if current_totp.is_some() => {
+                    self.core.clear_entry_totp(&mut candidate, entry_id)?;
                 }
                 None => {}
             }
 
             let existing_keys = self
                 .core
-                .list_entry_custom_fields(vault, entry_id)?
+                .list_entry_custom_fields(&candidate, entry_id)?
                 .into_iter()
                 .map(|mut field| std::mem::take(&mut field.key))
                 .collect::<Vec<_>>();
@@ -2734,14 +2748,15 @@ impl Runtime {
 
             for key in existing_keys {
                 if !next_keys.contains(key.as_str()) {
-                    self.core.delete_entry_custom_field(vault, entry_id, &key)?;
+                    self.core
+                        .delete_entry_custom_field(&mut candidate, entry_id, &key)?;
                 }
             }
 
             for field in custom_fields {
                 if !field.key.trim().is_empty() {
                     self.core.upsert_entry_custom_field(
-                        vault,
+                        &mut candidate,
                         entry_id,
                         EntryCustomFieldInput {
                             key: field.key,
@@ -2752,8 +2767,9 @@ impl Runtime {
                 }
             }
 
-            touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
-            enforce_history_limits(vault);
+            touch_entry_modified_at(&self.core, &mut candidate, entry_id, modified_at)?;
+            enforce_history_limits(&mut candidate);
+            *vault = candidate;
         }
 
         self.get_entry_detail(vault_id, entry_id)
@@ -9894,6 +9910,22 @@ fn cloned_entry_by_id(group: &vaultkern_core::Group, entry_id: &str) -> Option<E
     None
 }
 
+fn find_entry_by_id<'a>(group: &'a vaultkern_core::Group, entry_id: &str) -> Option<&'a Entry> {
+    for entry in &group.entries {
+        if entry.id.to_string() == entry_id {
+            return Some(entry);
+        }
+    }
+
+    for child in &group.children {
+        if let Some(found) = find_entry_by_id(child, entry_id) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
 fn restore_entry_from_snapshot(
     group: &mut vaultkern_core::Group,
     entry_id: &str,
@@ -14309,6 +14341,131 @@ mod tests {
                 .get(raw_key)
                 .map(|field| field.value.as_str()),
             Some("raw-hotp-secret")
+        );
+    }
+
+    #[test]
+    fn ordinary_entry_update_preserves_existing_projectable_totp_representation() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        {
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .expect("loaded vault");
+            let entry = loaded
+                .vault
+                .as_mut()
+                .expect("unlocked vault")
+                .root
+                .entries
+                .iter_mut()
+                .find(|entry| entry.id.to_string() == created.id)
+                .expect("created entry");
+            entry.totp = Some(TotpSpec {
+                secret_base32: "JBSWY3DPEHPK3PXP".into(),
+                algorithm: vaultkern_core::TotpAlgorithm::Sha1,
+                digits: 6,
+                period_seconds: 30,
+                issuer: None,
+                account_name: None,
+            });
+            for (key, value, protected) in [
+                ("TimeOtp-Secret-Base32", "JBSWY3DPEHPK3PXP", true),
+                ("TimeOtp-Algorithm", "HMAC-SHA-1", false),
+                ("TimeOtp-Length", "6", false),
+                ("TimeOtp-Period", "30", false),
+            ] {
+                entry.attributes.insert(
+                    key.into(),
+                    vaultkern_core::CustomField {
+                        value: value.into(),
+                        protected,
+                    },
+                );
+            }
+        }
+
+        let detail = runtime
+            .get_entry_detail(&opened.vault_id, &created.id)
+            .expect("entry detail");
+        assert!(detail.totp_uri.is_some());
+        let before_attributes = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .root
+            .entries
+            .iter()
+            .find(|entry| entry.id.to_string() == created.id)
+            .expect("created entry")
+            .attributes
+            .clone();
+
+        runtime
+            .update_entry_fields(
+                &opened.vault_id,
+                &created.id,
+                detail.title,
+                detail.username,
+                detail.password,
+                detail.url,
+                "unrelated notes edit".into(),
+                detail.totp_uri,
+                detail.custom_fields,
+            )
+            .expect("ordinary entry update");
+
+        let updated = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .root
+            .entries
+            .iter()
+            .find(|entry| entry.id.to_string() == created.id)
+            .expect("updated entry");
+        assert_eq!(updated.attributes, before_attributes);
+        let updated_totp = updated.totp.as_ref().expect("TOTP");
+        assert_eq!(updated_totp.issuer, None);
+        assert_eq!(updated_totp.account_name, None);
+    }
+
+    #[test]
+    fn invalid_custom_field_update_does_not_partially_mutate_the_entry() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        let before = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .clone();
+        let mut custom_fields = created.custom_fields.clone();
+        custom_fields.push(EntryCustomFieldDto {
+            key: "Password".into(),
+            value: "must not be applied".into(),
+            protected: true,
+        });
+
+        let error = runtime
+            .update_entry_fields(
+                &opened.vault_id,
+                &created.id,
+                "must not be applied".into(),
+                created.username,
+                created.password,
+                created.url,
+                created.notes,
+                created.totp_uri,
+                custom_fields,
+            )
+            .expect_err("reserved custom field must fail");
+
+        assert!(format!("{error:#}").contains("reserved custom field key"));
+        assert_eq!(
+            runtime
+                .loaded_vault(&opened.vault_id)
+                .expect("loaded vault"),
+            &before
         );
     }
 

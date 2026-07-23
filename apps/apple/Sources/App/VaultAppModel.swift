@@ -23,11 +23,12 @@ final class VaultAppModel: ObservableObject {
   @Published var kdfPrompt: KDFConfirmationPrompt?
 
   private let runtime: (any VaultRuntimeClient)?
-  private let scopedAccess = SecurityScopedAccess()
-  private var vaultURL: URL?
+  private let scopedAccess: any SecurityScopedAccessing
+  private var vaultAccessURLs: [URL] = []
   private var pendingKDF: PendingKDFOperation?
 
   init() {
+    scopedAccess = SecurityScopedAccess()
     do {
       runtime = try LiveVaultRuntimeClient(configuration: AppConfiguration.live())
       bootError = nil
@@ -37,8 +38,12 @@ final class VaultAppModel: ObservableObject {
     }
   }
 
-  init(runtime: any VaultRuntimeClient) {
+  init(
+    runtime: any VaultRuntimeClient,
+    scopedAccess: any SecurityScopedAccessing = SecurityScopedAccess()
+  ) {
     self.runtime = runtime
+    self.scopedAccess = scopedAccess
     bootError = nil
   }
 
@@ -48,18 +53,35 @@ final class VaultAppModel: ObservableObject {
     !isBusy && !saveProgress.hasUncommittedChanges && pendingKDF == nil
   }
 
-  func openVault(_ url: URL) async {
-    guard let runtime, beginOperation() else { return }
+  func openVault(_ url: URL, authorizedDirectoryURL: URL) async {
+    let accessURLs = [url, authorizedDirectoryURL]
+    for accessURL in accessURLs {
+      scopedAccess.retain(accessURL)
+    }
+    guard let runtime, beginOperation() else {
+      release(accessURLs)
+      return
+    }
     defer { endOperation() }
     guard currentVault == nil else {
+      release(accessURLs)
       errorMessage = "Close the current vault before opening another one."
       return
     }
+    guard
+      let selection = AuthorizedVaultSelection(
+        vaultURL: url,
+        directoryURL: authorizedDirectoryURL
+      )
+    else {
+      release(accessURLs)
+      errorMessage = "Choose the folder that directly contains the vault."
+      return
+    }
 
-    scopedAccess.retain(url)
     do {
       let opened = try await BackgroundWork.run {
-        let handle = try runtime.openVault(path: url.path)
+        let handle = try runtime.openVault(path: selection.vaultURL.path)
         do {
           return OpenedVault(handle: handle, state: try runtime.sessionState())
         } catch {
@@ -67,14 +89,14 @@ final class VaultAppModel: ObservableObject {
           throw error
         }
       }
-      vaultURL = url
+      vaultAccessURLs = accessURLs
       currentVault = opened.handle
       apply(opened.state)
       quickUnlockKnownEnrolled = nil
       noticeMessage = nil
       errorMessage = nil
     } catch {
-      scopedAccess.release(url)
+      release(accessURLs)
       errorMessage = Self.describe(error)
     }
   }
@@ -83,14 +105,17 @@ final class VaultAppModel: ObservableObject {
     _ password: VaultKernSensitiveString?,
     keyFileURL: URL?
   ) async {
-    guard let runtime, let vault = currentVault, beginOperation() else {
-      password?.close()
-      return
-    }
-    defer { endOperation() }
     if let keyFileURL {
       scopedAccess.retain(keyFileURL)
     }
+    guard let runtime, let vault = currentVault, beginOperation() else {
+      password?.close()
+      if let keyFileURL {
+        scopedAccess.release(keyFileURL)
+      }
+      return
+    }
+    defer { endOperation() }
 
     do {
       let state = try await BackgroundWork.run {
@@ -149,14 +174,17 @@ final class VaultAppModel: ObservableObject {
     password: VaultKernSensitiveString?,
     keyFileURL: URL?
   ) async {
-    guard let runtime, isUnlocked, beginOperation() else {
-      password?.close()
-      return
-    }
-    defer { endOperation() }
     if let keyFileURL {
       scopedAccess.retain(keyFileURL)
     }
+    guard let runtime, isUnlocked, beginOperation() else {
+      password?.close()
+      if let keyFileURL {
+        scopedAccess.release(keyFileURL)
+      }
+      return
+    }
+    defer { endOperation() }
     do {
       let state = try await BackgroundWork.run {
         try runtime.enroll(
@@ -340,7 +368,14 @@ final class VaultAppModel: ObservableObject {
   }
 
   func saveDraft() async {
-    guard let runtime, let vaultID = activeVaultID, let draft, beginOperation() else { return }
+    guard let runtime, let vaultID = activeVaultID, let draft else { return }
+    do {
+      try draft.validateForSave()
+    } catch {
+      errorMessage = Self.describe(error)
+      return
+    }
+    guard beginOperation() else { return }
     defer { endOperation() }
 
     if saveProgress.shouldApplyDraft {
@@ -425,10 +460,8 @@ final class VaultAppModel: ObservableObject {
       currentVault = nil
       apply(state)
       quickUnlockKnownEnrolled = nil
-      if let vaultURL {
-        scopedAccess.release(vaultURL)
-      }
-      self.vaultURL = nil
+      release(vaultAccessURLs)
+      vaultAccessURLs.removeAll(keepingCapacity: false)
       noticeMessage = nil
       errorMessage = nil
     } catch {
@@ -449,6 +482,12 @@ final class VaultAppModel: ObservableObject {
 
   private func endOperation() {
     isBusy = false
+  }
+
+  private func release(_ accessURLs: [URL]) {
+    for accessURL in accessURLs.reversed() {
+      scopedAccess.release(accessURL)
+    }
   }
 
   private func finishUnlock(
@@ -557,7 +596,7 @@ private enum PendingKDFOperation {
   case enroll(password: VaultKernSensitiveString?, keyFileURL: URL?)
 
   @MainActor
-  func close(using scopedAccess: SecurityScopedAccess) {
+  func close(using scopedAccess: any SecurityScopedAccessing) {
     switch self {
     case .unlock(let password, let keyFileURL), .enroll(let password, let keyFileURL):
       password?.close()

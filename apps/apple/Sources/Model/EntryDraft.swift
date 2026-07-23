@@ -50,6 +50,24 @@ struct EntryDraft: Identifiable, Sendable,
   var attachments: [EntryAttachmentSummary]
   var passkeyRelyingParty: String?
 
+  func validateForSave() throws {
+    var keys = Set<String>()
+    for field in customFields {
+      if field.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        guard field.value.isEmpty else {
+          throw EntryDraftValidationError.missingCustomFieldKey
+        }
+        continue
+      }
+      guard !Self.isReservedCustomFieldKey(field.key) else {
+        throw EntryDraftValidationError.reservedCustomFieldKey
+      }
+      guard keys.insert(field.key).inserted else {
+        throw EntryDraftValidationError.duplicateCustomFieldKey
+      }
+    }
+  }
+
   mutating func clear() {
     id.removeAll(keepingCapacity: false)
     title.removeAll(keepingCapacity: false)
@@ -73,6 +91,49 @@ struct EntryDraft: Identifiable, Sendable,
 
   var description: String { "EntryDraft([REDACTED])" }
   var debugDescription: String { description }
+
+  private static func isReservedCustomFieldKey(_ key: String) -> Bool {
+    standardFieldKeys.contains(key)
+      || otpFieldKeys.contains(key)
+      || key.hasPrefix("KPEX_PASSKEY_")
+  }
+
+  private static let standardFieldKeys: Set<String> = [
+    "Title", "UserName", "Password", "URL", "Notes",
+  ]
+
+  private static let otpFieldKeys: Set<String> = [
+    "otp",
+    "TimeOtp-Secret",
+    "TimeOtp-Secret-Hex",
+    "TimeOtp-Secret-Base32",
+    "TimeOtp-Secret-Base64",
+    "TimeOtp-Algorithm",
+    "TimeOtp-Length",
+    "TimeOtp-Period",
+    "HmacOtp-Secret",
+    "HmacOtp-Secret-Hex",
+    "HmacOtp-Secret-Base32",
+    "HmacOtp-Secret-Base64",
+    "HmacOtp-Counter",
+  ]
+}
+
+enum EntryDraftValidationError: LocalizedError, Equatable {
+  case missingCustomFieldKey
+  case reservedCustomFieldKey
+  case duplicateCustomFieldKey
+
+  var errorDescription: String? {
+    switch self {
+    case .missingCustomFieldKey:
+      "Custom fields with a value must have a name."
+    case .reservedCustomFieldKey:
+      "Custom fields cannot use reserved KeePass or VaultKern names."
+    case .duplicateCustomFieldKey:
+      "Custom field names must be unique."
+    }
+  }
 }
 
 extension EntryDetailDto {

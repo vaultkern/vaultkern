@@ -1,11 +1,19 @@
 import Foundation
 
 @MainActor
-final class SecurityScopedAccess {
+protocol SecurityScopedAccessing: AnyObject {
+  func retain(_ url: URL)
+  func release(_ url: URL)
+  func releaseAll()
+}
+
+@MainActor
+final class SecurityScopedAccess: SecurityScopedAccessing {
   private var activeURLs: [URL] = []
 
   func retain(_ url: URL) {
-    guard url.startAccessingSecurityScopedResource() else { return }
+    // Callers transfer an active scope: panels start one implicitly, while
+    // SwiftUI file importers start one explicitly before handing off the URL.
     activeURLs.append(url)
   }
 
