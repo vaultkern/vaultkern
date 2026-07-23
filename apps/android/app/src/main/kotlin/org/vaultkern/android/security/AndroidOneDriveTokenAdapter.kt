@@ -35,15 +35,22 @@ data class OneDriveTokenRecord(
             "ciphertext=[REDACTED], securityLevel=$securityLevel)"
 }
 
+interface OneDriveTokenRecordStorage {
+    fun write(record: OneDriveTokenRecord)
+    fun read(): OneDriveTokenRecord?
+    fun delete()
+    fun discardUncommittedWrite()
+}
+
 class AtomicOneDriveTokenRecordStore(
     context: Context,
     directoryName: String = "onedrive-token",
-) {
+) : OneDriveTokenRecordStorage {
     private val directory = File(context.noBackupFilesDir, directoryName)
     private val atomic = AtomicFile(File(directory, FILE_NAME))
     private val gate = Any()
 
-    fun write(record: OneDriveTokenRecord) = synchronized(gate) {
+    override fun write(record: OneDriveTokenRecord) = synchronized(gate) {
         require(record.keyAlias.length in 1..MAX_ALIAS_BYTES) { "token key alias is invalid" }
         require(record.iv.size in 1..MAX_IV_BYTES) { "token IV is invalid" }
         require(record.ciphertext.size in 1..MAX_CIPHERTEXT_BYTES) {
@@ -72,7 +79,7 @@ class AtomicOneDriveTokenRecordStore(
         }
     }
 
-    fun read(): OneDriveTokenRecord? = synchronized(gate) {
+    override fun read(): OneDriveTokenRecord? = synchronized(gate) {
         val input = try {
             atomic.openRead()
         } catch (_: FileNotFoundException) {
@@ -107,9 +114,9 @@ class AtomicOneDriveTokenRecordStore(
         File(directory, FILE_NAME).isFile || File(directory, "$FILE_NAME.bak").isFile
     }
 
-    fun delete() = synchronized(gate) { atomic.delete() }
+    override fun delete() = synchronized(gate) { atomic.delete() }
 
-    fun discardUncommittedWrite() = synchronized(gate) {
+    override fun discardUncommittedWrite() = synchronized(gate) {
         val pending = File(directory, "$FILE_NAME.new")
         check(pending.delete() || !pending.exists()) {
             "failed to discard uncommitted OneDrive token"
@@ -246,7 +253,7 @@ class AndroidKeystoreOneDriveTokenCipherBackend(
 }
 
 class AndroidOneDriveTokenAdapter(
-    private val records: AtomicOneDriveTokenRecordStore,
+    private val records: OneDriveTokenRecordStorage,
     private val cipherBackend: OneDriveTokenCipherBackend,
 ) : OneDriveTokenAdapter {
     private val maintenancePending = AtomicBoolean(false)
@@ -292,7 +299,6 @@ class AndroidOneDriveTokenAdapter(
         val oldRecord = runCatching { records.read() }.getOrNull()
         var prepared: PreparedOneDriveTokenCipher? = null
         var ciphertext: ByteArray? = null
-        var committed = false
         try {
             prepared = cipherBackend.prepareEncryption()
             prepared.cipher.updateAAD(TOKEN_AAD)
@@ -305,10 +311,19 @@ class AndroidOneDriveTokenAdapter(
                     prepared.securityLevel,
                 ),
             )
-            committed = true
         } catch (error: Throwable) {
-            if (!committed) prepared?.let { runCatching { cipherBackend.delete(it.keyAlias) } }
-            throw unavailable(error)
+            when (prepared?.let { preparedCommitState(it.keyAlias) }) {
+                PreparedCommitState.CONFIRMED -> Unit
+                PreparedCommitState.NOT_COMMITTED, null -> {
+                    prepared?.let { candidate ->
+                        if (runCatching { cipherBackend.delete(candidate.keyAlias) }.isFailure) {
+                            maintenancePending.set(true)
+                        }
+                    }
+                    throw unavailable(error)
+                }
+                PreparedCommitState.UNKNOWN -> throw unavailable(error)
+            }
         } finally {
             plaintext.fill(0)
             ciphertext?.fill(0)
@@ -366,16 +381,30 @@ class AndroidOneDriveTokenAdapter(
     }
 
     private fun cleanupOrphans() {
-        val selected = runCatching { records.read()?.keyAlias }.getOrNull()
+        val selected = records.read()?.keyAlias
         cipherBackend.aliases()
             .filterNot { it == selected }
             .forEach(cipherBackend::delete)
     }
 
     private fun revokeBrokenToken(record: OneDriveTokenRecord?) {
-        runCatching { records.delete() }
+        val recordDeleted = runCatching { records.delete() }.isSuccess
         record?.let { runCatching { cipherBackend.delete(it.keyAlias) } }
-        maintenancePending.set(runCatching { cleanupOrphans() }.isFailure)
+        val orphansCleaned = runCatching { cleanupOrphans() }.isSuccess
+        maintenancePending.set(!recordDeleted || !orphansCleaned)
+    }
+
+    private fun preparedCommitState(keyAlias: String): PreparedCommitState {
+        val persisted = runCatching { records.read() }
+        if (persisted.isFailure) {
+            maintenancePending.set(true)
+            return PreparedCommitState.UNKNOWN
+        }
+        return if (persisted.getOrNull()?.keyAlias == keyAlias) {
+            PreparedCommitState.CONFIRMED
+        } else {
+            PreparedCommitState.NOT_COMMITTED
+        }
     }
 
     private fun unavailable(error: Throwable): PlatformAdapterException.Failure =
@@ -386,6 +415,12 @@ class AndroidOneDriveTokenAdapter(
     companion object {
         private val TOKEN_AAD = "vaultkern:android:onedrive-refresh-token:v1".toByteArray()
     }
+}
+
+private enum class PreparedCommitState {
+    CONFIRMED,
+    NOT_COMMITTED,
+    UNKNOWN,
 }
 
 private class MissingOneDriveTokenKeyException :

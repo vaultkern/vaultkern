@@ -1,6 +1,8 @@
 package org.vaultkern.android.unlock
 
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.vaultkern.android.settings.QuickUnlockReconciler
 
 enum class UnlockAttemptOutcome {
@@ -62,7 +64,8 @@ class CorePostUnlockReconciliation(
 class UnlockCoordinator(
     private val port: ResidentUnlockPort,
     private val reconciliation: PostUnlockReconciliation,
-    private val beforeQuickUnlock: () -> Unit = {},
+    private val beforeUnlock: () -> Unit = {},
+    private val sourceGate: ReentrantLock? = null,
 ) {
     private val reconciliationFailure = AtomicReference<String?>(null)
 
@@ -77,7 +80,7 @@ class UnlockCoordinator(
         unlock: () -> Unit,
     ): UnlockAttemptOutcome = try {
         reconciliationFailure.set(null)
-        unlock()
+        withPreparedSource(unlock)
         try {
             reconciliation.reconcile {
                 port.enrollQuickUnlock(credential)
@@ -91,8 +94,7 @@ class UnlockCoordinator(
     }
 
     fun quickUnlock(): UnlockAttemptOutcome {
-        beforeQuickUnlock()
-        val outcome = port.quickUnlock()
+        val outcome = withPreparedSource(port::quickUnlock)
         if (outcome == UnlockAttemptOutcome.UNLOCKED) {
             reconciliationFailure.set(null)
             try {
@@ -105,4 +107,17 @@ class UnlockCoordinator(
     }
 
     fun lastReconciliationFailure(): String? = reconciliationFailure.get()
+
+    private fun <T> withPreparedSource(action: () -> T): T {
+        val gate = sourceGate
+        return if (gate == null) {
+            beforeUnlock()
+            action()
+        } else {
+            gate.withLock {
+                beforeUnlock()
+                action()
+            }
+        }
+    }
 }

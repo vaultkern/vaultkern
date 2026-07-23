@@ -1,5 +1,10 @@
 package org.vaultkern.android.unlock
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -10,6 +15,63 @@ import org.vaultkern.android.settings.QuickUnlockActualState
 import org.vaultkern.android.settings.QuickUnlockReconciler
 
 class UnlockCoordinatorTest {
+    @Test
+    fun sourceReconciliationCannotEnterWhileCoreUnlockIsUsingThePreparedMirror() {
+        val sourceGate = ReentrantLock()
+        val unlockEntered = CountDownLatch(1)
+        val releaseUnlock = CountDownLatch(1)
+        val reconciliationEntered = CountDownLatch(1)
+        val port = object : ResidentUnlockPort {
+            override fun interactiveUnlock(path: String, credential: CharArray) = Unit
+            override fun interactiveUnlockCurrent(credential: CharArray) {
+                unlockEntered.countDown()
+                check(releaseUnlock.await(5, TimeUnit.SECONDS))
+            }
+            override fun quickUnlock() = UnlockAttemptOutcome.UNLOCKED
+            override fun enrollQuickUnlock(credential: CharArray) = Unit
+        }
+        val coordinator = UnlockCoordinator(
+            port,
+            PostUnlockReconciliation {},
+            sourceGate = sourceGate,
+        )
+        val unlockThread = Thread {
+            coordinator.interactiveUnlockCurrent("secret".toCharArray())
+        }
+        val reconciliationThread = Thread {
+            sourceGate.withLock { reconciliationEntered.countDown() }
+        }
+
+        try {
+            unlockThread.start()
+            assertTrue(unlockEntered.await(5, TimeUnit.SECONDS))
+            reconciliationThread.start()
+            assertFalse(reconciliationEntered.await(250, TimeUnit.MILLISECONDS))
+        } finally {
+            releaseUnlock.countDown()
+            unlockThread.join(5_000)
+            reconciliationThread.join(5_000)
+        }
+        assertTrue(reconciliationEntered.await(1, TimeUnit.SECONDS))
+    }
+
+    @Test
+    fun interactiveUnlockRefreshesTheSelectedSourceBeforeOpeningIt() {
+        val port = RecordingUnlockPort()
+        val coordinator = UnlockCoordinator(
+            port,
+            PostUnlockReconciliation { port.events += "reconcile" },
+            beforeUnlock = { port.events += "refresh-source" },
+        )
+
+        coordinator.interactiveUnlockCurrent("secret".toCharArray())
+
+        assertEquals(
+            listOf("refresh-source", "unlock-current", "reconcile"),
+            port.events,
+        )
+    }
+
     @Test
     fun interactiveUnlockReconcilesEnrollmentThenClearsCredentialBuffer() {
         val port = RecordingUnlockPort()
@@ -73,7 +135,7 @@ class UnlockCoordinatorTest {
         val coordinator = UnlockCoordinator(
             port,
             CountingReconciliation(QuickUnlockReconciler(FixedSettings(true), port)),
-            beforeQuickUnlock = { port.events += "refresh" },
+            beforeUnlock = { port.events += "refresh" },
         )
 
         val result = coordinator.quickUnlock()

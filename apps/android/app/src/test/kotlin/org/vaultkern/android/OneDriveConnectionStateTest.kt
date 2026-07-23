@@ -82,7 +82,7 @@ class OneDriveConnectionStateTest {
     }
 
     @Test
-    fun choosingLocalAuthorityClearsTheRemoteVaultSelection() {
+    fun choosingLocalAuthorityUsesTheCoreReferenceAndClearsTheRemoteSelection() {
         val state = UnlockUiState(
             oneDriveVaultSelected = true,
             oneDriveSelectedName = "Cloud.kdbx",
@@ -95,9 +95,10 @@ class OneDriveConnectionStateTest {
             ),
         )
 
-        val selected = state.withSelectedLocalVault("/private/local/vault.kdbx", "Local.kdbx")
+        val selected = state.withSelectedLocalVault("Local.kdbx")
 
-        assertEquals("/private/local/vault.kdbx", selected.vaultPath)
+        assertEquals("", selected.vaultPath)
+        assertTrue(selected.currentVaultSelected)
         assertEquals("Local.kdbx", selected.selectedVaultName)
         assertFalse(selected.oneDriveVaultSelected)
         assertEquals(null, selected.oneDriveSelectedName)

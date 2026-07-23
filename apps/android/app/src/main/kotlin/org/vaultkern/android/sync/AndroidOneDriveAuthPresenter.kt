@@ -1,5 +1,6 @@
 package org.vaultkern.android.sync
 
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -8,6 +9,7 @@ import java.net.URI
 class AndroidOneDriveAuthPresenter(context: Context) : OneDriveAuthPresenter {
     private val applicationContext = context.applicationContext
 
+    @SuppressLint("QueryPermissionsNeeded")
     override fun open(authUrl: String) {
         val parsed = try {
             URI(authUrl)

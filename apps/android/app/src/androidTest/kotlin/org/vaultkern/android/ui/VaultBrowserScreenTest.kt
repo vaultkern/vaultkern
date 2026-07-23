@@ -72,7 +72,7 @@ class VaultBrowserScreenTest {
     }
 
     @Test
-    fun pendingSyncAndRecoverableConflictCopyOfferAnExplicitRetry() {
+    fun completedRecoverableConflictCopyIsVisible() {
         var syncs = 0
         compose.setContent {
             VaultBrowserScreen(
@@ -83,10 +83,10 @@ class VaultBrowserScreenTest {
                 conflictCopyPath = null,
                 syncStatus = AndroidSyncStatus(
                     sourceKind = "onedrive",
-                    remoteState = "pending_sync",
-                    lastSyncAt = null,
+                    remoteState = "online",
+                    lastSyncAt = 123,
                     cachedAt = 123,
-                    lastError = "recoverable OneDrive conflict copy: onedrive:item-conflict",
+                    lastError = "local changes were saved to onedrive:Vault-conflict.kdbx",
                 ),
                 onEntrySelected = {},
                 onDraftChanged = {},
@@ -101,5 +101,33 @@ class VaultBrowserScreenTest {
         compose.onNodeWithTag("sync-conflict-copy").assertIsDisplayed()
         compose.onNodeWithTag("sync-now").performClick()
         assertEquals(1, syncs)
+    }
+
+    @Test
+    fun pendingConflictCopyPublicationOffersRetryWithoutClaimingCompletion() {
+        compose.setContent {
+            VaultBrowserScreen(
+                entries = emptyList(),
+                editor = null,
+                busy = false,
+                status = "OneDrive sync pending",
+                conflictCopyPath = null,
+                syncStatus = AndroidSyncStatus(
+                    sourceKind = "onedrive",
+                    remoteState = "pending_sync",
+                    lastSyncAt = null,
+                    cachedAt = 123,
+                    lastError = "conflict-copy publication remains pending: network unavailable",
+                ),
+                onEntrySelected = {},
+                onDraftChanged = {},
+                onSave = {},
+                onCloseEditor = {},
+                onLock = {},
+            )
+        }
+
+        compose.onNodeWithTag("sync-conflict-copy").assertDoesNotExist()
+        compose.onNodeWithText("Retry OneDrive sync").assertIsDisplayed()
     }
 }

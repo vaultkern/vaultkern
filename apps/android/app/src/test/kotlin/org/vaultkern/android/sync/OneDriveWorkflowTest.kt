@@ -1,6 +1,7 @@
 package org.vaultkern.android.sync
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -32,7 +33,6 @@ class OneDriveWorkflowTest {
                 "complete-login",
                 "list:root",
                 "add:item-vault",
-                "set:ref-1",
                 "preload",
             ),
             core.events,
@@ -66,7 +66,7 @@ class OneDriveWorkflowTest {
 
         assertEquals("Cloud Vault.kdbx", failure.selected.displayName)
         assertEquals(
-            listOf("list:root", "add:item-vault", "set:ref-1", "preload"),
+            listOf("list:root", "add:item-vault", "preload"),
             core.events,
         )
     }
@@ -82,6 +82,33 @@ class OneDriveWorkflowTest {
         assertTrue(status.conflictCopyCreated)
         assertEquals("sync:vault-1", core.events.single())
         assertTrue(status.toString().contains("lastError=[REDACTED]"))
+    }
+
+    @Test
+    fun pendingConflictCopyPublicationIsNotReportedAsAlreadyCreated() {
+        val status = AndroidSyncStatus(
+            sourceKind = "onedrive",
+            remoteState = "pending_sync",
+            lastSyncAt = null,
+            cachedAt = 123,
+            lastError = "conflict-copy publication remains pending: network unavailable",
+        )
+
+        assertFalse(status.conflictCopyCreated)
+        assertTrue(status.retryRecommended)
+    }
+
+    @Test
+    fun unknownOnlineDiagnosticDoesNotInventACompletedConflictCopy() {
+        val status = AndroidSyncStatus(
+            sourceKind = "onedrive",
+            remoteState = "online",
+            lastSyncAt = 123,
+            cachedAt = 123,
+            lastError = "recoverable OneDrive conflict copy: diagnostic from another layer",
+        )
+
+        assertFalse(status.conflictCopyCreated)
     }
 }
 
@@ -125,10 +152,6 @@ private class RecordingOneDriveGateway : OneDriveCoreGateway {
         )
     }
 
-    override fun setCurrent(vaultRefId: String) {
-        events += "set:$vaultRefId"
-    }
-
     override fun preloadCurrent() {
         events += "preload"
         if (failPreload) throw IllegalStateException("injected preload failure")
@@ -143,7 +166,7 @@ private class RecordingOneDriveGateway : OneDriveCoreGateway {
             "online",
             123,
             123,
-            "recoverable OneDrive conflict copy: onedrive:item-conflict",
+            "interrupted conflict-copy publication completed at onedrive:item-conflict",
         )
     }
 

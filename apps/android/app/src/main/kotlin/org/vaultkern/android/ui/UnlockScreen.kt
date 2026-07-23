@@ -175,21 +175,22 @@ fun VaultKernUnlockScreen(
                     Text("Complete OneDrive sign-in")
                 }
                 Text("Finish sign-in in the browser, then return and tap Complete.")
-            } else if (!state.oneDriveConnected) {
+            } else {
                 OutlinedButton(
                     onClick = onBeginOneDriveLogin,
                     enabled = !state.busy,
                     modifier = Modifier.fillMaxWidth().testTag("onedrive-begin-login"),
                 ) {
-                    Text("Connect OneDrive")
+                    Text(if (state.oneDriveConnected) "Reconnect OneDrive" else "Connect OneDrive")
                 }
-            } else {
-                OutlinedButton(
-                    onClick = onOneDriveRoot,
-                    enabled = !state.busy,
-                    modifier = Modifier.fillMaxWidth().testTag("onedrive-browse"),
-                ) {
-                    Text("Browse OneDrive")
+                if (state.oneDriveConnected) {
+                    OutlinedButton(
+                        onClick = onOneDriveRoot,
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth().testTag("onedrive-browse"),
+                    ) {
+                        Text("Browse OneDrive")
+                    }
                 }
             }
             if (state.oneDriveFolderId != null) {

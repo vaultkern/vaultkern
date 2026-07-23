@@ -57,7 +57,13 @@ data class AndroidSyncStatus(
     val lastError: String?,
 ) {
     val conflictCopyCreated: Boolean
-        get() = lastError?.contains("conflict", ignoreCase = true) == true
+        get() {
+            if (remoteState == "conflict_copy") return true
+            if (remoteState != "online") return false
+            val diagnostic = lastError?.lowercase(Locale.ROOT) ?: return false
+            return diagnostic.contains("local changes were saved to onedrive:") ||
+                diagnostic.contains("conflict-copy publication completed at onedrive:")
+        }
 
     val retryRecommended: Boolean
         get() = remoteState == "pending_sync" || remoteState == "cache"
@@ -73,7 +79,6 @@ internal interface OneDriveCoreGateway {
     fun completeLogin(): OneDriveAuthStatusDto
     fun listChildren(parentItemId: String?): List<OneDriveItemDto>
     fun addVault(driveId: String, itemId: String): VaultReferenceDto
-    fun setCurrent(vaultRefId: String)
     fun preloadCurrent()
     fun activeVaultId(): String?
     fun sync(vaultId: String): VaultSourceStatusDto
@@ -118,7 +123,6 @@ class OneDriveWorkflow internal constructor(
             "the selected OneDrive item is not a KDBX file"
         }
         val reference = core.addVault(item.driveId, item.itemId)
-        core.setCurrent(reference.vaultRefId)
         val selected = SelectedOneDriveVault(reference.vaultRefId, reference.displayName)
         try {
             core.preloadCurrent()
@@ -158,10 +162,6 @@ private class UniFfiOneDriveCoreGateway(
 
     override fun addVault(driveId: String, itemId: String): VaultReferenceDto =
         session.sources().use { it.addOneDriveVault(driveId, itemId) }
-
-    override fun setCurrent(vaultRefId: String) {
-        session.sources().use { it.setCurrentVault(vaultRefId) }
-    }
 
     override fun preloadCurrent() {
         session.sources().use { it.preloadCurrentVault() }

@@ -2,6 +2,7 @@ package org.vaultkern.android
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import java.util.concurrent.CancellationException
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -15,6 +16,7 @@ import org.vaultkern.android.security.UnlockKeySecurityLevel
 import org.vaultkern.android.settings.QuickUnlockSettingsApplier
 import org.vaultkern.android.settings.QuickUnlockSettingsApplyOutcome
 import org.vaultkern.android.sync.AndroidSyncStatus
+import org.vaultkern.android.sync.OneDriveAccount
 import org.vaultkern.android.sync.OneDriveBrowserItem
 import org.vaultkern.android.sync.OneDriveVaultPreloadException
 import org.vaultkern.android.ui.UnlockUiState
@@ -39,17 +41,21 @@ class UnlockViewModel(
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            val refreshed = runCatching {
-                graph.awaitScheduledReconciliation()
-                val unlocked = graph.session.sessionState().unlocked
-                StartupSnapshot(
-                    enrollment = graph.currentEnrollmentState(),
-                    security = graph.currentKeySecurityLevel(),
-                    unlocked = unlocked,
-                    entries = if (unlocked) graph.vaultWorkflow.browse() else emptyList(),
-                    syncStatus = graph.oneDriveWorkflow.status(),
-                    currentSelection = graph.vaultSelection.current(),
-                    oneDriveConnected = graph.oneDriveTokenAdapter.hasStoredToken(),
+            val refreshed = runCatchingUnlessCancelled {
+                loadAfterBestEffortReconciliation(
+                    reconcile = graph::awaitScheduledReconciliation,
+                    load = {
+                        val unlocked = graph.session.sessionState().unlocked
+                        StartupSnapshot(
+                            enrollment = graph.currentEnrollmentState(),
+                            security = graph.currentKeySecurityLevel(),
+                            unlocked = unlocked,
+                            entries = if (unlocked) graph.vaultWorkflow.browse() else emptyList(),
+                            syncStatus = graph.oneDriveWorkflow.status(),
+                            currentSelection = graph.vaultSelection.current(),
+                            oneDriveConnected = graph.oneDriveTokenAdapter.hasStoredToken(),
+                        )
+                    },
                 )
             }
             mutableState.update { current ->
@@ -57,7 +63,8 @@ class UnlockViewModel(
                     current
                 } else {
                     refreshed.fold(
-                        onSuccess = { snapshot ->
+                        onSuccess = { refreshedState ->
+                            val snapshot = refreshedState.value
                             current.withRestoredVaultSelection(
                                 snapshot.currentSelection,
                                 snapshot.syncStatus,
@@ -67,11 +74,14 @@ class UnlockViewModel(
                                 vaultUnlocked = snapshot.unlocked,
                                 entries = snapshot.entries,
                                 oneDriveConnected = snapshot.oneDriveConnected,
+                                status = refreshedState.reconciliationFailure?.let { failure ->
+                                    "Platform reconciliation needs retry ($failure)"
+                                } ?: current.status,
                             )
                         },
                         onFailure = {
                             current.copy(
-                                status = "Quick-unlock reconciliation needs retry " +
+                                status = "Startup state restore failed " +
                                     "(${it.javaClass.simpleName})",
                             )
                         },
@@ -89,11 +99,11 @@ class UnlockViewModel(
         if (uri.isBlank() || mutableState.value.busy) return
         mutableState.update { it.copy(busy = true, status = "Opening selected local vault") }
         viewModelScope.launch(Dispatchers.IO) {
-            val selected = runCatching { graph.selectLocalDocument(uri) }
+            val selected = runCatchingUnlessCancelled { graph.selectLocalDocument(uri) }
             mutableState.update { current ->
                 selected.fold(
                     onSuccess = {
-                        current.withSelectedLocalVault(it.privatePath, it.displayName)
+                        current.withSelectedLocalVault(it.displayName)
                             .withCurrentVaultUnlockState(
                                 graph.currentEnrollmentState(),
                                 graph.currentKeySecurityLevel(),
@@ -294,7 +304,7 @@ class UnlockViewModel(
         if (mutableState.value.busy) return
         mutableState.update { it.copy(busy = true, status = "Opening OneDrive sign-in") }
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching { graph.oneDriveWorkflow.beginLogin() }
+            val result = runCatchingUnlessCancelled { graph.oneDriveWorkflow.beginLogin() }
             val connected = graph.oneDriveTokenAdapter.hasStoredToken()
             mutableState.update { current ->
                 result.fold(
@@ -322,22 +332,30 @@ class UnlockViewModel(
         if (snapshot.busy || !snapshot.oneDriveAuthPending) return
         mutableState.update { it.copy(busy = true, status = "Completing OneDrive sign-in") }
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                val account = graph.oneDriveWorkflow.completeLogin()
-                account to graph.oneDriveWorkflow.browse(null)
+            val result = runCatchingUnlessCancelled {
+                completeOneDriveLoginAndLoadItems(
+                    complete = graph.oneDriveWorkflow::completeLogin,
+                    loadItems = { graph.oneDriveWorkflow.browse(null) },
+                )
             }
             val connected = graph.oneDriveTokenAdapter.hasStoredToken()
             mutableState.update { current ->
                 result.fold(
-                    onSuccess = { (account, items) ->
+                    onSuccess = { completed ->
                         current.copy(
                             busy = false,
                             oneDriveAuthPending = false,
-                            oneDriveAccountLabel = account.accountLabel,
-                            oneDriveItems = items,
+                            oneDriveAccountLabel = completed.account.accountLabel,
+                            oneDriveItems = completed.items.getOrDefault(emptyList()),
                             oneDriveFolderId = null,
-                            status = "OneDrive connected; choose a KDBX vault",
-                        ).reconcileOneDriveTokenPresence(connected)
+                            status = completed.items.fold(
+                                onSuccess = { "OneDrive connected; choose a KDBX vault" },
+                                onFailure = {
+                                    "OneDrive connected; file listing needs retry " +
+                                        "(${it.javaClass.simpleName})"
+                                },
+                            ),
+                        ).reconcileOneDriveTokenPresence(true)
                     },
                     onFailure = {
                         current.copy(
@@ -361,7 +379,7 @@ class UnlockViewModel(
         }
         mutableState.update { it.copy(busy = true, status = "Selecting OneDrive vault") }
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching { graph.oneDriveWorkflow.select(item) }
+            val result = runCatchingUnlessCancelled { graph.oneDriveWorkflow.select(item) }
             val syncStatus = runCatching { graph.oneDriveWorkflow.status() }.getOrNull()
             val connected = graph.oneDriveTokenAdapter.hasStoredToken()
             mutableState.update { current ->
@@ -408,19 +426,28 @@ class UnlockViewModel(
         if (snapshot.busy || !snapshot.vaultUnlocked || snapshot.editor != null) return
         mutableState.update { it.copy(busy = true, status = "Synchronizing OneDrive") }
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching {
-                val status = graph.oneDriveWorkflow.sync()
-                status to graph.vaultWorkflow.browse()
+            val result = runCatchingUnlessCancelled {
+                syncThenRefreshProjection(
+                    sync = graph.oneDriveWorkflow::sync,
+                    refresh = graph.vaultWorkflow::browse,
+                )
             }
             val connected = graph.oneDriveTokenAdapter.hasStoredToken()
             mutableState.update { current ->
                 result.fold(
-                    onSuccess = { (status, entries) ->
+                    onSuccess = { synced ->
+                        val status = synced.status
                         current.copy(
                             busy = false,
-                            status = syncStatusLabel(status),
+                            status = synced.projection.fold(
+                                onSuccess = { syncStatusLabel(status) },
+                                onFailure = {
+                                    "${syncStatusLabel(status)}; browse failed " +
+                                        "(${it.javaClass.simpleName})"
+                                },
+                            ),
                             syncStatus = status,
-                            entries = entries,
+                            entries = synced.projection.getOrDefault(current.entries),
                             conflictCopyPath = null,
                         ).reconcileOneDriveTokenPresence(connected)
                     },
@@ -442,7 +469,9 @@ class UnlockViewModel(
         if (mutableState.value.busy) return
         mutableState.update { it.copy(busy = true, status = "Loading OneDrive files") }
         viewModelScope.launch(Dispatchers.IO) {
-            val result = runCatching { graph.oneDriveWorkflow.browse(parentItemId) }
+            val result = runCatchingUnlessCancelled {
+                graph.oneDriveWorkflow.browse(parentItemId)
+            }
             val connected = graph.oneDriveTokenAdapter.hasStoredToken()
             mutableState.update { current ->
                 result.fold(
@@ -506,7 +535,7 @@ class UnlockViewModel(
 
     private fun unlockedStatus(): String =
         graph.unlockCoordinator.lastReconciliationFailure()?.let {
-            "Vault unlocked; quick-unlock reconciliation needs retry ($it)"
+            "Vault unlocked; platform reconciliation needs retry ($it)"
         } ?: "Vault unlocked"
 
     private fun quickUnlockStatus(outcome: UnlockAttemptOutcome): String = when (outcome) {
@@ -548,10 +577,9 @@ internal fun UnlockUiState.reconcileOneDriveTokenPresence(connected: Boolean): U
     }
 
 internal fun UnlockUiState.withSelectedLocalVault(
-    privatePath: String,
     displayName: String,
 ): UnlockUiState = copy(
-    vaultPath = privatePath,
+    vaultPath = "",
     selectedVaultName = displayName,
     currentVaultSelected = true,
     oneDriveVaultSelected = false,
@@ -618,3 +646,67 @@ private data class StartupSnapshot(
     val currentSelection: CurrentVaultSelection?,
     val oneDriveConnected: Boolean,
 )
+
+internal data class BestEffortReconciliationResult<T>(
+    val value: T,
+    val reconciliationFailure: String?,
+)
+
+internal inline fun <T> loadAfterBestEffortReconciliation(
+    reconcile: () -> Unit,
+    load: () -> T,
+): BestEffortReconciliationResult<T> {
+    val reconciliationFailure = try {
+        reconcile()
+        null
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        error.javaClass.simpleName
+    }
+    return BestEffortReconciliationResult(load(), reconciliationFailure)
+}
+
+internal inline fun <T> runCatchingUnlessCancelled(block: () -> T): Result<T> = try {
+    Result.success(block())
+} catch (error: CancellationException) {
+    throw error
+} catch (error: Exception) {
+    Result.failure(error)
+}
+
+internal data class SyncProjectionResult<T>(
+    val status: AndroidSyncStatus,
+    val projection: Result<T>,
+)
+
+internal inline fun <T> syncThenRefreshProjection(
+    sync: () -> AndroidSyncStatus,
+    refresh: () -> T,
+): SyncProjectionResult<T> {
+    val status = sync()
+    val projection = try {
+        Result.success(refresh())
+    } catch (error: CancellationException) {
+        throw error
+    } catch (error: Exception) {
+        Result.failure(error)
+    }
+    return SyncProjectionResult(status, projection)
+}
+
+internal data class OneDriveLoginProjection(
+    val account: OneDriveAccount,
+    val items: Result<List<OneDriveBrowserItem>>,
+)
+
+internal inline fun completeOneDriveLoginAndLoadItems(
+    complete: () -> OneDriveAccount,
+    loadItems: () -> List<OneDriveBrowserItem>,
+): OneDriveLoginProjection {
+    val account = complete()
+    return OneDriveLoginProjection(
+        account = account,
+        items = runCatchingUnlessCancelled(loadItems),
+    )
+}
