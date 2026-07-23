@@ -1634,7 +1634,44 @@ impl Runtime {
         loaded.requires_source_migration = requires_source_migration;
         loaded.name = name;
         self.advance_session_generation();
+        self.retry_generic_pending_publication_after_unlock(vault_id);
         Ok(())
+    }
+
+    fn retry_generic_pending_publication_after_unlock(&mut self, vault_id: &str) {
+        let pending = self.vault_session.find_loaded(vault_id).and_then(|loaded| {
+            loaded
+                .source_status
+                .as_ref()
+                .is_some_and(|status| status.remote_state == "pending_sync")
+                .then(|| {
+                    (
+                        remote_cache_key_for_source(&loaded.source),
+                        loaded.baseline_fingerprint.clone(),
+                    )
+                })
+        });
+        let Some((Some(cache_key), pending_fingerprint)) = pending else {
+            return;
+        };
+        if self
+            .remote_cache
+            .generic_pending_kind(&cache_key, &pending_fingerprint)
+            .is_err()
+        {
+            return;
+        }
+        if let Err(error) = self.retry_vault_source_sync(vault_id)
+            && let Some(status) = self
+                .vault_session
+                .find_loaded_mut(vault_id)
+                .and_then(|loaded| loaded.source_status.as_mut())
+        {
+            status.last_error = Some(format!(
+                "automatic Publication retry remains pending: {}",
+                format_error_chain(&error)
+            ));
+        }
     }
 
     pub fn unlock_current_vault_with_password(&mut self, password: &str) -> Result<()> {
@@ -18439,6 +18476,20 @@ mod tests {
                 ..
             })
         ));
+        let pending = runtime
+            .remote_cache
+            .read(&RemoteCacheKey::new("onedrive", "drive-1:item-1"))
+            .unwrap()
+            .expect("durable pending Working Copy");
+        assert!(pending.pending_sync);
+        assert!(KeepassCore::new().inspect_database(&pending.bytes).is_ok());
+        assert!(
+            !pending
+                .bytes
+                .windows(b"durable pending edit".len())
+                .any(|window| window == b"durable pending edit"),
+            "durable pending material must remain encrypted KDBX bytes"
+        );
         assert!(
             runtime
                 .vault_session

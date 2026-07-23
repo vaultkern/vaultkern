@@ -12,6 +12,7 @@ pub struct ProviderSnapshot {
 pub struct RuntimeProtocolHarness {
     runtime: Runtime,
     protocol_session: RuntimeProtocolSession,
+    remote_cache_dir: Option<tempfile::TempDir>,
 }
 
 impl RuntimeProtocolHarness {
@@ -19,6 +20,7 @@ impl RuntimeProtocolHarness {
         Self {
             runtime: Runtime::for_tests(),
             protocol_session: RuntimeProtocolSession::resident_app(),
+            remote_cache_dir: None,
         }
     }
 
@@ -31,15 +33,19 @@ impl RuntimeProtocolHarness {
     }
 
     fn with_protocol_session(bytes: Vec<u8>, protocol_session: RuntimeProtocolSession) -> Self {
+        let remote_cache_dir = tempfile::tempdir().expect("create architecture cache directory");
         Self {
-            runtime: Runtime::for_tests_with_onedrive_item(
+            runtime: Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+                1_700_000_000,
                 DRIVE_ID,
                 ITEM_ID,
                 "Architecture Acceptance.kdbx",
                 "acceptance@example.com",
                 bytes,
+                remote_cache_dir.path(),
             ),
             protocol_session,
+            remote_cache_dir: Some(remote_cache_dir),
         }
     }
 
@@ -76,6 +82,32 @@ impl RuntimeProtocolHarness {
                 .test_onedrive_item_revision(DRIVE_ID, ITEM_ID)
                 .expect("read in-memory Provider revision"),
         }
+    }
+
+    pub fn provider_write_count(&self) -> usize {
+        self.runtime.test_onedrive_access_counts().writes
+    }
+
+    pub fn restart_resident(&mut self) {
+        let snapshot = self.provider_snapshot();
+        let remote_cache_dir = self
+            .remote_cache_dir
+            .as_ref()
+            .expect("restart requires an in-memory Provider harness");
+        let mut runtime = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+            1_700_000_001,
+            DRIVE_ID,
+            ITEM_ID,
+            "Architecture Acceptance.kdbx",
+            "acceptance@example.com",
+            snapshot.bytes,
+            remote_cache_dir.path(),
+        );
+        runtime
+            .set_test_onedrive_item_revision(DRIVE_ID, ITEM_ID, snapshot.revision)
+            .expect("restore in-memory Provider revision");
+        self.runtime = runtime;
+        self.protocol_session = RuntimeProtocolSession::resident_app();
     }
 
     pub fn reject_next_publication_as_stale(&mut self, remote_head: Vec<u8>) {

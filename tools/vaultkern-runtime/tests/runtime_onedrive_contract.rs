@@ -874,11 +874,6 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
         })
         .unwrap();
 
-    runtime.lock_session();
-    runtime
-        .unlock_current_vault_with_password("demo-password")
-        .unwrap();
-
     let mut remote_changed = core.load_database(&initial_bytes, &key()).unwrap().vault;
     create_entry(&core, &mut remote_changed, "Remote", "bob", 20);
     let remote_changed_bytes = core
@@ -892,18 +887,25 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
         remote_changed_bytes,
     );
 
-    runtime
+    let retry = runtime
         .handle(RuntimeCommand::RetryVaultSourceSync {
             vault_id: vault_id.clone(),
         })
         .unwrap();
+    assert!(matches!(
+        retry,
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
 
     let uploaded = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
     let database = core.load_database(&uploaded, &key()).unwrap();
     let entries = core.project_vault(&database.vault).root.entries;
-    assert!(entries.iter().any(|entry| entry.title == "Pending Local"));
+    assert!(
+        entries.iter().any(|entry| entry.title == "Pending Local"),
+        "uploaded entries: {entries:?}"
+    );
     assert!(entries.iter().any(|entry| entry.title == "Remote"));
 }
 

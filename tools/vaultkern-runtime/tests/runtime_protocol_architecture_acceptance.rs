@@ -293,6 +293,184 @@ fn resident_entry_commit_can_finish_while_publication_is_pending() {
 }
 
 #[test]
+fn pending_publication_survives_lock_restart_later_commit_and_retry() {
+    let core = KeepassCore::new();
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(empty_vault_bytes());
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+    let root_id = match harness.command(RuntimeCommand::ListGroups {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::GroupTree(groups) => groups.root.id,
+        other => panic!("expected group tree, got {other:?}"),
+    };
+    let remote_before = harness.provider_snapshot();
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+
+    let entry_id = match harness.command(RuntimeCommand::CreateEntry {
+        vault_id: vault_id.clone(),
+        parent_group_id: root_id,
+        entry_id: None,
+        title: "Offline account".into(),
+        username: "alice".into(),
+        password: "first-password".into(),
+        url: "https://offline.example".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    }) {
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.commit, CommitStatusDto::Committed);
+            assert_eq!(result.publication.status, SaveVaultStatusDto::SavedToCache);
+            result.entry.expect("committed offline entry").id
+        }
+        other => panic!("expected pending entry mutation, got {other:?}"),
+    };
+    assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::LockSession),
+        RuntimeResponse::SessionState(state) if !state.unlocked
+    ));
+    let writes_before_unlock = harness.provider_write_count();
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+            password: "demo-password".into(),
+        }),
+        RuntimeResponse::SessionState(state)
+            if state.unlocked
+                && state
+                    .source_status
+                    .as_ref()
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+    ));
+    assert_eq!(
+        harness.provider_write_count(),
+        writes_before_unlock + 1,
+        "unlock automatically retries Publication without replaying the mutation"
+    );
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetEntryDetail {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        RuntimeResponse::EntryDetail(detail)
+            if detail.title == "Offline account" && detail.password == "first-password"
+    ));
+
+    harness.command(RuntimeCommand::LockSession);
+    harness.restart_resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            assert!(state.unlocked);
+            assert!(
+                state
+                    .source_status
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+            );
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted session, got {other:?}"),
+    };
+    assert_eq!(
+        harness.provider_write_count(),
+        1,
+        "restart recovery automatically retries the durable pending Publication"
+    );
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetEntryDetail {
+            vault_id: restarted_vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        RuntimeResponse::EntryDetail(detail)
+            if detail.title == "Offline account" && detail.password == "first-password"
+    ));
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: restarted_vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Offline account updated".into(),
+            username: "alice".into(),
+            password: "second-password".into(),
+            url: "https://offline.example".into(),
+            notes: "later commit".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::SavedToCache
+    ));
+    assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: restarted_vault_id.clone(),
+        }),
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+    let published = harness.provider_snapshot();
+    assert!(published.revision > remote_before.revision);
+    let published_vault = core
+        .load_database(&published.bytes, &key())
+        .expect("decode recovered Publication")
+        .vault;
+    let published_entry = core
+        .project_entry_detail(&published_vault, &entry_id)
+        .expect("published recovered entry");
+    assert_eq!(published_entry.title, "Offline account updated");
+    assert_eq!(published_entry.password, "second-password");
+    assert_eq!(published_entry.notes, "later commit");
+
+    let writes_after_confirmation = harness.provider_write_count();
+    assert!(matches!(
+        harness.command(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: restarted_vault_id,
+        }),
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+    assert_eq!(
+        harness.provider_write_count(),
+        writes_after_confirmation,
+        "confirmed Publication clears the durable pending write"
+    );
+}
+
+#[test]
 fn harness_keeps_browser_commands_behind_the_protocol_session_boundary() {
     let mut harness = RuntimeProtocolHarness::browser_with_in_memory_vault(empty_vault_bytes());
     harness.command(RuntimeCommand::Handshake {
