@@ -327,6 +327,13 @@ typedef void (*UniffiCallbackInterfaceUnlockBlobAdapterMethod8)(uint64_t, RustBu
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_UNLOCK_BLOB_ADAPTER_METHOD9
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_UNLOCK_BLOB_ADAPTER_METHOD9
+typedef void (*UniffiCallbackInterfaceUnlockBlobAdapterMethod9)(uint64_t, uint64_t* _Nonnull,
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_ONE_DRIVE_TOKEN_ADAPTER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_ONE_DRIVE_TOKEN_ADAPTER
 typedef struct UniffiVTableCallbackInterfaceOneDriveTokenAdapter {
@@ -352,6 +359,7 @@ typedef struct UniffiVTableCallbackInterfaceUnlockBlobAdapter {
     UniffiCallbackInterfaceUnlockBlobAdapterMethod6 _Nonnull loadBlob;
     UniffiCallbackInterfaceUnlockBlobAdapterMethod7 _Nonnull containsBlob;
     UniffiCallbackInterfaceUnlockBlobAdapterMethod8 _Nonnull deleteBlob;
+    UniffiCallbackInterfaceUnlockBlobAdapterMethod9 _Nonnull purgeQuickUnlockRecords;
 } UniffiVTableCallbackInterfaceUnlockBlobAdapter;
 
 #endif
@@ -443,6 +451,11 @@ int8_t uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_contains_blob(uint64_
 #ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_UNLOCKBLOBADAPTER_DELETE_BLOB
 #define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_UNLOCKBLOBADAPTER_DELETE_BLOB
 void uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_delete_blob(uint64_t ptr, RustBuffer key, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_UNLOCKBLOBADAPTER_PURGE_QUICK_UNLOCK_RECORDS
+#define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_UNLOCKBLOBADAPTER_PURGE_QUICK_UNLOCK_RECORDS
+uint64_t uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_purge_quick_unlock_records(uint64_t ptr, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_CLONE_VAULTPASSKEYOPERATION
@@ -643,6 +656,11 @@ void uniffi_vaultkern_uniffi_fn_free_vaultunlock(uint64_t handle, RustCallStatus
 #ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_VAULTUNLOCK_ENROLL
 #define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_VAULTUNLOCK_ENROLL
 RustBuffer uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(uint64_t ptr, RustBuffer password, RustBuffer key_file_path, int8_t kdf_confirmed, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_VAULTUNLOCK_RECONCILE
+#define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_VAULTUNLOCK_RECONCILE
+RustBuffer uniffi_vaultkern_uniffi_fn_method_vaultunlock_reconcile(uint64_t ptr, int8_t enabled, RustBuffer password, RustBuffer key_file_path, int8_t kdf_confirmed, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_FN_METHOD_VAULTUNLOCK_REVOKE
@@ -997,6 +1015,12 @@ uint16_t uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob(v
 
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_UNLOCKBLOBADAPTER_PURGE_QUICK_UNLOCK_RECORDS
+#define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_UNLOCKBLOBADAPTER_PURGE_QUICK_UNLOCK_RECORDS
+uint16_t uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_purge_quick_unlock_records(void
+
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_VAULTPASSKEYOPERATION_ASSERT_PASSKEY
 #define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_VAULTPASSKEYOPERATION_ASSERT_PASSKEY
 uint16_t uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey(void
@@ -1168,6 +1192,12 @@ uint16_t uniffi_vaultkern_uniffi_checksum_method_vaultsync_trigger(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_VAULTUNLOCK_ENROLL
 #define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_VAULTUNLOCK_ENROLL
 uint16_t uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll(void
+
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_VAULTUNLOCK_RECONCILE
+#define UNIFFI_FFIDEF_UNIFFI_VAULTKERN_UNIFFI_CHECKSUM_METHOD_VAULTUNLOCK_RECONCILE
+uint16_t uniffi_vaultkern_uniffi_checksum_method_vaultunlock_reconcile(void
 
 );
 #endif

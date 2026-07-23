@@ -1,0 +1,87 @@
+name: VaultKern
+options:
+  bundleIdPrefix: com.vaultkern
+  deploymentTarget:
+    macOS: "14.0"
+  xcodeVersion: "27.0"
+settings:
+  base:
+    CLANG_ENABLE_MODULES: YES
+    DEVELOPMENT_TEAM: 4HBAZ2M969
+    ENABLE_HARDENED_RUNTIME: YES
+    GCC_TREAT_WARNINGS_AS_ERRORS: YES
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    SWIFT_TREAT_WARNINGS_AS_ERRORS: YES
+    SWIFT_VERSION: "6.0"
+targets:
+  VaultKern:
+    type: application
+    platform: macOS
+    sources:
+      - path: Sources
+      - path: ../../crates/vaultkern-uniffi/bindings/swift/SensitiveTypes.swift
+      - path: ../../crates/vaultkern-uniffi/bindings/swift/VaultKernCore.swift
+      - path: ../../crates/vaultkern-uniffi/bindings/swift/MacOSUnlockBlobAdapter.swift
+    preBuildScripts:
+      - name: Build Rust UniFFI library
+        script: "$SRCROOT/Scripts/build-rust.zsh"
+        basedOnDependencyAnalysis: false
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: Config/VaultKern.entitlements
+        CODE_SIGN_STYLE: Automatic
+        CURRENT_PROJECT_VERSION: 1
+        ENABLE_APP_SANDBOX: YES
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Config/Info.plist
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(SRCROOT)/../../target/xcode/$(CONFIGURATION)"
+        MARKETING_VERSION: 0.1.0
+        OTHER_LDFLAGS:
+          - "$(inherited)"
+          - -lvaultkern_uniffi
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - -Xcc
+          - "-fmodule-map-file=$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift/VaultKernCoreFFI.modulemap"
+          - -Xcc
+          - "-I$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift"
+        PRODUCT_BUNDLE_IDENTIFIER: com.vaultkern.macos
+        PRODUCT_NAME: VaultKern
+    entitlements:
+      path: Config/VaultKern.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.files.user-selected.read-write: true
+        keychain-access-groups:
+          - "$(AppIdentifierPrefix)com.vaultkern.shared"
+  VaultKernTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: Tests
+    dependencies:
+      - target: VaultKern
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        GENERATE_INFOPLIST_FILE: YES
+        OTHER_SWIFT_FLAGS:
+          - "$(inherited)"
+          - -Xcc
+          - "-fmodule-map-file=$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift/VaultKernCoreFFI.modulemap"
+          - -Xcc
+          - "-I$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift"
+        PRODUCT_BUNDLE_IDENTIFIER: com.vaultkern.macos.tests
+schemes:
+  VaultKern:
+    build:
+      targets:
+        VaultKern: all
+        VaultKernTests: [test]
+    test:
+      targets:
+        - VaultKernTests
+      gatherCoverageData: true

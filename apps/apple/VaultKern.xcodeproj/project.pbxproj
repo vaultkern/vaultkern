@@ -1,0 +1,581 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		0557BDA28EDFD452C14A32A8 /* VaultKernApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9CA8B8476DB85E1571586DCB /* VaultKernApp.swift */; };
+		0BCD385FEC4E61299B0785AD /* VaultKernCore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 68222B147A01AEF4BC682A83 /* VaultKernCore.swift */; };
+		31B8B6DBE6C3C643C1F22300 /* UnavailableOneDriveTokenAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6902299F02982D67AC40102A /* UnavailableOneDriveTokenAdapter.swift */; };
+		3FD4A44F0067BDD3BAB7BABC /* SaveProgress.swift in Sources */ = {isa = PBXBuildFile; fileRef = BB2448BFFF9B54E48104F2AF /* SaveProgress.swift */; };
+		418EEBC1349219CC1B3B4991 /* VaultSelectionPanelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0F3170C0CCF47A712C413ACB /* VaultSelectionPanelTests.swift */; };
+		4A92481AFDAC8A872D560F69 /* MacOSUnlockBlobAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1B51FC3D050A9B80A1845D11 /* MacOSUnlockBlobAdapter.swift */; };
+		4EA4B8717155CD69EDD5BC30 /* EntryDraftValidationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6581A606B5B3505C1F5BC743 /* EntryDraftValidationTests.swift */; };
+		57636281B97E2286DDB14B35 /* LocalVaultRoundTripTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CF749586DFBCD2BCEB1ADA98 /* LocalVaultRoundTripTests.swift */; };
+		59BD457E5D411FA572952A92 /* EntryDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 16D559E19685258D0CCF2655 /* EntryDraft.swift */; };
+		616569C04001A7B8F609BC85 /* SensitiveOwnershipTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 752957DEEC88EDA24B758F88 /* SensitiveOwnershipTests.swift */; };
+		669EDB7DA144495B9B79B271 /* VaultAppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 05C3549FDD55455ED0F831C4 /* VaultAppModelTests.swift */; };
+		6C44AB0AEAD75AA91C312A99 /* SaveProgressTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C271096634FD05F1B349D3F6 /* SaveProgressTests.swift */; };
+		6DE6934C1373CEA29F57DAE3 /* VaultSelectionPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A70D4A9611FB0A34E3583A44 /* VaultSelectionPanel.swift */; };
+		728DB8B3FBF4670D0C85E66C /* AppConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = A647E3FDE573464317E7EDD5 /* AppConfiguration.swift */; };
+		75F1169EBB493795417A3C39 /* SecurityScopedAccess.swift in Sources */ = {isa = PBXBuildFile; fileRef = D46B881942400EDD573CCAEE /* SecurityScopedAccess.swift */; };
+		77D53D5B800D36335BACBDDA /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4F64F541D01D1C588C2B912 /* ContentView.swift */; };
+		AEDDEEE2FD2343B766C3C601 /* SensitiveTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3A7319B5960C8F2BB78328A2 /* SensitiveTypes.swift */; };
+		BFAB5B7846C3AD7BB9CCBADD /* VaultRuntimeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5743B486285B6423B798FAED /* VaultRuntimeClient.swift */; };
+		CF5AAC47F1C22E7DF63B13ED /* VaultAppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1D10B7BD139158365B2C2DA8 /* VaultAppModel.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		36FAE988C69DA66A3C21223A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = BCA93D209C540C38CE0D126D /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 86F713C78EDA26D98C0E16D6;
+			remoteInfo = VaultKern;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		05C3549FDD55455ED0F831C4 /* VaultAppModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultAppModelTests.swift; sourceTree = "<group>"; };
+		0F3170C0CCF47A712C413ACB /* VaultSelectionPanelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultSelectionPanelTests.swift; sourceTree = "<group>"; };
+		16D559E19685258D0CCF2655 /* EntryDraft.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryDraft.swift; sourceTree = "<group>"; };
+		1B51FC3D050A9B80A1845D11 /* MacOSUnlockBlobAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacOSUnlockBlobAdapter.swift; sourceTree = "<group>"; };
+		1D10B7BD139158365B2C2DA8 /* VaultAppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultAppModel.swift; sourceTree = "<group>"; };
+		3A7319B5960C8F2BB78328A2 /* SensitiveTypes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveTypes.swift; sourceTree = "<group>"; };
+		5743B486285B6423B798FAED /* VaultRuntimeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultRuntimeClient.swift; sourceTree = "<group>"; };
+		6581A606B5B3505C1F5BC743 /* EntryDraftValidationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EntryDraftValidationTests.swift; sourceTree = "<group>"; };
+		68222B147A01AEF4BC682A83 /* VaultKernCore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultKernCore.swift; sourceTree = "<group>"; };
+		6902299F02982D67AC40102A /* UnavailableOneDriveTokenAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UnavailableOneDriveTokenAdapter.swift; sourceTree = "<group>"; };
+		752957DEEC88EDA24B758F88 /* SensitiveOwnershipTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SensitiveOwnershipTests.swift; sourceTree = "<group>"; };
+		9CA8B8476DB85E1571586DCB /* VaultKernApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultKernApp.swift; sourceTree = "<group>"; };
+		A647E3FDE573464317E7EDD5 /* AppConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppConfiguration.swift; sourceTree = "<group>"; };
+		A70D4A9611FB0A34E3583A44 /* VaultSelectionPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VaultSelectionPanel.swift; sourceTree = "<group>"; };
+		B03FE84386372C67B2ED5006 /* VaultKern.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = VaultKern.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B4F64F541D01D1C588C2B912 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
+		BB2448BFFF9B54E48104F2AF /* SaveProgress.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveProgress.swift; sourceTree = "<group>"; };
+		C271096634FD05F1B349D3F6 /* SaveProgressTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SaveProgressTests.swift; sourceTree = "<group>"; };
+		CF749586DFBCD2BCEB1ADA98 /* LocalVaultRoundTripTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LocalVaultRoundTripTests.swift; sourceTree = "<group>"; };
+		D44F98A55E9C0FF7912F8FA5 /* VaultKernTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VaultKernTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		D46B881942400EDD573CCAEE /* SecurityScopedAccess.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecurityScopedAccess.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		14EF2E4EACAE0965FD49204E /* Platform */ = {
+			isa = PBXGroup;
+			children = (
+				A647E3FDE573464317E7EDD5 /* AppConfiguration.swift */,
+				D46B881942400EDD573CCAEE /* SecurityScopedAccess.swift */,
+				6902299F02982D67AC40102A /* UnavailableOneDriveTokenAdapter.swift */,
+				A70D4A9611FB0A34E3583A44 /* VaultSelectionPanel.swift */,
+			);
+			path = Platform;
+			sourceTree = "<group>";
+		};
+		1623C2876D48495EEFF3422A /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B03FE84386372C67B2ED5006 /* VaultKern.app */,
+				D44F98A55E9C0FF7912F8FA5 /* VaultKernTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		3015A5C08F5D559A0E1356BC /* Model */ = {
+			isa = PBXGroup;
+			children = (
+				16D559E19685258D0CCF2655 /* EntryDraft.swift */,
+				BB2448BFFF9B54E48104F2AF /* SaveProgress.swift */,
+				5743B486285B6423B798FAED /* VaultRuntimeClient.swift */,
+			);
+			path = Model;
+			sourceTree = "<group>";
+		};
+		4EE54EB813FF03FF98A2E807 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				6581A606B5B3505C1F5BC743 /* EntryDraftValidationTests.swift */,
+				CF749586DFBCD2BCEB1ADA98 /* LocalVaultRoundTripTests.swift */,
+				C271096634FD05F1B349D3F6 /* SaveProgressTests.swift */,
+				752957DEEC88EDA24B758F88 /* SensitiveOwnershipTests.swift */,
+				05C3549FDD55455ED0F831C4 /* VaultAppModelTests.swift */,
+				0F3170C0CCF47A712C413ACB /* VaultSelectionPanelTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		611DAE4FDD7C6D0D445419A2 = {
+			isa = PBXGroup;
+			children = (
+				DAE0BB58715F56B013361932 /* Sources */,
+				C7B88C59C9FE03F71428078E /* swift */,
+				4EE54EB813FF03FF98A2E807 /* Tests */,
+				1623C2876D48495EEFF3422A /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		63886AD4E961B33A6DEB01BE /* App */ = {
+			isa = PBXGroup;
+			children = (
+				B4F64F541D01D1C588C2B912 /* ContentView.swift */,
+				1D10B7BD139158365B2C2DA8 /* VaultAppModel.swift */,
+				9CA8B8476DB85E1571586DCB /* VaultKernApp.swift */,
+			);
+			path = App;
+			sourceTree = "<group>";
+		};
+		C7B88C59C9FE03F71428078E /* swift */ = {
+			isa = PBXGroup;
+			children = (
+				1B51FC3D050A9B80A1845D11 /* MacOSUnlockBlobAdapter.swift */,
+				3A7319B5960C8F2BB78328A2 /* SensitiveTypes.swift */,
+				68222B147A01AEF4BC682A83 /* VaultKernCore.swift */,
+			);
+			name = swift;
+			path = "../../crates/vaultkern-uniffi/bindings/swift";
+			sourceTree = "<group>";
+		};
+		DAE0BB58715F56B013361932 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				63886AD4E961B33A6DEB01BE /* App */,
+				3015A5C08F5D559A0E1356BC /* Model */,
+				14EF2E4EACAE0965FD49204E /* Platform */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		86F713C78EDA26D98C0E16D6 /* VaultKern */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = EDA82E893E67CB58FF069E44 /* Build configuration list for PBXNativeTarget "VaultKern" */;
+			buildPhases = (
+				F927E4434040D65E5C83BA28 /* Build Rust UniFFI library */,
+				AE43F9D5340B295AB4ADFFFC /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VaultKern;
+			packageProductDependencies = (
+			);
+			productName = VaultKern;
+			productReference = B03FE84386372C67B2ED5006 /* VaultKern.app */;
+			productType = "com.apple.product-type.application";
+		};
+		C63502F67BD00F58E19AE062 /* VaultKernTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 370243CEA15DE72796C03D4E /* Build configuration list for PBXNativeTarget "VaultKernTests" */;
+			buildPhases = (
+				184CE1A1C9D460A4C2B96288 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				6C87F5D2F4F9740AA8CCE88D /* PBXTargetDependency */,
+			);
+			name = VaultKernTests;
+			packageProductDependencies = (
+			);
+			productName = VaultKernTests;
+			productReference = D44F98A55E9C0FF7912F8FA5 /* VaultKernTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		BCA93D209C540C38CE0D126D /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					86F713C78EDA26D98C0E16D6 = {
+						DevelopmentTeam = 4HBAZ2M969;
+						ProvisioningStyle = Automatic;
+					};
+					C63502F67BD00F58E19AE062 = {
+						DevelopmentTeam = 4HBAZ2M969;
+						ProvisioningStyle = Automatic;
+					};
+				};
+			};
+			buildConfigurationList = 1EB43437365920191AB3F220 /* Build configuration list for PBXProject "VaultKern" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = 611DAE4FDD7C6D0D445419A2;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 1623C2876D48495EEFF3422A /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				86F713C78EDA26D98C0E16D6 /* VaultKern */,
+				C63502F67BD00F58E19AE062 /* VaultKernTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		F927E4434040D65E5C83BA28 /* Build Rust UniFFI library */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Build Rust UniFFI library";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "$SRCROOT/Scripts/build-rust.zsh";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		184CE1A1C9D460A4C2B96288 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4EA4B8717155CD69EDD5BC30 /* EntryDraftValidationTests.swift in Sources */,
+				57636281B97E2286DDB14B35 /* LocalVaultRoundTripTests.swift in Sources */,
+				6C44AB0AEAD75AA91C312A99 /* SaveProgressTests.swift in Sources */,
+				616569C04001A7B8F609BC85 /* SensitiveOwnershipTests.swift in Sources */,
+				669EDB7DA144495B9B79B271 /* VaultAppModelTests.swift in Sources */,
+				418EEBC1349219CC1B3B4991 /* VaultSelectionPanelTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AE43F9D5340B295AB4ADFFFC /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				728DB8B3FBF4670D0C85E66C /* AppConfiguration.swift in Sources */,
+				77D53D5B800D36335BACBDDA /* ContentView.swift in Sources */,
+				59BD457E5D411FA572952A92 /* EntryDraft.swift in Sources */,
+				4A92481AFDAC8A872D560F69 /* MacOSUnlockBlobAdapter.swift in Sources */,
+				3FD4A44F0067BDD3BAB7BABC /* SaveProgress.swift in Sources */,
+				75F1169EBB493795417A3C39 /* SecurityScopedAccess.swift in Sources */,
+				AEDDEEE2FD2343B766C3C601 /* SensitiveTypes.swift in Sources */,
+				31B8B6DBE6C3C643C1F22300 /* UnavailableOneDriveTokenAdapter.swift in Sources */,
+				CF5AAC47F1C22E7DF63B13ED /* VaultAppModel.swift in Sources */,
+				0557BDA28EDFD452C14A32A8 /* VaultKernApp.swift in Sources */,
+				0BCD385FEC4E61299B0785AD /* VaultKernCore.swift in Sources */,
+				BFAB5B7846C3AD7BB9CCBADD /* VaultRuntimeClient.swift in Sources */,
+				6DE6934C1373CEA29F57DAE3 /* VaultSelectionPanel.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		6C87F5D2F4F9740AA8CCE88D /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 86F713C78EDA26D98C0E16D6 /* VaultKern */;
+			targetProxy = 36FAE988C69DA66A3C21223A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		0EC8A22167DA5249CEE95533 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = 4HBAZ2M969;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		2BDC429296C77A90C622FAA7 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-Xcc",
+					"-fmodule-map-file=$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift/VaultKernCoreFFI.modulemap",
+					"-Xcc",
+					"-I$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.vaultkern.macos.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VaultKern.app/Contents/MacOS/VaultKern";
+			};
+			name = Debug;
+		};
+		3224BC3A3A80F1FDFB362362 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = 4HBAZ2M969;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_STRICT_CONCURRENCY = complete;
+				SWIFT_TREAT_WARNINGS_AS_ERRORS = YES;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A271F7B064DC13A7E04E8884 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/VaultKern.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../../target/xcode/$(CONFIGURATION)",
+				);
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lvaultkern_uniffi",
+				);
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-Xcc",
+					"-fmodule-map-file=$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift/VaultKernCoreFFI.modulemap",
+					"-Xcc",
+					"-I$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.vaultkern.macos;
+				PRODUCT_NAME = VaultKern;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		C8AC07C66D322912383ECDC9 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = Config/VaultKern.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Config/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				LIBRARY_SEARCH_PATHS = (
+					"$(inherited)",
+					"$(SRCROOT)/../../target/xcode/$(CONFIGURATION)",
+				);
+				MARKETING_VERSION = 0.1.0;
+				OTHER_LDFLAGS = (
+					"$(inherited)",
+					"-lvaultkern_uniffi",
+				);
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-Xcc",
+					"-fmodule-map-file=$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift/VaultKernCoreFFI.modulemap",
+					"-Xcc",
+					"-I$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.vaultkern.macos;
+				PRODUCT_NAME = VaultKern;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		FE82BD54A85B55DF6168E912 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				COMBINE_HIDPI_IMAGES = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				OTHER_SWIFT_FLAGS = (
+					"$(inherited)",
+					"-Xcc",
+					"-fmodule-map-file=$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift/VaultKernCoreFFI.modulemap",
+					"-Xcc",
+					"-I$(SRCROOT)/../../crates/vaultkern-uniffi/bindings/swift",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = com.vaultkern.macos.tests;
+				SDKROOT = macosx;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/VaultKern.app/Contents/MacOS/VaultKern";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		1EB43437365920191AB3F220 /* Build configuration list for PBXProject "VaultKern" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				0EC8A22167DA5249CEE95533 /* Debug */,
+				3224BC3A3A80F1FDFB362362 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		370243CEA15DE72796C03D4E /* Build configuration list for PBXNativeTarget "VaultKernTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2BDC429296C77A90C622FAA7 /* Debug */,
+				FE82BD54A85B55DF6168E912 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		EDA82E893E67CB58FF069E44 /* Build configuration list for PBXNativeTarget "VaultKern" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				C8AC07C66D322912383ECDC9 /* Debug */,
+				A271F7B064DC13A7E04E8884 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = BCA93D209C540C38CE0D126D /* Project object */;
+}

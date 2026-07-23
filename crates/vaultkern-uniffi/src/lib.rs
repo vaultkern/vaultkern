@@ -17,8 +17,9 @@ use vaultkern_runtime::{
     PlatformPasskeyCredential as RuntimePlatformPasskeyCredential,
     PlatformPasskeyRegistrationInput as RuntimePlatformPasskeyRegistrationInput,
     PlatformPasskeyRegistrationOutput as RuntimePlatformPasskeyRegistrationOutput,
-    QuickUnlockOutcome, ResidentKdfPolicy, ResidentRuntimeConfig, Runtime, SecureStorageError,
-    SecureStorageProvider, classify_external_kdf_error,
+    QuickUnlockOutcome, QuickUnlockReconciliationCredentials, ResidentKdfPolicy,
+    ResidentRuntimeConfig, Runtime, SecureStorageError, SecureStorageProvider,
+    classify_external_kdf_error,
 };
 use vaultkern_runtime_protocol as protocol;
 use zeroize::{Zeroize, Zeroizing};
@@ -380,6 +381,7 @@ pub trait UnlockBlobAdapter: Send + Sync + fmt::Debug {
     fn load_blob(&self, key: String) -> Result<Option<SensitiveBytes>, PlatformAdapterError>;
     fn contains_blob(&self, key: String) -> Result<bool, PlatformAdapterError>;
     fn delete_blob(&self, key: String) -> Result<(), PlatformAdapterError>;
+    fn purge_quick_unlock_records(&self) -> Result<u64, PlatformAdapterError>;
 }
 
 /// Platform-owned protected storage for the existing OneDrive refresh token.
@@ -489,6 +491,14 @@ impl SecureStorageProvider for AdapterSecureStorageProvider {
         self.calls
             .call(|| self.adapter.delete_blob(key.to_owned()))
             .map_err(secure_storage_adapter_error)
+    }
+
+    fn purge_quick_unlock_records(&self) -> anyhow::Result<usize> {
+        let count = self
+            .calls
+            .call(|| self.adapter.purge_quick_unlock_records())
+            .map_err(secure_storage_adapter_error)?;
+        usize::try_from(count).map_err(|_| anyhow::anyhow!("quick unlock purge count overflow"))
     }
 }
 
@@ -1514,6 +1524,39 @@ impl VaultUnlock {
             status: status.into(),
             state: runtime.session_state().into(),
         })
+    }
+
+    pub fn reconcile(
+        &self,
+        enabled: bool,
+        password: Option<SensitiveString>,
+        mut key_file_path: Option<String>,
+        kdf_confirmed: bool,
+    ) -> Result<SessionStateDto, VaultKernError> {
+        let result = (|| {
+            let has_credentials = password.is_some() || key_file_path.is_some();
+            let credentials = if has_credentials {
+                Some(QuickUnlockReconciliationCredentials::from_protocol_input(
+                    password.map(|password| password.into_zeroizing().into()),
+                    key_file_path.take(),
+                ))
+            } else {
+                None
+            };
+            let mut runtime = self.shared.lock()?;
+            runtime.reconcile_quick_unlock_with_kdf_confirmation(
+                enabled,
+                credentials,
+                if kdf_confirmed {
+                    ExternalKdfConfirmation::Confirmed
+                } else {
+                    ExternalKdfConfirmation::Unconfirmed
+                },
+            )?;
+            Ok(runtime.session_state().into())
+        })();
+        key_file_path.zeroize();
+        result
     }
 
     pub fn revoke(&self) -> Result<SessionStateDto, VaultKernError> {
