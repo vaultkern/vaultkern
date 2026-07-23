@@ -1452,6 +1452,25 @@ impl VaultUnlock {
         result
     }
 
+    pub fn unlock_current_with_key_file(
+        &self,
+        password: Option<SensitiveString>,
+        key_file: SensitiveBytes,
+        kdf_confirmed: bool,
+    ) -> Result<SessionStateDto, VaultKernError> {
+        let mut runtime = self.shared.lock_for_session_mutation()?;
+        runtime.unlock_current_vault_with_key_file_bytes_and_kdf_confirmation(
+            password.as_ref().map(SensitiveString::as_str),
+            key_file.into_zeroizing(),
+            if kdf_confirmed {
+                ExternalKdfConfirmation::Confirmed
+            } else {
+                ExternalKdfConfirmation::Unconfirmed
+            },
+        )?;
+        Ok(runtime.session_state().into())
+    }
+
     pub fn unlock_vault(
         &self,
         vault_id: String,
@@ -1500,6 +1519,25 @@ impl VaultUnlock {
         result
     }
 
+    pub fn enroll_with_key_file(
+        &self,
+        password: Option<SensitiveString>,
+        key_file: SensitiveBytes,
+        kdf_confirmed: bool,
+    ) -> Result<SessionStateDto, VaultKernError> {
+        let mut runtime = self.shared.lock()?;
+        runtime.enroll_quick_unlock_for_current_vault_with_key_file_bytes_and_kdf_confirmation(
+            password.as_ref().map(SensitiveString::as_str),
+            key_file.into_zeroizing(),
+            if kdf_confirmed {
+                ExternalKdfConfirmation::Confirmed
+            } else {
+                ExternalKdfConfirmation::Unconfirmed
+            },
+        )?;
+        Ok(runtime.session_state().into())
+    }
+
     pub fn unlock_with_blob(
         &self,
         kdf_confirmed: bool,
@@ -1535,6 +1573,21 @@ impl VaultSources {
             .lock()?
             .list_recent_vaults()
             .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub fn add_local_vault(&self, path: String) -> Result<VaultReferenceDto, VaultKernError> {
+        self.shared
+            .lock_for_session_mutation()?
+            .add_local_vault_reference(&path)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
+    pub fn current_local_vault_path(&self) -> Result<Option<String>, VaultKernError> {
+        self.shared
+            .lock()?
+            .current_local_vault_path()
             .map_err(Into::into)
     }
 

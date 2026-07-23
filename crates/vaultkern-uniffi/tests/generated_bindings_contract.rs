@@ -33,3 +33,66 @@ fn kotlin_generation_targets_android_instead_of_desktop_jvm() {
 
     assert!(config.contains("android = true"));
 }
+
+#[test]
+fn kotlin_sensitive_byte_converter_clears_every_temporary_copy() {
+    let kotlin = fs::read_to_string(
+        crate_root().join("bindings/kotlin/org/vaultkern/core/vaultkern_uniffi.kt"),
+    )
+    .unwrap();
+    let converter = kotlin
+        .split_once("public object FfiConverterTypeSensitiveBytes")
+        .unwrap()
+        .1
+        .split_once("public typealias SensitiveString")
+        .unwrap()
+        .0;
+
+    assert_eq!(converter.matches("builtinValue.fill(0)").count(), 3);
+}
+
+#[test]
+fn kotlin_sensitive_string_converter_never_materializes_plain_strings() {
+    let kotlin = fs::read_to_string(
+        crate_root().join("bindings/kotlin/org/vaultkern/core/vaultkern_uniffi.kt"),
+    )
+    .unwrap();
+    let converter = kotlin
+        .split_once("public object FfiConverterTypeSensitiveString")
+        .unwrap()
+        .1;
+
+    assert!(!converter.contains("FfiConverterString"));
+    assert_eq!(converter.matches("value.copyUtf8Bytes()").count(), 3);
+    assert_eq!(
+        converter
+            .matches("VaultKernSensitiveString.fromUtf8Bytes")
+            .count(),
+        2
+    );
+    assert_eq!(converter.matches("bytes.fill(0)").count(), 5);
+}
+
+#[test]
+fn kotlin_callbacks_close_sensitive_return_owners_after_lowering() {
+    let kotlin = fs::read_to_string(
+        crate_root().join("bindings/kotlin/org/vaultkern/core/vaultkern_uniffi.kt"),
+    )
+    .unwrap();
+
+    assert_eq!(kotlin.matches("value?.close()").count(), 2);
+    assert!(kotlin.contains("FfiConverterOptionalTypeSensitiveString.lower(value)"));
+    assert!(kotlin.contains("FfiConverterOptionalTypeSensitiveBytes.lower(value)"));
+}
+
+#[test]
+fn kotlin_sensitive_owner_factories_clear_input_even_when_copying_fails() {
+    let support = fs::read_to_string(
+        crate_root().join("bindings/kotlin/org/vaultkern/core/SensitiveTypes.kt"),
+    )
+    .unwrap();
+
+    assert!(support.contains("private fun copyAndClear(value: ByteArray): ByteArray = try"));
+    assert!(support.contains("finally {\n    value.fill(0)\n}"));
+    assert_eq!(support.matches("copyAndClear(value)").count(), 2);
+}

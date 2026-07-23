@@ -806,11 +806,15 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_local_vault(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_begin_one_drive_login(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_current_local_vault_path(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children(
     ): Short
@@ -824,9 +828,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll_with_key_file(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current_with_key_file(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault(
     ): Short
@@ -944,11 +952,15 @@ external fun uniffi_vaultkern_uniffi_fn_clone_vaultsources(`handle`: Long,uniffi
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_vaultsources(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_add_local_vault(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(`ptr`: Long,`driveId`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_begin_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_current_local_vault_path(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_list_one_drive_children(`ptr`: Long,`parentItemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -970,9 +982,13 @@ external fun uniffi_vaultkern_uniffi_fn_free_vaultunlock(`handle`: Long,uniffi_o
 ): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll_with_key_file(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFile`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_revoke(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current_with_key_file(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFile`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1193,6 +1209,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock() != 47569.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_local_vault() != 14382.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault() != 18786.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1200,6 +1219,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login() != 5690.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_current_local_vault_path() != 77.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children() != 2771.toShort()) {
@@ -1220,10 +1242,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll_with_key_file() != 32705.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current() != 40935.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current_with_key_file() != 43179.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 44285.toShort()) {
@@ -1890,7 +1918,13 @@ internal object uniffiCallbackInterfaceOneDriveTokenAdapter {
                 uniffiObj.`loadRefreshToken`(
                 )
             }
-            val writeReturn = { value: SensitiveString? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value)) }
+            val writeReturn = { value: SensitiveString? ->
+                try {
+                    uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value))
+                } finally {
+                    value?.close()
+                }
+            }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -2470,7 +2504,13 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
                     FfiConverterString.lift(`key`),
                 )
             }
-            val writeReturn = { value: SensitiveBytes? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value)) }
+            val writeReturn = { value: SensitiveBytes? ->
+                try {
+                    uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value))
+                } finally {
+                    value?.close()
+                }
+            }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -3475,11 +3515,15 @@ public object FfiConverterTypeVaultSession: FfiConverter<VaultSession, Long> {
 
 public interface VaultSourcesInterface {
 
+    fun `addLocalVault`(`path`: kotlin.String): VaultReferenceDto
+
     fun `addOneDriveVault`(`driveId`: kotlin.String, `itemId`: kotlin.String): VaultReferenceDto
 
     fun `beginOneDriveLogin`(): OneDriveAuthSessionDto
 
     fun `completePendingOneDriveLogin`(): OneDriveAuthStatusDto
+
+    fun `currentLocalVaultPath`(): kotlin.String?
 
     fun `listOneDriveChildren`(`parentItemId`: kotlin.String?): OneDriveItemListDto
 
@@ -3587,6 +3631,20 @@ open class VaultSources: Disposable, AutoCloseable, VaultSourcesInterface
     }
 
 
+    @Throws(VaultKernException::class)override fun `addLocalVault`(`path`: kotlin.String): VaultReferenceDto {
+            return FfiConverterTypeVaultReferenceDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_add_local_vault(
+        it,
+        FfiConverterString.lower(`path`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(VaultKernException::class)override fun `addOneDriveVault`(`driveId`: kotlin.String, `itemId`: kotlin.String): VaultReferenceDto {
             return FfiConverterTypeVaultReferenceDto.lift(
     callWithHandle {
@@ -3620,6 +3678,20 @@ open class VaultSources: Disposable, AutoCloseable, VaultSourcesInterface
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `currentLocalVaultPath`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_current_local_vault_path(
         it,
         _status)
 }
@@ -4075,9 +4147,13 @@ public interface VaultUnlockInterface {
 
     fun `enroll`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
+    fun `enrollWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
+
     fun `revoke`(): SessionStateDto
 
     fun `unlockCurrent`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
+
+    fun `unlockCurrentWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
     fun `unlockVault`(`vaultId`: kotlin.String, `password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
@@ -4197,6 +4273,20 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
 
 
 
+    @Throws(VaultKernException::class)override fun `enrollWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll_with_key_file(
+        it,
+        FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterTypeSensitiveBytes.lower(`keyFile`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(VaultKernException::class)override fun `revoke`(): SessionStateDto {
             return FfiConverterTypeSessionStateDto.lift(
     callWithHandle {
@@ -4218,6 +4308,20 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(
         it,
         FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `unlockCurrentWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current_with_key_file(
+        it,
+        FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterTypeSensitiveBytes.lower(`keyFile`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
 }
     }
     )
@@ -6523,7 +6627,11 @@ public object FfiConverterTypeSensitiveBytes: FfiConverter<SensitiveBytes, RustB
 
     override fun lower(value: SensitiveBytes): RustBuffer.ByValue {
         val builtinValue = value.copyBytes()
-        return FfiConverterByteArray.lower(builtinValue)
+        return try {
+            FfiConverterByteArray.lower(builtinValue)
+        } finally {
+            builtinValue.fill(0)
+        }
     }
 
     override fun read(buf: ByteBuffer): SensitiveBytes {
@@ -6533,12 +6641,20 @@ public object FfiConverterTypeSensitiveBytes: FfiConverter<SensitiveBytes, RustB
 
     override fun allocationSize(value: SensitiveBytes): ULong {
         val builtinValue = value.copyBytes()
-        return FfiConverterByteArray.allocationSize(builtinValue)
+        return try {
+            FfiConverterByteArray.allocationSize(builtinValue)
+        } finally {
+            builtinValue.fill(0)
+        }
     }
 
     override fun write(value: SensitiveBytes, buf: ByteBuffer) {
         val builtinValue = value.copyBytes()
-        FfiConverterByteArray.write(builtinValue, buf)
+        try {
+            FfiConverterByteArray.write(builtinValue, buf)
+        } finally {
+            builtinValue.fill(0)
+        }
     }
 }
 
@@ -6557,28 +6673,60 @@ public typealias SensitiveString = VaultKernSensitiveString
  * @suppress
  */
 public object FfiConverterTypeSensitiveString: FfiConverter<SensitiveString, RustBuffer.ByValue> {
-    override fun lift(value: RustBuffer.ByValue): SensitiveString {
-        val builtinValue = FfiConverterString.lift(value)
-        return VaultKernSensitiveString.fromString(builtinValue)
+    override fun lift(value: RustBuffer.ByValue): SensitiveString = try {
+        val bytes = ByteArray(value.len.toInt())
+        try {
+            value.asByteBuffer()!!.get(bytes)
+            VaultKernSensitiveString.fromUtf8Bytes(bytes)
+        } finally {
+            bytes.fill(0)
+        }
+    } finally {
+        RustBuffer.free(value)
     }
 
     override fun lower(value: SensitiveString): RustBuffer.ByValue {
-        val builtinValue = value.reveal()
-        return FfiConverterString.lower(builtinValue)
+        val bytes = value.copyUtf8Bytes()
+        return try {
+            val buffer = RustBuffer.alloc(bytes.size.toULong())
+            try {
+                buffer.asByteBuffer()!!.put(bytes)
+                buffer
+            } catch (error: Throwable) {
+                RustBuffer.free(buffer)
+                throw error
+            }
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     override fun read(buf: ByteBuffer): SensitiveString {
-        val builtinValue = FfiConverterString.read(buf)
-        return VaultKernSensitiveString.fromString(builtinValue)
+        val bytes = ByteArray(buf.getInt())
+        return try {
+            buf.get(bytes)
+            VaultKernSensitiveString.fromUtf8Bytes(bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     override fun allocationSize(value: SensitiveString): ULong {
-        val builtinValue = value.reveal()
-        return FfiConverterString.allocationSize(builtinValue)
+        val bytes = value.copyUtf8Bytes()
+        return try {
+            4UL + bytes.size.toULong()
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     override fun write(value: SensitiveString, buf: ByteBuffer) {
-        val builtinValue = value.reveal()
-        FfiConverterString.write(builtinValue, buf)
+        val bytes = value.copyUtf8Bytes()
+        try {
+            buf.putInt(bytes.size)
+            buf.put(bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 }

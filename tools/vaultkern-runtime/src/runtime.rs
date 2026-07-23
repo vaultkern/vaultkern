@@ -1314,6 +1314,16 @@ impl Runtime {
         Ok(list)
     }
 
+    pub fn current_local_vault_path(&self) -> Result<Option<String>> {
+        let Some(vault_ref_id) = self.vault_session.current_vault_ref_id() else {
+            return Ok(None);
+        };
+        Ok(match self.references.source_for(vault_ref_id)? {
+            StoredVaultSource::LocalPath { path } => Some(path),
+            StoredVaultSource::OneDriveItem { .. } => None,
+        })
+    }
+
     pub fn set_current_vault(&mut self, vault_ref_id: &str) -> Result<()> {
         self.pending_quick_unlock_enrollment = None;
         self.references
@@ -1479,6 +1489,15 @@ impl Runtime {
         confirmation: ExternalKdfConfirmation,
     ) -> Result<()> {
         let master_credential = master_credential_from_parts(password, key_file_path)?;
+        self.unlock_vault_with_master_credential(vault_id, master_credential, confirmation)
+    }
+
+    fn unlock_vault_with_master_credential(
+        &mut self,
+        vault_id: &str,
+        master_credential: MasterCredential,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<()> {
         let current_vault_ref_id = self.references.find_ref_id_by_path(vault_id)?.or_else(|| {
             self.vault_session
                 .current_vault_ref_id()
@@ -1615,6 +1634,28 @@ impl Runtime {
         key_file_path: Option<&str>,
         confirmation: ExternalKdfConfirmation,
     ) -> Result<()> {
+        self.unlock_current_vault_with_credential_factory(confirmation, || {
+            master_credential_from_parts(password, key_file_path)
+        })
+    }
+
+    pub fn unlock_current_vault_with_key_file_bytes_and_kdf_confirmation(
+        &mut self,
+        password: Option<&str>,
+        key_file_bytes: Zeroizing<Vec<u8>>,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<()> {
+        let master_credential =
+            master_credential_from_key_file_bytes(password, key_file_bytes.as_slice())?;
+        drop(key_file_bytes);
+        self.unlock_current_vault_with_credential_factory(confirmation, || Ok(master_credential))
+    }
+
+    fn unlock_current_vault_with_credential_factory(
+        &mut self,
+        confirmation: ExternalKdfConfirmation,
+        credential: impl FnOnce() -> Result<MasterCredential>,
+    ) -> Result<()> {
         let current_vault_ref_id = self
             .vault_session
             .current_vault_ref_id()
@@ -1622,21 +1663,12 @@ impl Runtime {
             .to_owned();
         let source = self.references.source_for(&current_vault_ref_id)?;
         let vault_id = vault_id_for_stored_source(&source);
-        if self.vault_session.is_preloaded_for_unlock(&vault_id) {
-            return self.unlock_vault_with_kdf_confirmation(
-                &vault_id,
-                password,
-                key_file_path,
-                confirmation,
-            );
-        }
-        let handle = self.load_source_snapshot(source)?;
-        self.unlock_vault_with_kdf_confirmation(
-            &handle.vault_id,
-            password,
-            key_file_path,
-            confirmation,
-        )
+        let vault_id = if self.vault_session.is_preloaded_for_unlock(&vault_id) {
+            vault_id
+        } else {
+            self.load_source_snapshot(source)?.vault_id
+        };
+        self.unlock_vault_with_master_credential(&vault_id, credential()?, confirmation)
     }
 
     pub fn lock_session(&mut self) {
@@ -1741,6 +1773,30 @@ impl Runtime {
         key_file_path: Option<&str>,
         confirmation: ExternalKdfConfirmation,
     ) -> Result<()> {
+        self.enroll_quick_unlock_for_current_vault_with_credential_factory(confirmation, || {
+            master_credential_from_parts(password, key_file_path)
+        })
+    }
+
+    pub fn enroll_quick_unlock_for_current_vault_with_key_file_bytes_and_kdf_confirmation(
+        &mut self,
+        password: Option<&str>,
+        key_file_bytes: Zeroizing<Vec<u8>>,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<()> {
+        let master_credential =
+            master_credential_from_key_file_bytes(password, key_file_bytes.as_slice())?;
+        drop(key_file_bytes);
+        self.enroll_quick_unlock_for_current_vault_with_credential_factory(confirmation, || {
+            Ok(master_credential)
+        })
+    }
+
+    fn enroll_quick_unlock_for_current_vault_with_credential_factory(
+        &mut self,
+        confirmation: ExternalKdfConfirmation,
+        credential: impl FnOnce() -> Result<MasterCredential>,
+    ) -> Result<()> {
         if !self.allow_unlock_kdf {
             anyhow::bail!("quick unlock enrollment requires the resident app");
         }
@@ -1770,7 +1826,7 @@ impl Runtime {
             self.biometric
                 .authorize("Enable quick unlock for this vault")?;
         }
-        let master_credential = master_credential_from_parts(password, key_file_path)?;
+        let master_credential = credential()?;
         let baseline_fingerprint = self
             .vault_session
             .find_loaded(&active_vault_id)
@@ -10606,18 +10662,23 @@ fn master_credential_from_parts(
         .map(normalize_local_path)
         .transpose()
         .context("invalid key file path")?;
-    let key_file_contribution = key_file_path
-        .as_deref()
-        .map(|key_file_path| {
-            let bytes = Zeroizing::new(
-                fs::read(key_file_path)
-                    .with_context(|| format!("failed to read key file: {key_file_path}"))?,
-            );
-            parse_key_file_bytes(&bytes)
-                .with_context(|| format!("failed to parse key file: {key_file_path}"))
-        })
-        .transpose()?;
-    MasterCredential::new(password.map(str::as_bytes), key_file_contribution)
+    let Some(key_file_path) = key_file_path.as_deref() else {
+        return MasterCredential::new(password.map(str::as_bytes), None);
+    };
+    let bytes = Zeroizing::new(
+        fs::read(key_file_path)
+            .with_context(|| format!("failed to read key file: {key_file_path}"))?,
+    );
+    master_credential_from_key_file_bytes(password, &bytes)
+        .with_context(|| format!("failed to parse key file: {key_file_path}"))
+}
+
+fn master_credential_from_key_file_bytes(
+    password: Option<&str>,
+    key_file_bytes: &[u8],
+) -> Result<MasterCredential> {
+    let contribution = parse_key_file_bytes(key_file_bytes)?;
+    MasterCredential::new(password.map(str::as_bytes), Some(contribution))
 }
 
 fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {

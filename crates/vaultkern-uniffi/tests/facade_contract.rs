@@ -4,6 +4,7 @@ use std::sync::mpsc;
 use std::sync::{Arc, Barrier, Mutex, Weak};
 use std::time::Duration;
 
+use vaultkern_core::{CompositeKey, KeepassCore, SaveProfile, parse_key_file_bytes};
 use vaultkern_uniffi::{
     EntryFieldsDto, OneDriveTokenAdapter, PlatformAdapterError, PlatformPasskeyAssertionInput,
     PlatformPasskeyRegistrationInput, ResidentPlatform, SaveVaultStatusDto, SensitiveBytes,
@@ -191,6 +192,25 @@ fn copied_fixture() -> (tempfile::TempDir, String) {
     (dir, target.to_string_lossy().into_owned())
 }
 
+fn copied_key_file_fixture() -> (tempfile::TempDir, String, Vec<u8>) {
+    let (dir, path) = copied_fixture();
+    let core = KeepassCore::new();
+    let source = std::fs::read(&path).unwrap();
+    let mut source_key = CompositeKey::default();
+    source_key.add_password(FIXTURE_PASSWORD);
+    let vault = core.load_kdbx(&source, &source_key).unwrap();
+    let key_file = b"vaultkern Android key-file content".to_vec();
+    let contribution = parse_key_file_bytes(&key_file).unwrap();
+    let mut target_key = CompositeKey::default();
+    target_key.add_password("android-key-file-password");
+    target_key.add_key_file(contribution.as_ref().to_vec());
+    let protected = core
+        .save_kdbx(&vault, &target_key, SaveProfile::recommended())
+        .unwrap();
+    std::fs::write(&path, protected).unwrap();
+    (dir, path, key_file)
+}
+
 #[test]
 fn resident_runtime_requires_explicit_absolute_host_directories() {
     let adapter = Arc::new(FakeUnlockBlobAdapter::default());
@@ -310,6 +330,81 @@ fn ffi_sources_expose_the_existing_runtime_reference_vocabulary() {
     assert_eq!(recent.vaults[0].source_kind, "local");
     assert!(recent.vaults[0].is_current);
     assert!(session.capabilities().one_drive_account_setup);
+}
+
+#[test]
+fn ffi_sources_can_select_a_local_vault_without_loading_its_snapshot() {
+    let (dir, path) = copied_fixture();
+    let session = VaultSession::new(
+        session_config(dir.path(), ResidentPlatform::Android),
+        Arc::new(FakeUnlockBlobAdapter::default()),
+        Arc::new(FakeOneDriveTokenAdapter::default()),
+    )
+    .unwrap();
+
+    let selected = session.sources().add_local_vault(path.clone()).unwrap();
+
+    assert_eq!(selected.source_kind, "local");
+    assert!(selected.is_current);
+    assert_eq!(
+        session.sources().current_local_vault_path().unwrap(),
+        Some(path),
+    );
+    assert_eq!(
+        session.session_state().unwrap().active_vault_id,
+        None,
+        "selecting a document must not retain its encrypted snapshot",
+    );
+    assert_eq!(
+        session.session_state().unwrap().current_vault_ref_id,
+        Some(selected.vault_ref_id),
+    );
+}
+
+#[test]
+fn ffi_unlock_and_enrollment_accept_key_file_content_without_a_host_path() {
+    let (dir, path, key_file) = copied_key_file_fixture();
+    let key_file_path = dir.path().join("existing-path-api.key");
+    std::fs::write(&key_file_path, &key_file).unwrap();
+    let adapter = Arc::new(FakeUnlockBlobAdapter::default());
+    let session = VaultSession::new(
+        session_config(dir.path(), ResidentPlatform::Android),
+        adapter.clone(),
+        Arc::new(FakeOneDriveTokenAdapter::default()),
+    )
+    .unwrap();
+    session.sources().add_local_vault(path).unwrap();
+    let unlock = session.unlock();
+
+    unlock
+        .unlock_current(
+            Some("android-key-file-password".into()),
+            Some(key_file_path.to_string_lossy().into_owned()),
+            false,
+        )
+        .unwrap();
+    session.lock_session().unwrap();
+    unlock
+        .unlock_current_with_key_file(
+            Some("android-key-file-password".into()),
+            key_file.clone().into(),
+            false,
+        )
+        .unwrap();
+    unlock
+        .enroll_with_key_file(
+            Some("android-key-file-password".into()),
+            key_file.into(),
+            false,
+        )
+        .unwrap();
+    session.lock_session().unwrap();
+
+    assert_eq!(
+        unlock.unlock_with_blob(false).unwrap().status,
+        UnlockBlobStatusDto::Unlocked,
+    );
+    assert_eq!(adapter.blobs.lock().unwrap().len(), 1);
 }
 
 #[test]

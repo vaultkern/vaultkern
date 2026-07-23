@@ -1739,11 +1739,15 @@ public func FfiConverterTypeVaultSession_lower(_ value: VaultSession) -> UInt64 
 
 public protocol VaultSourcesProtocol: AnyObject, Sendable {
 
+    func addLocalVault(path: String) throws  -> VaultReferenceDto
+
     func addOneDriveVault(driveId: String, itemId: String) throws  -> VaultReferenceDto
 
     func beginOneDriveLogin() throws  -> OneDriveAuthSessionDto
 
     func completePendingOneDriveLogin() throws  -> OneDriveAuthStatusDto
+
+    func currentLocalVaultPath() throws  -> String?
 
     func listOneDriveChildren(parentItemId: String?) throws  -> OneDriveItemListDto
 
@@ -1805,6 +1809,15 @@ open class VaultSources: VaultSourcesProtocol, @unchecked Sendable {
 
 
 
+open func addLocalVault(path: String)throws  -> VaultReferenceDto  {
+    return try  FfiConverterTypeVaultReferenceDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_add_local_vault(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),$0
+    )
+})
+}
+
 open func addOneDriveVault(driveId: String, itemId: String)throws  -> VaultReferenceDto  {
     return try  FfiConverterTypeVaultReferenceDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(
@@ -1826,6 +1839,14 @@ open func beginOneDriveLogin()throws  -> OneDriveAuthSessionDto  {
 open func completePendingOneDriveLogin()throws  -> OneDriveAuthStatusDto  {
     return try  FfiConverterTypeOneDriveAuthStatusDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func currentLocalVaultPath()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_current_local_vault_path(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -2038,9 +2059,13 @@ public protocol VaultUnlockProtocol: AnyObject, Sendable {
 
     func enroll(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
 
+    func enrollWithKeyFile(password: SensitiveString?, keyFile: SensitiveBytes, kdfConfirmed: Bool) throws  -> SessionStateDto
+
     func revoke() throws  -> SessionStateDto
 
     func unlockCurrent(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
+
+    func unlockCurrentWithKeyFile(password: SensitiveString?, keyFile: SensitiveBytes, kdfConfirmed: Bool) throws  -> SessionStateDto
 
     func unlockVault(vaultId: String, password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
 
@@ -2111,6 +2136,17 @@ open func enroll(password: SensitiveString?, keyFilePath: String?, kdfConfirmed:
 })
 }
 
+open func enrollWithKeyFile(password: SensitiveString?, keyFile: SensitiveBytes, kdfConfirmed: Bool)throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll_with_key_file(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionTypeSensitiveString.lower(password),
+        FfiConverterTypeSensitiveBytes_lower(keyFile),
+        FfiConverterBool.lower(kdfConfirmed),$0
+    )
+})
+}
+
 open func revoke()throws  -> SessionStateDto  {
     return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultunlock_revoke(
@@ -2125,6 +2161,17 @@ open func unlockCurrent(password: SensitiveString?, keyFilePath: String?, kdfCon
             self.uniffiCloneHandle(),
         FfiConverterOptionTypeSensitiveString.lower(password),
         FfiConverterOptionString.lower(keyFilePath),
+        FfiConverterBool.lower(kdfConfirmed),$0
+    )
+})
+}
+
+open func unlockCurrentWithKeyFile(password: SensitiveString?, keyFile: SensitiveBytes, kdfConfirmed: Bool)throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current_with_key_file(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionTypeSensitiveString.lower(password),
+        FfiConverterTypeSensitiveBytes_lower(keyFile),
         FfiConverterBool.lower(kdfConfirmed),$0
     )
 })
@@ -4923,6 +4970,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock() != 47569) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_local_vault() != 14382) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault() != 18786) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4930,6 +4980,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login() != 5690) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_current_local_vault_path() != 77) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children() != 2771) {
@@ -4950,10 +5003,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll_with_key_file() != 32705) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current() != 40935) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current_with_key_file() != 43179) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 44285) {
