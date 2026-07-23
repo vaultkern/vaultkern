@@ -1542,6 +1542,8 @@ fn command_persists_vault_id(command: &RuntimeCommand) -> Option<&str> {
         | RuntimeCommand::ClearEntryHistory { vault_id, .. }
         | RuntimeCommand::RecycleEntry { vault_id, .. }
         | RuntimeCommand::RestoreRecycledEntry { vault_id, .. }
+        | RuntimeCommand::CreateAutofillEntry { vault_id, .. }
+        | RuntimeCommand::UpdateAutofillEntryFields { vault_id, .. }
         | RuntimeCommand::PersistAutofillMutation { vault_id, .. }
         | RuntimeCommand::SavePasskeyRegistration { vault_id, .. } => Some(vault_id),
         _ => None,
@@ -2443,6 +2445,19 @@ mod tests {
 
     #[test]
     fn atomic_persistence_commands_supersede_an_older_inline_save_receipt() {
+        assert_eq!(
+            super::command_persists_vault_id(&RuntimeCommand::CreateAutofillEntry {
+                vault_id: "vault-1".into(),
+                parent_group_id: "group-1".into(),
+                title: "Title".into(),
+                username: "alice".into(),
+                password: "secret".into(),
+                url: "https://example.com".into(),
+                notes: "".into(),
+                totp_uri: None,
+            }),
+            Some("vault-1")
+        );
         assert_eq!(
             super::command_persists_vault_id(&RuntimeCommand::PersistAutofillMutation {
                 transaction_id: "transaction-1".into(),

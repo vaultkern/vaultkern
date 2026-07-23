@@ -5397,6 +5397,78 @@ impl Runtime {
                     }),
                 },
             ),
+            RuntimeCommand::CreateAutofillEntry {
+                vault_id,
+                parent_group_id,
+                title,
+                username,
+                password,
+                url,
+                notes,
+                totp_uri,
+            } => {
+                if password.is_empty() || score_origin_scoped_entry_match(&url, &url).is_none() {
+                    return Ok(RuntimeResponse::Error(ErrorDto {
+                        code: "invalid_autofill_mutation".into(),
+                        message: "browser login create fields are invalid".into(),
+                    }));
+                }
+                self.commit_entry_mutation(&vault_id, |runtime| {
+                    runtime.create_entry(
+                        &vault_id,
+                        &parent_group_id,
+                        None,
+                        title,
+                        username,
+                        password,
+                        url,
+                        notes,
+                        totp_uri,
+                    )?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::EntryMutationResult)
+            }
+            RuntimeCommand::UpdateAutofillEntryFields {
+                vault_id,
+                entry_id,
+                expected_fields,
+                desired_fields,
+            } => {
+                if desired_fields.password.is_empty()
+                    || score_origin_scoped_entry_match(&expected_fields.url, &desired_fields.url)
+                        .is_none()
+                {
+                    return Ok(RuntimeResponse::Error(ErrorDto {
+                        code: "invalid_autofill_mutation".into(),
+                        message: "browser login update fields are invalid".into(),
+                    }));
+                }
+                let current =
+                    self.get_autofill_entry_fields(&vault_id, &entry_id, &expected_fields.url)?;
+                if current.fields != expected_fields {
+                    return Ok(RuntimeResponse::Error(ErrorDto {
+                        code: "conflict".into(),
+                        message: "entry fields changed after confirmation".into(),
+                    }));
+                }
+                self.commit_entry_mutation(&vault_id, |runtime| {
+                    let current = runtime.get_entry_detail(&vault_id, &entry_id)?;
+                    runtime.update_entry_fields(
+                        &vault_id,
+                        &entry_id,
+                        current.title,
+                        desired_fields.username,
+                        desired_fields.password,
+                        desired_fields.url,
+                        current.notes,
+                        current.totp_uri,
+                        current.custom_fields,
+                    )?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::EntryMutationResult)
+            }
             RuntimeCommand::PersistAutofillMutation {
                 transaction_id,
                 operation_id,

@@ -31,4 +31,18 @@ describe("browser popup module seams", () => {
     expect(pendingLogin).not.toMatch(/from ["']react["']/);
     expect(passkeyPrompt).not.toMatch(/from ["']react["']/);
   });
+
+  it("wires confirmed login saves to ordinary resident mutations", () => {
+    const popupShell = source("src/popupShell.tsx");
+    const start = popupShell.indexOf("const pendingLoginWorkflow");
+    const wiring = popupShell.slice(start, start + 1_400);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(wiring).toContain("commit:");
+    expect(wiring).toContain("client.createAutofillEntry");
+    expect(wiring).toContain("client.updateAutofillEntryFields");
+    expect(wiring).not.toContain("plan:");
+    expect(wiring).not.toContain("execute:");
+    expect(wiring).not.toContain("persistAutofillMutation");
+  });
 });

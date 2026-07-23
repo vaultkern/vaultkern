@@ -18,6 +18,19 @@ type PendingAutofillUpdatePlan = Extract<
   { mode: "update" }
 >;
 
+export type ResidentLoginMutation =
+  | {
+      mode: "update";
+      entryId: string;
+      expectedFields: PendingAutofillUpdateFields;
+      desiredFields: PendingAutofillUpdateFields;
+    }
+  | {
+      mode: "create";
+      parentGroupId: string;
+      desiredFields: PendingAutofillDesiredFields;
+    };
+
 export type PendingLoginPrompt =
   | {
       readonly mode: "save";
@@ -78,18 +91,18 @@ type PendingLoginDependencies = {
     url: string
   ): Promise<{ id: string; fields: AutofillUpdateFields }>;
   getCreateContext(vaultId: string): Promise<{ rootGroupId: string }>;
-  findExactMatchingEntryIds(
+  findExactMatchingEntryIds?(
     vaultId: string,
     fields: PendingAutofillDesiredFields
   ): Promise<string[]>;
-  plan(
+  plan?(
     transactionId: string,
     tabId: number,
     vaultId: string,
     plan: PendingAutofillPlanInput
   ): Promise<PendingAutofillTransaction | null>;
   dismiss(transactionId: string, tabId: number): Promise<boolean>;
-  execute(
+  execute?(
     transactionId: string,
     tabId: number
   ): Promise<{
@@ -98,6 +111,10 @@ type PendingLoginDependencies = {
     pending?: PendingAutofillTransaction | null;
     errorMessage?: string;
   }>;
+  commit?(
+    vaultId: string,
+    mutation: ResidentLoginMutation
+  ): Promise<unknown>;
 };
 
 export interface PendingLoginWorkflow {
@@ -197,6 +214,18 @@ function rebasePendingUpdate(
       url: current.url
     }
   };
+}
+
+function commitOutcomeIsUnknown(error: unknown) {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "native_port_disconnected" ||
+    code === "native_timeout" ||
+    code === "request_outcome_unknown"
+  );
 }
 
 async function checkedEntryFields(
@@ -333,6 +362,9 @@ export function createPendingLoginWorkflow(
     vaultId: string,
     plan: PendingAutofillPlanInput
   ) {
+    if (!dependencies.plan) {
+      throw new Error("Legacy login persistence is unavailable");
+    }
     const planned = await dependencies.plan(
       transaction.transactionId,
       transaction.tabId,
@@ -363,6 +395,102 @@ export function createPendingLoginWorkflow(
     ) {
       throw new Error("Failed to discard login save");
     }
+  }
+
+  async function commitResidentMutation(
+    prompt: PendingLoginPrompt
+  ): Promise<PendingLoginSaveResult> {
+    const commit = dependencies.commit;
+    if (!commit) {
+      throw new Error("Resident login mutation is unavailable");
+    }
+    const binding = bindingFor(prompt);
+    const { transaction, vaultId } = binding;
+    if ("vaultId" in transaction && transaction.vaultId !== vaultId) {
+      throw new Error("Pending login save belongs to another vault");
+    }
+    const submission = pendingSubmission(transaction);
+    if (!submission) {
+      throw new Error("Pending login save has no recoverable fields");
+    }
+
+    let mutation: ResidentLoginMutation;
+    if (prompt.mode === "update") {
+      const entryId =
+        binding.updateEntryId ??
+        ("plan" in transaction && transaction.plan.mode === "update"
+          ? transaction.plan.entryId
+          : undefined);
+      if (!entryId) {
+        throw new Error("Pending login update target is no longer available");
+      }
+      const currentFields = await checkedEntryFields(
+        dependencies,
+        vaultId,
+        entryId,
+        submission.url
+      );
+      if (
+        typeof submission.newPassword === "string" &&
+        currentFields.password !== submission.password
+      ) {
+        await dismissPrompt(prompt);
+        return { status: "dismissed" };
+      }
+      mutation = {
+        mode: "update",
+        entryId,
+        expectedFields: currentFields,
+        desiredFields: {
+          username:
+            submission.username.trim() === ""
+              ? currentFields.username
+              : submission.username,
+          password: pendingPassword(transaction),
+          url: currentFields.url || savedUrl(transaction)
+        }
+      };
+    } else if (prompt.mode === "save") {
+      const createContext = await dependencies.getCreateContext(vaultId);
+      mutation = {
+        mode: "create",
+        parentGroupId: createContext.rootGroupId,
+        desiredFields: {
+          title: siteLabel(transaction),
+          username: submission.username,
+          password: pendingPassword(transaction),
+          url: savedUrl(transaction),
+          notes: "",
+          totpUri: null,
+          customFields: []
+        }
+      };
+    } else {
+      throw new Error("Reconnect before retrying the pending login save");
+    }
+
+    try {
+      await commit(vaultId, mutation);
+    } catch (error) {
+      return {
+        status: "retry",
+        prompt: rebindPrompt(prompt, transaction),
+        errorMessage: commitOutcomeIsUnknown(error)
+          ? "Login save result is unknown. Reconnect to inspect the vault or retry manually."
+          : popupErrorMessage(error, "Failed to save login")
+      };
+    }
+
+    try {
+      await dismissPrompt(prompt);
+    } catch {
+      // The resident Commit is authoritative. Cleanup failure must not invite
+      // an automatic or implicit replay of the mutation.
+    }
+    return {
+      status: "saved",
+      candidates: await refreshedCandidates(vaultId)
+    };
   }
 
   return {
@@ -490,6 +618,9 @@ export function createPendingLoginWorkflow(
     },
 
     async save(prompt) {
+      if (dependencies.commit) {
+        return commitResidentMutation(prompt);
+      }
       const binding = bindingFor(prompt);
       const { vaultId } = binding;
       let { transaction } = binding;
@@ -525,6 +656,9 @@ export function createPendingLoginWorkflow(
             desiredFields: plan.desiredFields
           });
         } else {
+          if (!dependencies.findExactMatchingEntryIds) {
+            throw new Error("Legacy login persistence is unavailable");
+          }
           const matchingEntryIds =
             await dependencies.findExactMatchingEntryIds(
               vaultId,
@@ -592,6 +726,9 @@ export function createPendingLoginWorkflow(
           totpUri: null,
           customFields: []
         };
+        if (!dependencies.findExactMatchingEntryIds) {
+          throw new Error("Legacy login persistence is unavailable");
+        }
         const expectedMatchingEntryIds =
           await dependencies.findExactMatchingEntryIds(vaultId, desiredFields);
         transaction = await planTransaction(transaction, vaultId, {
@@ -619,6 +756,9 @@ export function createPendingLoginWorkflow(
         throw new Error("Pending login save has no mutation plan");
       }
 
+      if (!dependencies.execute) {
+        throw new Error("Legacy login persistence is unavailable");
+      }
       const execution = await dependencies.execute(
         transaction.transactionId,
         transaction.tabId

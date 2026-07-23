@@ -542,6 +542,46 @@ describe("createNativeMessagingBridge", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a confirmed resident login mutation alive for the interactive timeout", async () => {
+    vi.useFakeTimers();
+
+    const port = createPort();
+    const connectNative = vi.fn(() => port);
+    const bridge = createNativeMessagingBridge(connectNative, "com.vaultkern.runtime", {
+      timeoutMs: 25,
+      interactiveTimeoutMs: 1_000
+    });
+
+    const request = bridge.send({
+      version: 2,
+      command: {
+        type: "create_autofill_entry",
+        vault_id: "vault-1",
+        parent_group_id: "group-root",
+        title: "Example",
+        username: "alice",
+        password: "secret",
+        url: "https://example.com/login",
+        notes: "",
+        totp_uri: null
+      }
+    });
+
+    await vi.advanceTimersByTimeAsync(25);
+    expect(port.disconnect).not.toHaveBeenCalled();
+    port.emitMessage({
+      type: "entry_mutation_result",
+      commit: "committed",
+      publication: { status: "saved", mergeSummary: null }
+    });
+    await expect(request).resolves.toMatchObject({
+      type: "entry_mutation_result",
+      commit: "committed"
+    });
+
+    vi.useRealTimers();
+  });
+
   it("uses the interactive timeout while creating a passkey assertion", async () => {
     vi.useFakeTimers();
 

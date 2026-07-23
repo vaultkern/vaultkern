@@ -427,11 +427,19 @@ const pendingLoginWorkflow = createPendingLoginWorkflow({
   getEntryFields: (vaultId, entryId, url) =>
     client.getAutofillEntryFields(vaultId, entryId, url),
   getCreateContext: (vaultId) => client.getAutofillCreateContext(vaultId),
-  findExactMatchingEntryIds: (vaultId, fields) =>
-    client.findExactMatchingEntryIds(vaultId, fields),
-  plan: planPendingAutofillSubmission,
   dismiss: dismissPendingAutofillSubmission,
-  execute: executePendingAutofillMutation
+  commit: (vaultId, mutation) =>
+    mutation.mode === "create"
+      ? client.createAutofillEntry(vaultId, {
+          parentGroupId: mutation.parentGroupId,
+          ...mutation.desiredFields
+        })
+      : client.updateAutofillEntryFields(
+          vaultId,
+          mutation.entryId,
+          mutation.expectedFields,
+          mutation.desiredFields
+        )
 });
 
 export function PopupShell() {

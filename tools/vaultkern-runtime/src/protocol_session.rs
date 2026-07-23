@@ -138,6 +138,8 @@ pub(crate) fn required_command_capabilities(command: &RuntimeCommand) -> Vec<&'s
             | RuntimeCommand::GetAutofillEntryFields { .. }
             | RuntimeCommand::GetAutofillCreateContext { .. }
             | RuntimeCommand::FindExactMatchingEntryIds { .. }
+            | RuntimeCommand::CreateAutofillEntry { .. }
+            | RuntimeCommand::UpdateAutofillEntryFields { .. }
             | RuntimeCommand::PersistAutofillMutation { .. }
     ) {
         required.push("browser-autofill");
@@ -184,6 +186,8 @@ pub(crate) fn browser_command_allowed(command: &RuntimeCommand) -> bool {
             | RuntimeCommand::GetAutofillEntryFields { .. }
             | RuntimeCommand::GetAutofillCreateContext { .. }
             | RuntimeCommand::FindExactMatchingEntryIds { .. }
+            | RuntimeCommand::CreateAutofillEntry { .. }
+            | RuntimeCommand::UpdateAutofillEntryFields { .. }
             | RuntimeCommand::PersistAutofillMutation { .. }
     ) || matches!(
         command,

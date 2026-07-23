@@ -255,6 +255,11 @@ export interface CommittedVaultMutation {
   createdGroupId?: string;
 }
 
+export interface CommittedAutofillMutation {
+  commit: "committed";
+  saveResult: SaveVaultResult;
+}
+
 interface EntryMutationResponse<T> {
   type: "entry_mutation_result";
   commit: "committed";
@@ -787,6 +792,38 @@ export class RuntimeClient {
     });
   }
 
+  async createAutofillEntry(
+    vaultId: string,
+    input: EntryCreateInput
+  ): Promise<CommittedAutofillMutation> {
+    return this.sendAutofillEntryMutationCommand({
+      type: "create_autofill_entry",
+      vault_id: vaultId,
+      parent_group_id: input.parentGroupId,
+      title: input.title,
+      username: input.username,
+      password: input.password,
+      url: input.url,
+      notes: input.notes,
+      totp_uri: input.totpUri
+    });
+  }
+
+  async updateAutofillEntryFields(
+    vaultId: string,
+    entryId: string,
+    expectedFields: AutofillUpdateFields,
+    desiredFields: AutofillUpdateFields
+  ): Promise<CommittedAutofillMutation> {
+    return this.sendAutofillEntryMutationCommand({
+      type: "update_autofill_entry_fields",
+      vault_id: vaultId,
+      entry_id: entryId,
+      expected_fields: autofillUpdateFieldsCommand(expectedFields),
+      desired_fields: autofillUpdateFieldsCommand(desiredFields)
+    });
+  }
+
   async createEntry(
     vaultId: string,
     input: EntryCreateInput,
@@ -1265,6 +1302,26 @@ export class RuntimeClient {
         ...response.publication
       },
       operationId
+    };
+  }
+
+  private async sendAutofillEntryMutationCommand(
+    command: Record<string, unknown>
+  ): Promise<CommittedAutofillMutation> {
+    const response =
+      await this.sendCommand<EntryMutationResponse<never>>(command);
+    if (
+      response.type !== "entry_mutation_result" ||
+      response.commit !== "committed"
+    ) {
+      throw new TypeError("runtime returned an invalid committed autofill mutation");
+    }
+    return {
+      commit: response.commit,
+      saveResult: {
+        type: "save_vault_result",
+        ...response.publication
+      }
     };
   }
 

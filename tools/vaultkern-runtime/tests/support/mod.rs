@@ -32,6 +32,25 @@ impl RuntimeProtocolHarness {
         Self::with_protocol_session(bytes, RuntimeProtocolSession::browser_extension())
     }
 
+    pub fn browser_with_unlocked_in_memory_vault(bytes: Vec<u8>) -> Self {
+        let mut harness =
+            Self::with_protocol_session(bytes, RuntimeProtocolSession::browser_extension());
+        harness
+            .runtime
+            .handle(RuntimeCommand::AddOneDriveVaultReference {
+                drive_id: DRIVE_ID.into(),
+                item_id: ITEM_ID.into(),
+            })
+            .expect("add browser acceptance vault reference");
+        harness
+            .runtime
+            .handle(RuntimeCommand::UnlockCurrentVaultWithPassword {
+                password: "demo-password".into(),
+            })
+            .expect("unlock browser acceptance vault in the resident");
+        harness
+    }
+
     fn with_protocol_session(bytes: Vec<u8>, protocol_session: RuntimeProtocolSession) -> Self {
         let remote_cache_dir = tempfile::tempdir().expect("create architecture cache directory");
         Self {

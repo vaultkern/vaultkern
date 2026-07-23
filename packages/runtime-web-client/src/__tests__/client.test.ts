@@ -778,6 +778,86 @@ describe("RuntimeClient", () => {
     });
   });
 
+  it("commits a browser login create once without a logical operation id", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue(
+        committedEntryMutation(undefined, "saved_to_cache")
+      )
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.createAutofillEntry("vault-1", {
+        parentGroupId: "group-root",
+        title: "Example",
+        username: "alice",
+        password: "secret",
+        url: "https://example.com/login",
+        notes: "",
+        customFields: [],
+        totpUri: null
+      })
+    ).resolves.toEqual({
+      commit: "committed",
+      saveResult: {
+        type: "save_vault_result",
+        status: "saved_to_cache",
+        mergeSummary: null
+      }
+    });
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 2,
+      command: {
+        type: "create_autofill_entry",
+        vault_id: "vault-1",
+        parent_group_id: "group-root",
+        title: "Example",
+        username: "alice",
+        password: "secret",
+        url: "https://example.com/login",
+        notes: "",
+        totp_uri: null
+      }
+    });
+  });
+
+  it("commits a browser login update once without replaying an ambiguous response", async () => {
+    const timeout = Object.assign(new Error("native request timed out"), {
+      code: "native_timeout"
+    });
+    const transport = { send: vi.fn().mockRejectedValue(timeout) };
+    const client = new RuntimeClient(transport);
+    const expectedFields = {
+      username: "alice",
+      password: "old-secret",
+      url: "https://example.com/login"
+    };
+
+    await expect(
+      client.updateAutofillEntryFields(
+        "vault-1",
+        "entry-1",
+        expectedFields,
+        { ...expectedFields, password: "new-secret" }
+      )
+    ).rejects.toBe(timeout);
+    expect(transport.send).toHaveBeenCalledTimes(1);
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 2,
+      command: {
+        type: "update_autofill_entry_fields",
+        vault_id: "vault-1",
+        entry_id: "entry-1",
+        expected_fields: expectedFields,
+        desired_fields: {
+          ...expectedFields,
+          password: "new-secret"
+        }
+      }
+    });
+  });
+
   it("replays an ambiguous mutation once with the same operation and planned entry ids", async () => {
     const disconnect = Object.assign(new Error("native port disconnected"), {
       code: "native_port_disconnected"

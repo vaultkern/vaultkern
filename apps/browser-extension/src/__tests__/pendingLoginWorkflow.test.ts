@@ -134,4 +134,130 @@ describe("pending login workflow", () => {
       candidates: null
     });
   });
+
+  it("uses one resident mutation and treats pending publication as a saved login", async () => {
+    const transaction = capturedTransaction();
+    const commit = vi.fn(async () => ({
+      commit: "committed" as const,
+      saveResult: {
+        type: "save_vault_result" as const,
+        status: "saved_to_cache" as const
+      }
+    }));
+    const dismiss = vi.fn(async () => true);
+    const workflow = createPendingLoginWorkflow({
+      load: vi.fn(async () => transaction),
+      findCandidates: vi.fn(async () => []),
+      getEntryFields: vi.fn(),
+      getCreateContext: vi.fn(async () => ({ rootGroupId: "root-group" })),
+      commit,
+      dismiss
+    });
+    const loaded = await workflow.loadPrompt("vault-a");
+
+    await expect(workflow.save(loaded.prompt!)).resolves.toMatchObject({
+      status: "saved"
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(commit).toHaveBeenCalledWith("vault-a", {
+      mode: "create",
+      parentGroupId: "root-group",
+      desiredFields: {
+        title: "example.com",
+        username: "alice",
+        password: "new-secret",
+        url: "https://example.com/login",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      }
+    });
+    expect(dismiss).toHaveBeenCalledWith(TRANSACTION_ID, 7);
+  });
+
+  it("renders a disconnected commit as unknown and retries only after another click", async () => {
+    const disconnected = Object.assign(new Error("native port disconnected"), {
+      code: "native_port_disconnected"
+    });
+    const commit = vi
+      .fn()
+      .mockRejectedValueOnce(disconnected)
+      .mockResolvedValueOnce({
+        commit: "committed",
+        saveResult: {
+          type: "save_vault_result",
+          status: "saved"
+        }
+      });
+    const dismiss = vi.fn(async () => true);
+    const workflow = createPendingLoginWorkflow({
+      load: vi.fn(async () => capturedTransaction()),
+      findCandidates: vi.fn(async () => []),
+      getEntryFields: vi.fn(),
+      getCreateContext: vi.fn(async () => ({ rootGroupId: "root-group" })),
+      commit,
+      dismiss
+    });
+    const loaded = await workflow.loadPrompt("vault-a");
+
+    const unknown = await workflow.save(loaded.prompt!);
+    expect(unknown).toMatchObject({
+      status: "retry",
+      errorMessage: expect.stringMatching(/unknown/i)
+    });
+    expect(commit).toHaveBeenCalledTimes(1);
+    expect(dismiss).not.toHaveBeenCalled();
+
+    if (unknown.status !== "retry") {
+      throw new Error("expected an unknown-result retry prompt");
+    }
+    await expect(workflow.save(unknown.prompt)).resolves.toMatchObject({
+      status: "saved"
+    });
+    expect(commit).toHaveBeenCalledTimes(2);
+    expect(commit.mock.calls[0]?.[1]).not.toHaveProperty("operationId");
+    expect(commit.mock.calls[1]?.[1]).not.toHaveProperty("operationId");
+  });
+
+  it("reconnects by inspecting candidates before offering a manual update", async () => {
+    const transaction = capturedTransaction();
+    if (transaction.state === "captured") {
+      delete transaction.submission.saveOnly;
+    }
+    const ports = {
+      load: vi.fn(async () => transaction),
+      findCandidates: vi.fn(async () => [
+        {
+          id: ENTRY_ID,
+          title: "Example",
+          username: "alice",
+          url: "https://example.com/login"
+        }
+      ]),
+      getEntryFields: vi.fn(async () => ({
+        id: ENTRY_ID,
+        fields: {
+          username: "alice",
+          password: "new-secret",
+          url: "https://example.com/login"
+        }
+      })),
+      getCreateContext: vi.fn(),
+      commit: vi.fn(),
+      dismiss: vi.fn(async () => true)
+    };
+    const workflow = createPendingLoginWorkflow(ports);
+
+    await expect(workflow.loadPrompt("vault-a")).resolves.toMatchObject({
+      prompt: {
+        mode: "update",
+        action: "update"
+      }
+    });
+    expect(ports.findCandidates).toHaveBeenCalledWith(
+      "vault-a",
+      "https://example.com/login?next=%2Fvault"
+    );
+    expect(ports.commit).not.toHaveBeenCalled();
+  });
 });

@@ -1290,6 +1290,37 @@ fn protocol_roundtrips_entry_mutation_commands() {
 }
 
 #[test]
+fn protocol_roundtrips_scoped_browser_entry_mutations_without_receipt_identity() {
+    let create = ProtocolEnvelope::new(RuntimeCommand::CreateAutofillEntry {
+        vault_id: "vault-1".into(),
+        parent_group_id: "group-root".into(),
+        title: "Example".into(),
+        username: "alice".into(),
+        password: "secret".into(),
+        url: "https://example.com/login".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    });
+    let update = ProtocolEnvelope::new(RuntimeCommand::UpdateAutofillEntryFields {
+        vault_id: "vault-1".into(),
+        entry_id: "entry-1".into(),
+        expected_fields: autofill_update_fields("old-secret"),
+        desired_fields: autofill_update_fields("new-secret"),
+    });
+
+    for envelope in [create, update] {
+        let json = serde_json::to_value(&envelope).unwrap();
+        assert!(json.get("operationId").is_none());
+        assert!(json["command"].get("transaction_id").is_none());
+        assert!(json["command"].get("operation_id").is_none());
+        assert_eq!(
+            serde_json::from_value::<ProtocolEnvelope>(json).unwrap(),
+            envelope
+        );
+    }
+}
+
+#[test]
 fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
     let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
         "version": 2,

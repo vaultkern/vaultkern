@@ -7,10 +7,11 @@ use vaultkern_core::{
     save_kdbx_with_transformed_key,
 };
 use vaultkern_runtime_protocol::{
-    CommitStatusDto, DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto,
-    DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
-    DatabaseSettingsUpdateDto, EntryCustomFieldDto, OptionalSettingUpdateDto, PROTOCOL_VERSION,
-    RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+    AutofillUpdateFieldsDto, CommitStatusDto, DatabaseCredentialsUpdateDto,
+    DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto,
+    DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, EntryCustomFieldDto,
+    OptionalSettingUpdateDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse,
+    SaveVaultStatusDto,
 };
 
 fn key() -> CompositeKey {
@@ -1923,5 +1924,127 @@ fn harness_keeps_browser_commands_behind_the_protocol_session_boundary() {
             title: "not-authorized".into(),
         }),
         RuntimeResponse::Error(error) if error.code == "browser_command_forbidden"
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateAutofillEntry {
+            vault_id: "locked-vault".into(),
+            parent_group_id: "locked-group".into(),
+            title: "Locked".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::Error(error) if error.code == "runtime_error"
+    ));
+}
+
+#[test]
+fn browser_login_mutations_commit_once_and_report_pending_publication() {
+    let mut harness =
+        RuntimeProtocolHarness::browser_with_unlocked_in_memory_vault(empty_vault_bytes());
+    assert!(matches!(
+        harness.command(RuntimeCommand::Handshake {
+            protocol_version: PROTOCOL_VERSION,
+            capabilities: vec![
+                "runtime-core".into(),
+                "browser-extension".into(),
+                "browser-autofill".into(),
+            ],
+        }),
+        RuntimeResponse::Handshake(_)
+    ));
+    let vault_id = match harness.command(RuntimeCommand::GetSessionState) {
+        RuntimeResponse::SessionState(state) => {
+            assert!(state.unlocked);
+            state.active_vault_id.expect("active browser vault")
+        }
+        other => panic!("expected unlocked browser session, got {other:?}"),
+    };
+    let root_id = match harness.command(RuntimeCommand::GetAutofillCreateContext {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::AutofillCreateContext(context) => context.root_group_id,
+        other => panic!("expected browser create context, got {other:?}"),
+    };
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateAutofillEntry {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id,
+            title: "Example".into(),
+            username: "alice".into(),
+            password: "first-secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::Saved
+                && result.entry.is_none()
+    ));
+    let entry_id = match harness.command(RuntimeCommand::FindFillCandidates {
+        vault_id: vault_id.clone(),
+        url: "https://example.com/login".into(),
+    }) {
+        RuntimeResponse::FillCandidates(candidates) => {
+            assert_eq!(candidates.entries.len(), 1);
+            candidates.entries.into_iter().next().unwrap().id
+        }
+        other => panic!("expected created browser candidate, got {other:?}"),
+    };
+    let expected_fields = match harness.command(RuntimeCommand::GetAutofillEntryFields {
+        vault_id: vault_id.clone(),
+        entry_id: entry_id.clone(),
+        url: "https://example.com/login".into(),
+    }) {
+        RuntimeResponse::AutofillEntryFields(fields) => fields.fields,
+        other => panic!("expected browser entry fields, got {other:?}"),
+    };
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            expected_fields,
+            desired_fields: AutofillUpdateFieldsDto {
+                username: "alice".into(),
+                password: "second-secret".into(),
+                url: "https://example.com/login".into(),
+            },
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::SavedToCache
+                && result.entry.is_none()
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetAutofillEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://example.com/login".into(),
+        }),
+        RuntimeResponse::AutofillEntryFields(fields)
+            if fields.fields.password == "second-secret"
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+            vault_id,
+            entry_id,
+            expected_fields: AutofillUpdateFieldsDto {
+                username: "alice".into(),
+                password: "second-secret".into(),
+                url: "https://example.com/login".into(),
+            },
+            desired_fields: AutofillUpdateFieldsDto {
+                username: "alice".into(),
+                password: "third-secret".into(),
+                url: "https://attacker.example/login".into(),
+            },
+        }),
+        RuntimeResponse::Error(error) if error.code == "invalid_autofill_mutation"
     ));
 }

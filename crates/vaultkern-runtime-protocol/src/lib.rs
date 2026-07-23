@@ -308,6 +308,22 @@ pub enum RuntimeCommand {
         expected_fields: EntryFieldsDto,
         desired_fields: EntryFieldsDto,
     },
+    CreateAutofillEntry {
+        vault_id: String,
+        parent_group_id: String,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
+        totp_uri: Option<SensitiveString>,
+    },
+    UpdateAutofillEntryFields {
+        vault_id: String,
+        entry_id: String,
+        expected_fields: AutofillUpdateFieldsDto,
+        desired_fields: AutofillUpdateFieldsDto,
+    },
     PersistAutofillMutation {
         transaction_id: String,
         operation_id: String,

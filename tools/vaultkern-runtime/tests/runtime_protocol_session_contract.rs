@@ -1,7 +1,7 @@
 use vaultkern_runtime::{RuntimeProtocolDispatch, RuntimeProtocolSession};
 use vaultkern_runtime_protocol::{
-    PROTOCOL_VERSION, PasskeyCeremonyPhaseDto, PasskeyUserVerificationMethodDto,
-    ResidentAppRouteDto, RuntimeCommand, RuntimeResponse,
+    AutofillUpdateFieldsDto, PROTOCOL_VERSION, PasskeyCeremonyPhaseDto,
+    PasskeyUserVerificationMethodDto, ResidentAppRouteDto, RuntimeCommand, RuntimeResponse,
 };
 
 fn handshake(
@@ -200,6 +200,36 @@ fn browser_clients_are_limited_to_status_autofill_and_passkey_commands() {
             vault_id: "vault-1".into(),
         }),
         RuntimeProtocolDispatch::Dispatch(RuntimeCommand::GetAutofillCreateContext { .. })
+    ));
+    assert!(matches!(
+        browser.accept(RuntimeCommand::CreateAutofillEntry {
+            vault_id: "vault-1".into(),
+            parent_group_id: "group-root".into(),
+            title: "Example".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeProtocolDispatch::Dispatch(RuntimeCommand::CreateAutofillEntry { .. })
+    ));
+    assert!(matches!(
+        browser.accept(RuntimeCommand::UpdateAutofillEntryFields {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+            expected_fields: AutofillUpdateFieldsDto {
+                username: "alice".into(),
+                password: "old-secret".into(),
+                url: "https://example.com/login".into(),
+            },
+            desired_fields: AutofillUpdateFieldsDto {
+                username: "alice".into(),
+                password: "new-secret".into(),
+                url: "https://example.com/login".into(),
+            },
+        }),
+        RuntimeProtocolDispatch::Dispatch(RuntimeCommand::UpdateAutofillEntryFields { .. })
     ));
     assert!(matches!(
         browser.accept(RuntimeCommand::ActivateResidentApp {
