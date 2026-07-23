@@ -828,9 +828,13 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll_with_key_file(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current_with_key_file(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault(
     ): Short
@@ -978,9 +982,13 @@ external fun uniffi_vaultkern_uniffi_fn_free_vaultunlock(`handle`: Long,uniffi_o
 ): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll_with_key_file(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFile`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_revoke(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current_with_key_file(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFile`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_vault(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1234,10 +1242,16 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll_with_key_file() != 32705.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current() != 40935.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_current_with_key_file() != 43179.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_unlock_vault() != 44285.toShort()) {
@@ -4133,9 +4147,13 @@ public interface VaultUnlockInterface {
 
     fun `enroll`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
+    fun `enrollWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
+
     fun `revoke`(): SessionStateDto
 
     fun `unlockCurrent`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
+
+    fun `unlockCurrentWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
     fun `unlockVault`(`vaultId`: kotlin.String, `password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
@@ -4255,6 +4273,20 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
 
 
 
+    @Throws(VaultKernException::class)override fun `enrollWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll_with_key_file(
+        it,
+        FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterTypeSensitiveBytes.lower(`keyFile`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
+}
+    }
+    )
+    }
+
+
+
     @Throws(VaultKernException::class)override fun `revoke`(): SessionStateDto {
             return FfiConverterTypeSessionStateDto.lift(
     callWithHandle {
@@ -4276,6 +4308,20 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current(
         it,
         FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `unlockCurrentWithKeyFile`(`password`: SensitiveString?, `keyFile`: SensitiveBytes, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_unlock_current_with_key_file(
+        it,
+        FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterTypeSensitiveBytes.lower(`keyFile`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
 }
     }
     )
