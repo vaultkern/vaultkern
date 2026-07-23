@@ -758,7 +758,7 @@ describe("pending autofill V2 store", () => {
       }
     });
     const changed = updatePlan();
-    changed.expectedFields.notes = "changed elsewhere";
+    changed.expectedFields.username = "changed elsewhere";
 
     await expect(
       store.plan(7, TRANSACTION_ID, {

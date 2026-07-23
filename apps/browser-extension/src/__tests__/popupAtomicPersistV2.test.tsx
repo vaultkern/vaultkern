@@ -9,6 +9,7 @@ import {
   planPendingAutofillSubmission
 } from "../popupShell";
 import { PopupApp } from "../popup/PopupApp";
+import { createPendingLoginWorkflow } from "../popup/pendingLoginWorkflow";
 import { useDomRenderEnvironment } from "../autofill/__tests__/renderEnvironment";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000101";
@@ -137,16 +138,27 @@ function renderPopup(options: {
     }));
   const dismiss = options.dismiss ?? vi.fn(async () => true);
   const execute = options.execute ?? vi.fn(async () => ({ ok: true }));
+  const findCandidates = vi.fn(async () => []);
+  const pendingLoginWorkflow = createPendingLoginWorkflow({
+    load: async () => options.pending as never,
+    findCandidates,
+    getEntryFields: (vaultId, entryId, url) =>
+      client.getAutofillEntryFields(vaultId, entryId, url),
+    getCreateContext: (vaultId) => client.getAutofillCreateContext(vaultId),
+    findExactMatchingEntryIds: (vaultId, desiredFields) =>
+      client.findExactMatchingEntryIds(vaultId, desiredFields),
+    plan: plan as never,
+    dismiss,
+    execute
+  });
   render(
     <PopupApp
       client={client}
       activeSite={async () => "example.com"}
-      findCandidates={async () => []}
+      findCandidates={findCandidates}
       fillEntry={async () => undefined}
-      loadPendingAutofillSubmission={async () => options.pending as never}
-      planPendingAutofillSubmission={plan as never}
-      dismissPendingAutofillSubmission={dismiss}
-      executePendingAutofillMutation={execute}
+      pendingLoginWorkflow={pendingLoginWorkflow}
+      openResidentApp={async () => undefined}
     />
   );
   return { client, plan, dismiss, execute };
