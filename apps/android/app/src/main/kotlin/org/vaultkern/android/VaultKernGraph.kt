@@ -6,6 +6,8 @@ import java.io.File
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.vaultkern.android.credentials.AutofillTargetResolver
 import org.vaultkern.android.credentials.AutofillVaultPort
 import org.vaultkern.android.credentials.CredentialReleaseCoordinator
@@ -15,8 +17,11 @@ import org.vaultkern.android.credentials.PasskeyCeremony
 import org.vaultkern.android.credentials.PasskeyClientContextResolver
 import org.vaultkern.android.credentials.WebAuthnCodec
 import org.vaultkern.android.credentials.signingCertificateFingerprints
+import org.vaultkern.android.security.AndroidKeystoreOneDriveTokenCipherBackend
 import org.vaultkern.android.security.AndroidKeystoreUnlockCipherBackend
+import org.vaultkern.android.security.AndroidOneDriveTokenAdapter
 import org.vaultkern.android.security.AndroidUnlockBlobAdapter
+import org.vaultkern.android.security.AtomicOneDriveTokenRecordStore
 import org.vaultkern.android.security.AtomicUnlockBlobRecordStore
 import org.vaultkern.android.security.ProcessBiometricGate
 import org.vaultkern.android.security.UnlockEnrollmentState
@@ -27,18 +32,19 @@ import org.vaultkern.android.settings.QuickUnlockSettingsController
 import org.vaultkern.android.settings.ReconciliationScheduler
 import org.vaultkern.android.storage.AndroidLocalDocumentAccess
 import org.vaultkern.android.storage.LocalDocumentSelectionService
+import org.vaultkern.android.storage.LocalDocumentReconciler
 import org.vaultkern.android.storage.LocalDocumentWorkspace
 import org.vaultkern.android.storage.SelectedLocalDocument
+import org.vaultkern.android.sync.AndroidOneDriveAuthPresenter
+import org.vaultkern.android.sync.OneDriveWorkflow
 import org.vaultkern.android.unlock.CorePostUnlockReconciliation
 import org.vaultkern.android.unlock.UnlockCoordinator
 import org.vaultkern.android.unlock.reconcilePlatformStores
 import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
+import org.vaultkern.android.vault.ResidentVaultSelection
 import org.vaultkern.android.vault.VaultEditorWorkflow
 import org.vaultkern.android.vault.VaultKernResidentVaultPort
-import org.vaultkern.core.OneDriveTokenAdapter
-import org.vaultkern.core.PlatformAdapterException
 import org.vaultkern.core.ResidentPlatform
-import org.vaultkern.core.VaultKernSensitiveString
 import org.vaultkern.core.VaultSession
 import org.vaultkern.core.VaultSessionConfig
 
@@ -49,11 +55,16 @@ class VaultKernGraph(context: Context) {
     }
     private val records = AtomicUnlockBlobRecordStore(applicationContext)
     private val biometricGate = ProcessBiometricGate(applicationContext)
+    private val localDocumentSourceGate = ReentrantLock()
     private val privilegedCredentialApps: String by lazy {
         applicationContext.resources.openRawResource(R.raw.gpm_passkeys_privileged_apps)
             .bufferedReader(StandardCharsets.UTF_8)
             .use { it.readText() }
     }
+    val oneDriveTokenAdapter = AndroidOneDriveTokenAdapter(
+        AtomicOneDriveTokenRecordStore(applicationContext),
+        AndroidKeystoreOneDriveTokenCipherBackend(applicationContext),
+    )
 
     val unlockBlobAdapter = AndroidUnlockBlobAdapter(
         records = records,
@@ -75,10 +86,6 @@ class VaultKernGraph(context: Context) {
         File(applicationContext.noBackupFilesDir, "local-document-workspaces"),
         localDocumentAccess,
     )
-    private val localDocumentSelection = LocalDocumentSelectionService(
-        localDocumentAccess,
-        localDocumentWorkspace,
-    )
     private val localDocumentSaves = SelectedLocalDocumentSaveCoordinator(
         localDocumentWorkspace,
     )
@@ -89,8 +96,25 @@ class VaultKernGraph(context: Context) {
             File(applicationContext.noBackupFilesDir, "resident-temporary").absolutePath,
         ),
         unlockBlobAdapter,
-        UnconfiguredOneDriveTokenAdapter(),
+        oneDriveTokenAdapter,
     )
+    private val localDocumentReconciler = LocalDocumentReconciler(
+        reconcilePending = {
+            localDocumentWorkspace.reconcilePending()
+            Unit
+        },
+        refreshAuthorities = {
+            localDocumentWorkspace.refreshFromAuthorities()
+            Unit
+        },
+    )
+    private val localDocumentSelection = LocalDocumentSelectionService(
+        localDocumentAccess,
+        localDocumentWorkspace,
+    ) { privatePath ->
+        session.openVault(privatePath)
+        Unit
+    }
 
     private val residentUnlockPort = VaultKernResidentUnlockPort(session)
     private val actualState = CurrentVaultQuickUnlockActualState(
@@ -103,7 +127,8 @@ class VaultKernGraph(context: Context) {
     val unlockCoordinator = UnlockCoordinator(
         residentUnlockPort,
         CorePostUnlockReconciliation(reconciler, ::reconcilePlatformStorage),
-        beforeQuickUnlock = ::reconcileLocalDocuments,
+        beforeUnlock = ::prepareCurrentDocumentForUnlock,
+        sourceGate = localDocumentSourceGate,
     )
     private val freshCredentialVerification = FreshUserVerification(unlockBlobAdapter::authorize)
     val webAuthnCodec = WebAuthnCodec()
@@ -131,8 +156,13 @@ class VaultKernGraph(context: Context) {
         desiredSettings,
         ReconciliationScheduler { scheduleReconciliation() },
     )
+    val vaultSelection = ResidentVaultSelection(session)
     val vaultWorkflow = VaultEditorWorkflow(
         VaultKernResidentVaultPort(session, localDocumentSaves),
+    )
+    val oneDriveWorkflow = OneDriveWorkflow(
+        session,
+        AndroidOneDriveAuthPresenter(applicationContext),
     )
 
     @Volatile
@@ -156,14 +186,26 @@ class VaultKernGraph(context: Context) {
     fun selectLocalDocument(uri: String): SelectedLocalDocument =
         localDocumentSelection.select(uri)
 
+    private fun prepareCurrentDocumentForUnlock() {
+        localDocumentReconciler.prepareForUnlock(
+            vaultUnlocked = session.sessionState().unlocked,
+            currentSourceIsLocal = vaultSelection.current()?.sourceKind == "local",
+        )
+    }
+
     private fun reconcileLocalDocuments() {
-        localDocumentWorkspace.reconcilePending()
-        localDocumentWorkspace.refreshFromAuthorities()
+        localDocumentSourceGate.withLock {
+            localDocumentReconciler.reconcile(
+                vaultUnlocked = session.sessionState().unlocked,
+                refreshAuthority = vaultSelection.current()?.sourceKind == "local",
+            )
+        }
     }
 
     private fun reconcilePlatformStorage() {
         reconcilePlatformStores(
             unlockBlobAdapter::reconcileStorage,
+            oneDriveTokenAdapter::reconcileStorage,
             ::reconcileLocalDocuments,
         )
     }
@@ -176,15 +218,5 @@ class VaultKernGraph(context: Context) {
             ).reconcile(null)
         }
     }
-}
 
-private class UnconfiguredOneDriveTokenAdapter : OneDriveTokenAdapter {
-    override fun loadRefreshToken(): VaultKernSensitiveString? = null
-
-    override fun storeRefreshToken(token: VaultKernSensitiveString) {
-        token.close()
-        throw PlatformAdapterException.Failure("OneDrive account is not configured")
-    }
-
-    override fun deleteRefreshToken() = Unit
 }

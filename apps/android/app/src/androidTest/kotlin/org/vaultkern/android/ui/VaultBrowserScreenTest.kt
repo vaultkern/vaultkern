@@ -8,6 +8,7 @@ import androidx.compose.ui.test.performClick
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
+import org.vaultkern.android.sync.AndroidSyncStatus
 import org.vaultkern.android.vault.VaultEntryDraft
 import org.vaultkern.android.vault.VaultEntryListItem
 
@@ -68,5 +69,65 @@ class VaultBrowserScreenTest {
         compose.onNodeWithTag("save-entry").assertIsDisplayed()
         compose.onNodeWithTag("conflict-copy-path").assertIsDisplayed()
         compose.onNodeWithText("/vaults/demo (conflict).kdbx").assertIsDisplayed()
+    }
+
+    @Test
+    fun completedRecoverableConflictCopyIsVisible() {
+        var syncs = 0
+        compose.setContent {
+            VaultBrowserScreen(
+                entries = emptyList(),
+                editor = null,
+                busy = false,
+                status = "Vault unlocked",
+                conflictCopyPath = null,
+                syncStatus = AndroidSyncStatus(
+                    sourceKind = "onedrive",
+                    remoteState = "online",
+                    lastSyncAt = 123,
+                    cachedAt = 123,
+                    lastError = "local changes were saved to onedrive:Vault-conflict.kdbx",
+                ),
+                onEntrySelected = {},
+                onDraftChanged = {},
+                onSave = {},
+                onCloseEditor = {},
+                onSync = { syncs += 1 },
+                onLock = {},
+            )
+        }
+
+        compose.onNodeWithTag("sync-state").assertIsDisplayed()
+        compose.onNodeWithTag("sync-conflict-copy").assertIsDisplayed()
+        compose.onNodeWithTag("sync-now").performClick()
+        assertEquals(1, syncs)
+    }
+
+    @Test
+    fun pendingConflictCopyPublicationOffersRetryWithoutClaimingCompletion() {
+        compose.setContent {
+            VaultBrowserScreen(
+                entries = emptyList(),
+                editor = null,
+                busy = false,
+                status = "OneDrive sync pending",
+                conflictCopyPath = null,
+                syncStatus = AndroidSyncStatus(
+                    sourceKind = "onedrive",
+                    remoteState = "pending_sync",
+                    lastSyncAt = null,
+                    cachedAt = 123,
+                    lastError = "conflict-copy publication remains pending: network unavailable",
+                ),
+                onEntrySelected = {},
+                onDraftChanged = {},
+                onSave = {},
+                onCloseEditor = {},
+                onLock = {},
+            )
+        }
+
+        compose.onNodeWithTag("sync-conflict-copy").assertDoesNotExist()
+        compose.onNodeWithText("Retry OneDrive sync").assertIsDisplayed()
     }
 }

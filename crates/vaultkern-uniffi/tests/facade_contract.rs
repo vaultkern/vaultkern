@@ -447,6 +447,26 @@ fn current_source_can_be_loaded_and_unlocked_after_only_its_reference_remains() 
 }
 
 #[test]
+fn current_source_can_be_preloaded_through_the_sources_facade() {
+    let (_dir, session, _adapter, vault_id) = opened_session();
+    session.close_vault(vault_id.clone()).unwrap();
+
+    let state = session.sources().preload_current_vault().unwrap();
+
+    assert!(!state.unlocked);
+    assert!(state.current_vault_ref_id.is_some());
+    session.close_vault(vault_id.clone()).unwrap();
+    session.sources().preload_current_vault().unwrap();
+    assert!(
+        session
+            .unlock()
+            .unlock_current(Some(FIXTURE_PASSWORD.into()), None, false)
+            .unwrap()
+            .unlocked
+    );
+}
+
+#[test]
 fn failed_load_presence_query_requires_explicit_authorization() {
     let (_dir, session, adapter, _vault_id) = opened_session();
     let unlock = session.unlock();

@@ -8,8 +8,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -23,6 +26,8 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.vaultkern.android.security.UnlockEnrollmentState
 import org.vaultkern.android.security.UnlockKeySecurityLevel
+import org.vaultkern.android.sync.AndroidSyncStatus
+import org.vaultkern.android.sync.OneDriveBrowserItem
 import org.vaultkern.android.vault.VaultEntryDraft
 import org.vaultkern.android.vault.VaultEntryListItem
 
@@ -35,10 +40,19 @@ data class UnlockUiState(
     val keySecurityLevel: UnlockKeySecurityLevel? = null,
     val busy: Boolean = false,
     val status: String = "Select a vault and unlock it",
+    val currentVaultSelected: Boolean = false,
     val vaultUnlocked: Boolean = false,
     val entries: List<VaultEntryListItem> = emptyList(),
     val editor: VaultEntryDraft? = null,
     val conflictCopyPath: String? = null,
+    val oneDriveAuthPending: Boolean = false,
+    val oneDriveConnected: Boolean = false,
+    val oneDriveAccountLabel: String? = null,
+    val oneDriveItems: List<OneDriveBrowserItem> = emptyList(),
+    val oneDriveFolderId: String? = null,
+    val oneDriveVaultSelected: Boolean = false,
+    val oneDriveSelectedName: String? = null,
+    val syncStatus: AndroidSyncStatus? = null,
 ) {
     override fun toString(): String =
         "UnlockUiState(" +
@@ -50,10 +64,19 @@ data class UnlockUiState(
             "keySecurityLevel=$keySecurityLevel, " +
             "busy=$busy, " +
             "status=$status, " +
+            "currentVaultSelected=$currentVaultSelected, " +
             "vaultUnlocked=$vaultUnlocked, " +
             "entryCount=${entries.size}, " +
             "editor=${if (editor == null) "closed" else "[REDACTED]"}, " +
-            "conflictCopyPath=${if (conflictCopyPath == null) "none" else "[REDACTED]"})"
+            "conflictCopyPath=${if (conflictCopyPath == null) "none" else "[REDACTED]"}, " +
+            "oneDriveAuthPending=$oneDriveAuthPending, " +
+            "oneDriveConnected=$oneDriveConnected, " +
+            "oneDriveAccountLabel=${if (oneDriveAccountLabel == null) "none" else "[REDACTED]"}, " +
+            "oneDriveItemCount=${oneDriveItems.size}, " +
+            "oneDriveFolderId=${if (oneDriveFolderId == null) "root" else "[REDACTED]"}, " +
+            "oneDriveVaultSelected=$oneDriveVaultSelected, " +
+            "oneDriveSelectedName=${if (oneDriveSelectedName == null) "none" else "[REDACTED]"}, " +
+            "syncStatus=$syncStatus)"
 }
 
 @Composable
@@ -64,12 +87,17 @@ fun VaultKernUnlockScreen(
     onQuickUnlock: () -> Unit,
     onQuickUnlockDesiredChanged: (Boolean) -> Unit,
     onChooseLocalVault: () -> Unit = {},
+    onBeginOneDriveLogin: () -> Unit = {},
+    onCompleteOneDriveLogin: () -> Unit = {},
+    onOneDriveItemSelected: (OneDriveBrowserItem) -> Unit = {},
+    onOneDriveRoot: () -> Unit = {},
 ) {
     MaterialTheme {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(24.dp),
+                .padding(24.dp)
+                .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Text("VaultKern", style = MaterialTheme.typography.headlineMedium)
@@ -97,10 +125,11 @@ fun VaultKernUnlockScreen(
             )
             Button(
                 onClick = onInteractiveUnlock,
-                enabled = !state.busy && state.vaultPath.isNotBlank(),
+                enabled = !state.busy &&
+                    (state.vaultPath.isNotBlank() || state.currentVaultSelected),
                 modifier = Modifier.fillMaxWidth().testTag("interactive-unlock"),
             ) {
-                Text("Open and unlock")
+                Text(if (state.oneDriveVaultSelected) "Unlock selected OneDrive vault" else "Open and unlock")
             }
             Button(
                 onClick = onQuickUnlock,
@@ -131,6 +160,55 @@ fun VaultKernUnlockScreen(
                 securityLabel(state.keySecurityLevel),
                 modifier = Modifier.testTag("unlock-security-level"),
             )
+            Spacer(Modifier.height(8.dp))
+            Text("OneDrive", style = MaterialTheme.typography.titleMedium)
+            state.oneDriveAccountLabel?.let { Text("Connected account: $it") }
+            state.oneDriveSelectedName?.let {
+                Text("Selected vault: $it", modifier = Modifier.testTag("onedrive-selected"))
+            }
+            if (state.oneDriveAuthPending) {
+                Button(
+                    onClick = onCompleteOneDriveLogin,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth().testTag("onedrive-complete-login"),
+                ) {
+                    Text("Complete OneDrive sign-in")
+                }
+                Text("Finish sign-in in the browser, then return and tap Complete.")
+            } else {
+                OutlinedButton(
+                    onClick = onBeginOneDriveLogin,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth().testTag("onedrive-begin-login"),
+                ) {
+                    Text(if (state.oneDriveConnected) "Reconnect OneDrive" else "Connect OneDrive")
+                }
+                if (state.oneDriveConnected) {
+                    OutlinedButton(
+                        onClick = onOneDriveRoot,
+                        enabled = !state.busy,
+                        modifier = Modifier.fillMaxWidth().testTag("onedrive-browse"),
+                    ) {
+                        Text("Browse OneDrive")
+                    }
+                }
+            }
+            if (state.oneDriveFolderId != null) {
+                OutlinedButton(
+                    onClick = onOneDriveRoot,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text("Back to OneDrive root") }
+            }
+            state.oneDriveItems.forEach { item ->
+                OutlinedButton(
+                    onClick = { onOneDriveItemSelected(item) },
+                    enabled = !state.busy && (item.folder || item.name.endsWith(".kdbx", true)),
+                    modifier = Modifier.fillMaxWidth().testTag("onedrive-item-${item.itemId}"),
+                ) {
+                    Text(if (item.folder) "Folder: ${item.name}" else item.name)
+                }
+            }
         }
     }
 }

@@ -818,6 +818,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_preload_current_vault(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_set_current_vault(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsync_status(
@@ -957,6 +959,8 @@ external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_list_one_drive_children(`ptr`: Long,`parentItemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_list_recent(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_preload_current_vault(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_set_current_vault(`ptr`: Long,`vaultRefId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1213,6 +1217,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent() != 25381.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_preload_current_vault() != 6863.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_set_current_vault() != 19482.toShort()) {
@@ -1897,7 +1904,13 @@ internal object uniffiCallbackInterfaceOneDriveTokenAdapter {
                 uniffiObj.`loadRefreshToken`(
                 )
             }
-            val writeReturn = { value: SensitiveString? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value)) }
+            val writeReturn = { value: SensitiveString? ->
+                try {
+                    uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value))
+                } finally {
+                    value?.close()
+                }
+            }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -2477,7 +2490,13 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
                     FfiConverterString.lift(`key`),
                 )
             }
-            val writeReturn = { value: SensitiveBytes? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value)) }
+            val writeReturn = { value: SensitiveBytes? ->
+                try {
+                    uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveBytes.lower(value))
+                } finally {
+                    value?.close()
+                }
+            }
             uniffiTraitInterfaceCallWithError(
                 uniffiCallStatus,
                 makeCall,
@@ -3508,6 +3527,8 @@ public interface VaultSourcesInterface {
 
     fun `listRecent`(): VaultReferenceListDto
 
+    fun `preloadCurrentVault`(): SessionStateDto
+
     fun `setCurrentVault`(`vaultRefId`: kotlin.String): SessionStateDto
 
     companion object
@@ -3671,6 +3692,20 @@ open class VaultSources: Disposable, AutoCloseable, VaultSourcesInterface
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_list_recent(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `preloadCurrentVault`(): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_preload_current_vault(
         it,
         _status)
 }

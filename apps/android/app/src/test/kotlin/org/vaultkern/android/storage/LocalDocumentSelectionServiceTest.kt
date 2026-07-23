@@ -17,10 +17,12 @@ class LocalDocumentSelectionServiceTest {
         val bytes = ByteArray(32) { 31 }
         val access = RecordingPersistableAccess(uri, bytes)
         val workspace = LocalDocumentWorkspace(temporary.newFolder("selection"), access)
+        val opened = mutableListOf<String>()
 
-        val selected = LocalDocumentSelectionService(access, workspace).select(uri)
+        val selected = LocalDocumentSelectionService(access, workspace) { opened += it }.select(uri)
 
         assertEquals(listOf("retain:$uri", "name:$uri", "read:$uri"), access.events)
+        assertEquals(listOf(selected.privatePath), opened)
         assertEquals("chosen.kdbx", selected.displayName)
         assertArrayEquals(bytes, File(selected.privatePath).readBytes())
         assertEquals(uri, workspace.bindingFor(selected.privatePath)?.sourceUri)

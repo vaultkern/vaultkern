@@ -1,6 +1,8 @@
 package org.vaultkern.android.unlock
 
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import org.vaultkern.android.settings.QuickUnlockReconciler
 
 enum class UnlockAttemptOutcome {
@@ -14,6 +16,7 @@ enum class UnlockAttemptOutcome {
 
 interface ResidentUnlockPort {
     fun interactiveUnlock(path: String, credential: CharArray)
+    fun interactiveUnlockCurrent(credential: CharArray)
     fun quickUnlock(): UnlockAttemptOutcome
     fun enrollQuickUnlock(credential: CharArray)
 }
@@ -61,13 +64,23 @@ class CorePostUnlockReconciliation(
 class UnlockCoordinator(
     private val port: ResidentUnlockPort,
     private val reconciliation: PostUnlockReconciliation,
-    private val beforeQuickUnlock: () -> Unit = {},
+    private val beforeUnlock: () -> Unit = {},
+    private val sourceGate: ReentrantLock? = null,
 ) {
     private val reconciliationFailure = AtomicReference<String?>(null)
 
-    fun interactiveUnlock(path: String, credential: CharArray): UnlockAttemptOutcome = try {
+    fun interactiveUnlock(path: String, credential: CharArray): UnlockAttemptOutcome =
+        interactiveUnlock(credential) { port.interactiveUnlock(path, credential) }
+
+    fun interactiveUnlockCurrent(credential: CharArray): UnlockAttemptOutcome =
+        interactiveUnlock(credential) { port.interactiveUnlockCurrent(credential) }
+
+    private fun interactiveUnlock(
+        credential: CharArray,
+        unlock: () -> Unit,
+    ): UnlockAttemptOutcome = try {
         reconciliationFailure.set(null)
-        port.interactiveUnlock(path, credential)
+        withPreparedSource(unlock)
         try {
             reconciliation.reconcile {
                 port.enrollQuickUnlock(credential)
@@ -81,8 +94,7 @@ class UnlockCoordinator(
     }
 
     fun quickUnlock(): UnlockAttemptOutcome {
-        beforeQuickUnlock()
-        val outcome = port.quickUnlock()
+        val outcome = withPreparedSource(port::quickUnlock)
         if (outcome == UnlockAttemptOutcome.UNLOCKED) {
             reconciliationFailure.set(null)
             try {
@@ -95,4 +107,17 @@ class UnlockCoordinator(
     }
 
     fun lastReconciliationFailure(): String? = reconciliationFailure.get()
+
+    private fun <T> withPreparedSource(action: () -> T): T {
+        val gate = sourceGate
+        return if (gate == null) {
+            beforeUnlock()
+            action()
+        } else {
+            gate.withLock {
+                beforeUnlock()
+                action()
+            }
+        }
+    }
 }
