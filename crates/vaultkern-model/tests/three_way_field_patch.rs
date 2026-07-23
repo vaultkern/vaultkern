@@ -440,6 +440,160 @@ fn duplicate_modeled_meta_uuids_fall_back_instead_of_being_collapsed() {
 }
 
 #[test]
+fn concurrent_custom_icon_edits_fall_back_when_the_loser_has_no_history_home() {
+    let (mut base, _) = base_vault();
+    let icon_id = Uuid::new_v4();
+    base.custom_icons.push(CustomIcon {
+        id: icon_id,
+        data: vec![1],
+        name: Some("Base".into()),
+        last_modified: Some(10),
+    });
+
+    let mut local = base.clone();
+    local.custom_icons[0] = CustomIcon {
+        id: icon_id,
+        data: vec![2],
+        name: Some("Local".into()),
+        last_modified: Some(30),
+    };
+    let mut remote = base.clone();
+    remote.custom_icons[0] = CustomIcon {
+        id: icon_id,
+        data: vec![3],
+        name: Some("Remote".into()),
+        last_modified: Some(20),
+    };
+
+    assert!(matches!(
+        three_way_field_patch(&base, &local, &remote),
+        Err(ThreeWayPatchError::FidelityConflict {
+            object: "meta",
+            id: None,
+            field: "custom icon",
+        })
+    ));
+}
+
+#[test]
+fn identical_custom_icon_content_merges_the_latest_timestamp_without_conflict() {
+    let (mut base, _) = base_vault();
+    let icon_id = Uuid::new_v4();
+    base.custom_icons.push(CustomIcon {
+        id: icon_id,
+        data: vec![1],
+        name: Some("Base".into()),
+        last_modified: Some(10),
+    });
+
+    let mut local = base.clone();
+    local.custom_icons[0] = CustomIcon {
+        id: icon_id,
+        data: vec![2],
+        name: Some("Converged".into()),
+        last_modified: Some(20),
+    };
+    let mut remote = base.clone();
+    remote.custom_icons[0] = CustomIcon {
+        id: icon_id,
+        data: vec![2],
+        name: Some("Converged".into()),
+        last_modified: Some(30),
+    };
+
+    assert_eq!(
+        three_way_field_patch(&base, &local, &remote)
+            .unwrap()
+            .vault
+            .custom_icons,
+        vec![CustomIcon {
+            id: icon_id,
+            data: vec![2],
+            name: Some("Converged".into()),
+            last_modified: Some(30),
+        }]
+    );
+}
+
+#[test]
+fn custom_icon_timestamp_only_change_does_not_beat_delete() {
+    let (mut base, _) = base_vault();
+    let icon_id = Uuid::new_v4();
+    base.custom_icons.push(CustomIcon {
+        id: icon_id,
+        data: vec![1],
+        name: Some("Base".into()),
+        last_modified: Some(10),
+    });
+
+    let mut local_timestamp = base.clone();
+    local_timestamp.custom_icons[0].last_modified = Some(30);
+    let mut remote_delete = base.clone();
+    remote_delete.custom_icons.clear();
+    assert!(
+        three_way_field_patch(&base, &local_timestamp, &remote_delete)
+            .unwrap()
+            .vault
+            .custom_icons
+            .is_empty()
+    );
+
+    let mut local_delete = base.clone();
+    local_delete.custom_icons.clear();
+    let mut remote_timestamp = base.clone();
+    remote_timestamp.custom_icons[0].last_modified = Some(30);
+    assert!(
+        three_way_field_patch(&base, &local_delete, &remote_timestamp)
+            .unwrap()
+            .vault
+            .custom_icons
+            .is_empty()
+    );
+}
+
+#[test]
+fn custom_icon_edit_beats_delete_in_both_directions() {
+    let (mut base, _) = base_vault();
+    let icon_id = Uuid::new_v4();
+    base.custom_icons.push(CustomIcon {
+        id: icon_id,
+        data: vec![1],
+        name: Some("Base".into()),
+        last_modified: Some(10),
+    });
+    let edited = CustomIcon {
+        id: icon_id,
+        data: vec![2],
+        name: Some("Edited".into()),
+        last_modified: Some(20),
+    };
+
+    let mut local_edit = base.clone();
+    local_edit.custom_icons[0] = edited.clone();
+    let mut remote_delete = base.clone();
+    remote_delete.custom_icons.clear();
+    assert_eq!(
+        three_way_field_patch(&base, &local_edit, &remote_delete)
+            .unwrap()
+            .vault
+            .custom_icons,
+        vec![edited.clone()]
+    );
+
+    let mut local_delete = base.clone();
+    local_delete.custom_icons.clear();
+    let mut remote_edit = base.clone();
+    remote_edit.custom_icons[0] = edited.clone();
+    assert_eq!(
+        three_way_field_patch(&base, &local_delete, &remote_edit)
+            .unwrap()
+            .vault
+            .custom_icons,
+        vec![edited]
+    );
+}
+
+#[test]
 fn totp_and_passkey_are_independent_whole_units() {
     let (mut base, entry_id) = base_vault();
     let base_entry = entry_mut(&mut base.root, entry_id).unwrap();
@@ -749,6 +903,36 @@ fn concurrent_group_field_edits_fall_back_when_loser_has_no_history() {
 }
 
 #[test]
+fn disjoint_group_edits_do_not_conflict_only_because_modified_timestamps_differ() {
+    let mut base = Vault::empty("Shared");
+    let mut folder = Group::new("Base");
+    folder.notes = "base notes".into();
+    folder.times = Some(GroupTimes {
+        created_at: 1,
+        modified_at: 10,
+        expires: false,
+        expiry_time: None,
+        last_accessed_at: None,
+        usage_count: None,
+        location_changed_at: None,
+    });
+    base.root.children.push(folder);
+
+    let mut local = base.clone();
+    local.root.children[0].title = "Local title".into();
+    local.root.children[0].times.as_mut().unwrap().modified_at = 20;
+    let mut remote = base.clone();
+    remote.root.children[0].notes = "remote notes".into();
+    remote.root.children[0].times.as_mut().unwrap().modified_at = 30;
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let merged = &patched.vault.root.children[0];
+    assert_eq!(merged.title, "Local title");
+    assert_eq!(merged.notes, "remote notes");
+    assert_eq!(merged.times.unwrap().modified_at, 30);
+}
+
+#[test]
 fn concurrent_meta_field_edits_fall_back_when_loser_has_no_history() {
     let mut base = Vault::empty("Base");
     base.database_name_changed = Some(10);
@@ -769,6 +953,64 @@ fn concurrent_meta_field_edits_fall_back_when_loser_has_no_history() {
             ..
         })
     ));
+}
+
+#[test]
+fn identical_meta_values_merge_latest_change_timestamps_without_conflict() {
+    let mut base = Vault::empty("Base");
+    base.database_name_changed = Some(10);
+    base.description = Some("base description".into());
+    base.description_changed = Some(10);
+    base.default_username = Some("base-user".into());
+    base.default_username_changed = Some(10);
+
+    let mut local = base.clone();
+    local.name = "Converged".into();
+    local.database_name_changed = Some(20);
+    local.description = Some("converged description".into());
+    local.description_changed = Some(21);
+    local.default_username = Some("converged-user".into());
+    local.default_username_changed = Some(22);
+
+    let mut remote = local.clone();
+    remote.database_name_changed = Some(30);
+    remote.description_changed = Some(31);
+    remote.default_username_changed = Some(32);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    assert_eq!(patched.vault.name, "Converged");
+    assert_eq!(patched.vault.database_name_changed, Some(30));
+    assert_eq!(
+        patched.vault.description.as_deref(),
+        Some("converged description")
+    );
+    assert_eq!(patched.vault.description_changed, Some(31));
+    assert_eq!(
+        patched.vault.default_username.as_deref(),
+        Some("converged-user")
+    );
+    assert_eq!(patched.vault.default_username_changed, Some(32));
+}
+
+#[test]
+fn disjoint_meta_settings_merge_when_both_sides_advance_settings_changed() {
+    let mut base = Vault::empty("Shared");
+    base.settings_changed = Some(10);
+    base.history_max_items = Some(10);
+    base.history_max_size = Some(1_000);
+
+    let mut local = base.clone();
+    local.settings_changed = Some(20);
+    local.history_max_items = Some(20);
+
+    let mut remote = base.clone();
+    remote.settings_changed = Some(30);
+    remote.history_max_size = Some(2_000);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    assert_eq!(patched.vault.settings_changed, Some(30));
+    assert_eq!(patched.vault.history_max_items, Some(20));
+    assert_eq!(patched.vault.history_max_size, Some(2_000));
 }
 
 #[test]

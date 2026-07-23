@@ -329,8 +329,7 @@ fn create_registration_material(
     credential_id: String,
     authenticator_aaguid: [u8; 16],
 ) -> Result<PasskeyRegistrationMaterial> {
-    validate_public_key_algorithm(public_key_algorithm)?;
-    validate_user_handle(user_handle_base64url)?;
+    validate_passkey_registration_parameters(user_handle_base64url, public_key_algorithm)?;
     let credential_id_bytes = URL_SAFE_NO_PAD
         .decode(&credential_id)
         .context("generated passkey credential id was not base64url")?;
@@ -636,11 +635,14 @@ fn validate_user_handle(user_handle_base64url: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_public_key_algorithm(public_key_algorithm: i32) -> Result<()> {
+pub(crate) fn validate_passkey_registration_parameters(
+    user_handle_base64url: &str,
+    public_key_algorithm: i32,
+) -> Result<()> {
     if public_key_algorithm != ES256_COSE_ALGORITHM {
         anyhow::bail!("unsupported passkey public key algorithm");
     }
-    Ok(())
+    validate_user_handle(user_handle_base64url)
 }
 
 fn attested_authenticator_data(

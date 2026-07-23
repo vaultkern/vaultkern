@@ -760,6 +760,69 @@ it("removes rendered secrets when the resident session is invalidated by another
   expect(await screen.findByRole("heading", { name: "Unlock your vault" })).toBeInTheDocument();
 });
 
+it("scrubs loaded entry projections on a same-identity resident invalidation", async () => {
+  let publishSessionState!: (state: {
+    unlocked: boolean;
+    activeVaultId: string | null;
+    currentVaultRefId: string | null;
+  }) => void;
+  const subscribeSessionState = vi.fn(async (listener: typeof publishSessionState) => {
+    publishSessionState = listener;
+    return () => undefined;
+  });
+  const unlockedSession = {
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1"
+  };
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: vi.fn(async () => unlockedSession),
+    listGroups: vi.fn(async () => ({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Demo Vault",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    })),
+    listEntries: vi.fn(async () => [
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn(async () => ({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Example",
+      username: "alice",
+      password: "same-session-secret",
+      url: "https://example.com",
+      notes: "",
+      totp: null
+    }))
+  } satisfies RuntimeClientLike;
+
+  render(<App client={client} subscribeSessionState={subscribeSessionState} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  expect(await screen.findByDisplayValue("same-session-secret")).toBeInTheDocument();
+  await waitFor(() => expect(subscribeSessionState).toHaveBeenCalledTimes(1));
+
+  act(() => {
+    publishSessionState({ ...unlockedSession });
+  });
+
+  expect(screen.queryByDisplayValue("same-session-secret")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Example" })).toBeInTheDocument();
+});
+
 it("navigates the resident UI when the native shell receives a fixed browser route", async () => {
   let publishOpenRoute!: (route: "unlock" | "vaults" | "settings") => void;
   const subscribeOpenRoute = vi.fn(async (listener: typeof publishOpenRoute) => {
@@ -3463,7 +3526,7 @@ it("retries a failed passkey save without clearing the passkey again", async () 
   expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
 });
 
-it("stabilizes an unknown passkey mutation before allowing navigation", async () => {
+it("replays an unknown passkey mutation with the same operation id before allowing navigation", async () => {
   const operationId = "11111111-1111-4111-8111-111111111111";
   const originalDetail = {
     type: "entry_detail" as const,
@@ -3487,16 +3550,24 @@ it("stabilizes an unknown passkey mutation before allowing navigation", async ()
     customFields: [],
     attachments: []
   };
-  const clearEntryPasskey = vi.fn(async () => {
-    throw Object.assign(new Error("passkey mutation outcome is unknown"), {
-      code: "native_timeout",
+  const clearedDetail = { ...originalDetail, passkey: null };
+  const clearEntryPasskey = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error("passkey mutation outcome is unknown"), {
+        code: "request_outcome_unknown",
+        operationId
+      })
+    )
+    .mockResolvedValueOnce({
+      value: clearedDetail,
+      saveResult: {
+        type: "save_vault_result" as const,
+        status: "saved" as const
+      },
       operationId
     });
-  });
-  const retryMutationSave = vi.fn(async () => ({
-    type: "save_vault_result" as const,
-    status: "saved" as const
-  }));
+  const retryMutationSave = vi.fn();
   const client = {
     ...createVaultSelectionMethods(),
     getSessionState: async () => ({
@@ -3523,10 +3594,7 @@ it("stabilizes an unknown passkey mutation before allowing navigation", async ()
         groupId: "group-root"
       }
     ]),
-    getEntryDetail: vi
-      .fn()
-      .mockResolvedValueOnce(originalDetail)
-      .mockResolvedValue({ ...originalDetail, passkey: null }),
+    getEntryDetail: vi.fn().mockResolvedValue(originalDetail),
     clearEntryPasskey,
     retryMutationSave
   } satisfies RuntimeClientLike;
@@ -3542,9 +3610,14 @@ it("stabilizes an unknown passkey mutation before allowing navigation", async ()
   fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
 
   await waitFor(() =>
-    expect(retryMutationSave).toHaveBeenCalledWith("vault-1", operationId)
+    expect(clearEntryPasskey).toHaveBeenLastCalledWith(
+      "vault-1",
+      "entry-1",
+      operationId
+    )
   );
-  expect(clearEntryPasskey).toHaveBeenCalledTimes(1);
+  expect(clearEntryPasskey).toHaveBeenCalledTimes(2);
+  expect(retryMutationSave).not.toHaveBeenCalled();
   expect(await screen.findByText("No passkey.")).toBeInTheDocument();
 });
 
@@ -6293,6 +6366,111 @@ it("retries a failed attachment save without adding the attachment again", async
 
   await waitFor(() => expect(saveVault).toHaveBeenCalledTimes(2));
   expect(addEntryAttachment).toHaveBeenCalledTimes(1);
+});
+
+it("replays an unknown attachment mutation with its original payload and operation id", async () => {
+  const operationId = "22222222-2222-4222-8222-222222222222";
+  const addedDetail = {
+    type: "entry_detail" as const,
+    id: "entry-1",
+    title: "Example",
+    username: "alice",
+    password: "secret-123",
+    url: "https://example.com",
+    notes: "",
+    totp: null,
+    totpUri: null,
+    customFields: [],
+    attachments: [
+      {
+        name: "added.txt",
+        size: 5,
+        protectInMemory: false
+      }
+    ]
+  };
+  const addEntryAttachment = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error("attachment mutation outcome is unknown"), {
+        code: "request_outcome_unknown",
+        operationId
+      })
+    )
+    .mockResolvedValueOnce({
+      value: addedDetail,
+      saveResult: {
+        type: "save_vault_result" as const,
+        status: "saved" as const
+      },
+      operationId
+    });
+  const retryMutationSave = vi.fn();
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example",
+        username: "alice",
+        url: "https://example.com",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail: vi.fn().mockResolvedValue({
+      ...addedDetail,
+      attachments: []
+    }),
+    addEntryAttachment,
+    retryMutationSave
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Example" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  const file = new File(["hello"], "added.txt", { type: "text/plain" });
+  fireEvent.change(screen.getByLabelText("Add attachment file"), {
+    target: { files: [file] }
+  });
+
+  expect(
+    await screen.findByText("attachment mutation outcome is unknown")
+  ).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Retry save" }));
+
+  await waitFor(() =>
+    expect(addEntryAttachment).toHaveBeenLastCalledWith(
+      "vault-1",
+      "entry-1",
+      {
+        name: "added.txt",
+        dataBase64: "aGVsbG8=",
+        protectInMemory: false
+      },
+      operationId
+    )
+  );
+  expect(addEntryAttachment).toHaveBeenCalledTimes(2);
+  expect(retryMutationSave).not.toHaveBeenCalled();
+  expect(
+    await screen.findByRole("button", { name: "Remove added.txt" })
+  ).toBeInTheDocument();
 });
 
 it("shows read-only entry history details", async () => {

@@ -408,9 +408,15 @@ impl RuntimeBridge {
         let session_state_notifier = Arc::new(Mutex::new(None));
         let resident_activation_notifier = Arc::new(Mutex::new(None));
         let quick_unlock_enabled = Arc::new(AtomicBool::new(false));
+        let browser_integration_settings = Arc::new(Mutex::new(BrowserIntegrationSettingsDto {
+            language: "en".into(),
+            autofill_on_page_load_enabled: false,
+            browser_passkey_proxy_enabled: false,
+        }));
         let worker_reconciliation_notifier = Arc::clone(&reconciliation_notifier);
         let worker_session_state_notifier = Arc::clone(&session_state_notifier);
         let worker_quick_unlock_enabled = Arc::clone(&quick_unlock_enabled);
+        let worker_browser_integration_settings = Arc::clone(&browser_integration_settings);
         std::thread::Builder::new()
             .name("vaultkern-runtime".to_owned())
             .spawn(move || {
@@ -503,6 +509,22 @@ impl RuntimeBridge {
                             parent_window,
                             response,
                         } => {
+                            if browser_client
+                                && browser_passkey_proxy_must_be_enabled(&command)
+                                && !worker_browser_integration_settings
+                                    .lock()
+                                    .unwrap_or_else(|error| error.into_inner())
+                                    .browser_passkey_proxy_enabled
+                            {
+                                let _ = response.send(RuntimeProtocolResponse {
+                                    response: error_response(
+                                        "browser_passkey_proxy_disabled",
+                                        "browser passkey handling is disabled in resident settings",
+                                    ),
+                                    quick_unlock_credentials: None,
+                                });
+                                continue;
+                            }
                             if operation_id
                                 .as_deref()
                                 .is_some_and(|value| !valid_logical_operation_id(value))
@@ -894,11 +916,7 @@ impl RuntimeBridge {
             session_state_notifier,
             resident_activation_notifier,
             pending_resident_route: Arc::new(Mutex::new(None)),
-            browser_integration_settings: Arc::new(Mutex::new(BrowserIntegrationSettingsDto {
-                language: "en".into(),
-                autofill_on_page_load_enabled: false,
-                browser_passkey_proxy_enabled: false,
-            })),
+            browser_integration_settings,
             quick_unlock_enabled,
             desktop_protocol_session: Arc::new(Mutex::new(RuntimeProtocolSession::resident_app())),
         }
@@ -1403,13 +1421,20 @@ impl RuntimeBridge {
 fn browser_passkey_proxy_must_be_enabled(command: &RuntimeCommand) -> bool {
     // Query/reconcile/unknown-delivery/abort commands remain available so a
     // disabled proxy can clean up an interrupted ceremony without progressing it.
+    if let RuntimeCommand::AdvancePasskeyCeremonyPhase { next_phase, .. } = command {
+        return !matches!(
+            next_phase,
+            vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::ClosedAborted
+                | vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::ClosedDelivered
+                | vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::ClosedFailed
+        );
+    }
     matches!(
         command,
         RuntimeCommand::GetPasskeyUserVerificationCapability
             | RuntimeCommand::VerifyPasskeyUser { .. }
             | RuntimeCommand::ListPasskeyCredentials { .. }
             | RuntimeCommand::RegisterPasskeyCeremony { .. }
-            | RuntimeCommand::AdvancePasskeyCeremonyPhase { .. }
             | RuntimeCommand::BindPasskeyCeremonyVault { .. }
             | RuntimeCommand::CreatePasskeyAssertion { .. }
             | RuntimeCommand::CreatePasskeyRegistration { .. }
@@ -1756,7 +1781,7 @@ mod tests {
     }
 
     #[test]
-    fn browser_secret_request_uses_the_fresh_verification_runtime_entrypoint() {
+    fn browser_vault_management_is_rejected_before_any_verification_prompt() {
         let bridge = RuntimeBridge::new_for_tests();
         let response = bridge.request_browser_cancellable(
             ProtocolEnvelope::new(RuntimeCommand::GetEntryDetail {
@@ -1768,14 +1793,10 @@ mod tests {
         );
 
         let RuntimeResponse::Error(error) = response else {
-            panic!("expected browser verification error");
+            panic!("expected browser command-boundary error");
         };
         assert_eq!(error.code, "runtime_error");
-        assert!(
-            error
-                .message
-                .contains("fresh browser request verification failed")
-        );
+        assert!(error.message.contains("browser command forbidden"));
     }
 
     #[test]
@@ -1879,6 +1900,40 @@ mod tests {
         };
         assert_eq!(error.code, "browser_passkey_proxy_disabled");
 
+        let cleanup = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "missing-cleanup-ceremony".into(),
+                expected_phase:
+                    vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::UserAuthorization,
+                next_phase: vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::ClosedFailed,
+                related_origin_verified: false,
+            }),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        let RuntimeResponse::Error(error) = cleanup else {
+            panic!("missing cleanup ceremony should reach the runtime ledger");
+        };
+        assert_eq!(error.code, "runtime_error");
+        assert!(error.message.contains("passkey ceremony not registered"));
+
+        let forward_progress = bridge.request_browser_cancellable(
+            ProtocolEnvelope::new(RuntimeCommand::AdvancePasskeyCeremonyPhase {
+                ceremony_token: "disabled-progress-ceremony".into(),
+                expected_phase:
+                    vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::UserAuthorization,
+                next_phase:
+                    vaultkern_runtime_protocol::PasskeyCeremonyPhaseDto::CredentialResolution,
+                related_origin_verified: false,
+            }),
+            Arc::new(AtomicBool::new(false)),
+            None,
+        );
+        let RuntimeResponse::Error(error) = forward_progress else {
+            panic!("disabled browser passkey progress must be rejected");
+        };
+        assert_eq!(error.code, "browser_passkey_proxy_disabled");
+
         let desired = crate::DesktopDesiredState::from_settings(&json!({
             "browserPasskeyProxyEnabled": true
         }));
@@ -1905,6 +1960,59 @@ mod tests {
         );
         let RuntimeResponse::Error(error) = system_provider_selected else {
             panic!("expected system-provider browser proxy rejection");
+        };
+        assert_eq!(error.code, "browser_passkey_proxy_disabled");
+    }
+
+    #[test]
+    fn queued_browser_passkey_work_rechecks_the_committed_policy_before_execution() {
+        let bridge = RuntimeBridge::new_for_tests();
+        let enabled = crate::DesktopDesiredState::from_settings(&json!({
+            "browserPasskeyProxyEnabled": true
+        }));
+        bridge.set_browser_integration_settings(&enabled.browser_integration);
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker_bridge = bridge.clone();
+        let blocker = std::thread::spawn(move || {
+            blocker_bridge.request_test_mutation_cancellable(
+                Arc::new(AtomicBool::new(false)),
+                started_tx,
+                release_rx,
+                Arc::new(AtomicBool::new(false)),
+            )
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("runtime worker is blocked before the browser request");
+
+        let (response_tx, response_rx) = mpsc::channel();
+        bridge
+            .requests
+            .send(RuntimeRequest::Protocol {
+                command: RuntimeCommand::GetPasskeyUserVerificationCapability,
+                operation_id: None,
+                cancelled: Arc::new(AtomicBool::new(false)),
+                browser_client: true,
+                parent_window: None,
+                response: response_tx,
+            })
+            .expect("queue browser passkey work");
+
+        let disabled = crate::DesktopDesiredState::from_settings(&json!({
+            "browserPasskeyProxyEnabled": false
+        }));
+        bridge.set_browser_integration_settings(&disabled.browser_integration);
+        release_tx.send(()).expect("release runtime worker");
+        blocker.join().expect("blocking request completes");
+
+        let response = response_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("queued browser request completes")
+            .response;
+        let RuntimeResponse::Error(error) = response else {
+            panic!("queued passkey work must observe the committed disabled policy");
         };
         assert_eq!(error.code, "browser_passkey_proxy_disabled");
     }

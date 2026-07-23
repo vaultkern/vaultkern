@@ -172,7 +172,7 @@ pub(crate) fn required_command_capabilities(command: &RuntimeCommand) -> Vec<&'s
     required
 }
 
-fn browser_command_allowed(command: &RuntimeCommand) -> bool {
+pub(crate) fn browser_command_allowed(command: &RuntimeCommand) -> bool {
     matches!(
         command,
         RuntimeCommand::GetSessionState

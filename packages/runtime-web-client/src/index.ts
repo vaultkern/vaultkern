@@ -759,25 +759,27 @@ export class RuntimeClient {
   async setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskeyUpdate
+    passkey: EntryPasskeyUpdate,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "set_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId,
       passkey
-    });
+    }, operationId);
   }
 
   async clearEntryPasskey(
     vaultId: string,
-    entryId: string
+    entryId: string,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "clear_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId
-    });
+    }, operationId);
   }
 
   async deleteEntry(
@@ -841,7 +843,8 @@ export class RuntimeClient {
   async addEntryAttachment(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentInput
+    input: EntryAttachmentInput,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "add_entry_attachment",
@@ -850,13 +853,14 @@ export class RuntimeClient {
       name: input.name,
       data_base64: input.dataBase64,
       protect_in_memory: input.protectInMemory
-    });
+    }, operationId);
   }
 
   async updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentMetadataUpdate
+    input: EntryAttachmentMetadataUpdate,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "update_entry_attachment_metadata",
@@ -865,13 +869,14 @@ export class RuntimeClient {
       old_name: input.oldName,
       new_name: input.newName,
       protect_in_memory: input.protectInMemory
-    });
+    }, operationId);
   }
 
   async replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentContentUpdate
+    input: EntryAttachmentContentUpdate,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "replace_entry_attachment_content",
@@ -879,20 +884,21 @@ export class RuntimeClient {
       entry_id: entryId,
       name: input.name,
       data_base64: input.dataBase64
-    });
+    }, operationId);
   }
 
   async deleteEntryAttachment(
     vaultId: string,
     entryId: string,
-    name: string
+    name: string,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
     return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "delete_entry_attachment",
       vault_id: vaultId,
       entry_id: entryId,
       name
-    });
+    }, operationId);
   }
 
   async listEntryHistory(
@@ -967,10 +973,12 @@ export class RuntimeClient {
       try {
         response = await this.sendCommand<T>(replayableCommand, operationId);
       } catch (retryError) {
-        if (isAmbiguousMutationFailure(retryError)) {
-          throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
-        }
-        throw retryError;
+        // Once an attempt may have reached the resident writer, a later
+        // business error cannot prove that the first attempt did not commit.
+        // Preserve the logical operation identity so the caller can reload or
+        // retry the same operation instead of treating the replay as a
+        // definitive failure.
+        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
       }
     }
     try {
@@ -1029,17 +1037,13 @@ class RuntimeMutationOutcomeUnknownError extends Error {
     cause: unknown
   ) {
     super(
-      cause instanceof Error ? cause.message : "runtime mutation outcome is unknown",
+      cause instanceof Error
+        ? `runtime mutation outcome is unknown: ${cause.message}`
+        : "runtime mutation outcome is unknown",
       { cause }
     );
     this.name = "RuntimeMutationOutcomeUnknownError";
-    this.code =
-      typeof cause === "object" &&
-      cause !== null &&
-      "code" in cause &&
-      typeof (cause as { code?: unknown }).code === "string"
-        ? (cause as { code: string }).code
-        : "request_outcome_unknown";
+    this.code = "request_outcome_unknown";
   }
 }
 

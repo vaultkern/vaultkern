@@ -66,7 +66,7 @@ use crate::passkey::{
     PlatformPasskeyRegistrationInput, PlatformPasskeyRegistrationOutput,
     PlatformPasskeyRegistrationRequest, create_assertion, create_platform_assertion,
     create_platform_registration_with_credential_id, create_registration_with_credential_id,
-    generate_passkey_credential_id,
+    generate_passkey_credential_id, validate_passkey_registration_parameters,
 };
 use crate::providers::biometric::{
     BiometricProvider, TestBiometricProvider, UnsupportedBiometricProvider,
@@ -257,6 +257,19 @@ struct PasskeyUserVerificationProof {
     vault_id: String,
     method: PasskeyUserVerificationMethodDto,
     verified_at_epoch_ms: u64,
+}
+
+fn passkey_user_verification_is_valid(
+    entry: &PasskeyCeremonyLedgerEntry,
+    vault_id: &str,
+    now_epoch_ms: u64,
+) -> bool {
+    entry.user_verification.as_ref().is_some_and(|proof| {
+        proof.vault_id == vault_id
+            && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
+            && proof.verified_at_epoch_ms <= now_epoch_ms
+            && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3558,15 +3571,29 @@ impl Runtime {
             client_data_json_base64url,
         )?;
         let credential_id = credential_id.context("passkey assertion credential id is required")?;
-        let effective_user_presence_verified = user_presence_verified
-            || self.passkey_ceremony_user_verification_is_valid(ceremony_token, vault_id)?;
+        self.validate_passkey_user_presence_before_vault_lookup(
+            ceremony_token,
+            vault_id,
+            user_presence_verified,
+        )?;
+        let _ = self.loaded_vault(vault_id)?;
+        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        {
+            let vault = self.loaded_vault(vault_id)?;
+            find_unique_passkey_by_credential_id_and_relying_party(
+                &vault.root,
+                vault.recycle_bin_group,
+                vault.recycle_bin_enabled.unwrap_or(true),
+                credential_id,
+                Some(relying_party),
+            )?;
+        }
+        let user_verified =
+            self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
+        let effective_user_presence_verified = user_presence_verified || user_verified;
         if !effective_user_presence_verified {
             anyhow::bail!("passkey user presence was not verified");
         }
-        let _ = self.loaded_vault(vault_id)?;
-        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
-        self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
-        let user_verified = true;
         let vault = self.loaded_vault(vault_id)?;
         let passkey = find_unique_passkey_by_credential_id_and_relying_party(
             &vault.root,
@@ -3646,42 +3673,45 @@ impl Runtime {
         })
     }
 
-    fn passkey_ceremony_user_verification_is_valid(
-        &self,
+    fn consume_passkey_ceremony_user_verification(
+        &mut self,
         ceremony_token: &str,
         vault_id: &str,
     ) -> Result<bool> {
         let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
-            .get(ceremony_token)
+            .get_mut(ceremony_token)
             .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
-        Ok(entry.user_verification.as_ref().is_some_and(|proof| {
-            proof.vault_id == vault_id
-                && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
-                && proof.verified_at_epoch_ms <= now_epoch_ms
-                && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
-        }))
+        let verified = passkey_user_verification_is_valid(entry, vault_id, now_epoch_ms);
+        entry.user_verification = None;
+        if entry.identity.user_verification == PasskeyUserVerificationRequirementDto::Required
+            && !verified
+        {
+            anyhow::bail!("passkey user verification was not verified");
+        }
+        Ok(verified)
     }
 
-    fn consume_passkey_ceremony_user_verification(
-        &mut self,
+    fn validate_passkey_user_presence_before_vault_lookup(
+        &self,
         ceremony_token: &str,
         vault_id: &str,
+        user_presence_verified: bool,
     ) -> Result<()> {
         let now_epoch_ms = self.current_unix_time_ms();
         let entry = self
             .passkey_ceremonies
-            .get_mut(ceremony_token)
+            .get(ceremony_token)
             .with_context(|| format!("passkey ceremony not registered: {ceremony_token}"))?;
-        let verified = entry.user_verification.take().is_some_and(|proof| {
-            proof.vault_id == vault_id
-                && proof.verified_at_epoch_ms >= entry.identity.registered_at_epoch_ms
-                && proof.verified_at_epoch_ms <= now_epoch_ms
-                && proof.verified_at_epoch_ms <= entry.identity.expires_at_epoch_ms
-        });
-        if !verified {
+        let user_verified = passkey_user_verification_is_valid(entry, vault_id, now_epoch_ms);
+        if entry.identity.user_verification == PasskeyUserVerificationRequirementDto::Required
+            && !user_verified
+        {
             anyhow::bail!("passkey user verification was not verified");
+        }
+        if !user_presence_verified && !user_verified {
+            anyhow::bail!("passkey user presence was not verified");
         }
         Ok(())
     }
@@ -4194,7 +4224,11 @@ impl Runtime {
             None,
             client_data_json_base64url,
         )?;
-        let user_verified = true;
+        validate_passkey_registration_parameters(user_handle_base64url, public_key_algorithm)?;
+        let _ = self.loaded_vault(vault_id)?;
+        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
+        let user_verified =
+            self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
         let modified_at = self.current_unix_time();
         let credential_id = (self.passkey_credential_id_generator)();
         let registration = create_registration_with_credential_id(
@@ -4213,8 +4247,6 @@ impl Runtime {
             },
             credential_id,
         )?;
-        let _ = self.loaded_vault(vault_id)?;
-        self.bind_passkey_ceremony_vault_after_vault_lookup(ceremony_token, vault_id)?;
         let mut response = registration.dto;
 
         let (existing, credential_id_collision_count) = {
@@ -4260,7 +4292,6 @@ impl Runtime {
         if credential_id_collision_count > allowed_collision_count {
             anyhow::bail!("passkey credential id collision");
         }
-        self.consume_passkey_ceremony_user_verification(ceremony_token, vault_id)?;
         if let Some((entry_id, rollback_entry)) = existing {
             let refresh_entry_username = rollback_entry
                 .passkey
@@ -4771,15 +4802,8 @@ impl Runtime {
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("browser request was cancelled");
         }
-        if browser_command_authorization(command) == BrowserCommandAuthorization::FreshInteractive {
-            let authorization = self.biometric.authorize_cancellable(
-                "Allow browser access to VaultKern secrets or security settings",
-                cancelled,
-            );
-            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-                anyhow::bail!("browser request was cancelled");
-            }
-            authorization.context("fresh browser request verification failed")?;
+        if !crate::protocol_session::browser_command_allowed(command) {
+            anyhow::bail!("browser command forbidden");
         }
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("browser request was cancelled");
@@ -6680,8 +6704,14 @@ impl Runtime {
         let current = match self.read_current_snapshot(vault_id, Some(&baseline_fingerprint)) {
             Ok(current) => current,
             Err(error) if error_chain_has_io_kind(&error, std::io::ErrorKind::NotFound) => {
-                let bytes = self.save_loaded_vault_bytes(vault_id, &key, save_profile)?;
-                return self.local_conflict_copy_result(vault_id, &source_path, &bytes);
+                let (bytes, verified_vault) =
+                    self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
+                return self.local_conflict_copy_result(
+                    vault_id,
+                    &source_path,
+                    &bytes,
+                    verified_vault,
+                );
             }
             Err(error) => {
                 return Err(error)
@@ -6690,22 +6720,21 @@ impl Runtime {
         };
 
         if current.fingerprint != baseline_fingerprint {
-            let bytes = self.save_loaded_vault_bytes(vault_id, &key, save_profile)?;
-            return self.local_conflict_copy_result(vault_id, &source_path, &bytes);
+            let (bytes, verified_vault) =
+                self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
+            return self.local_conflict_copy_result(vault_id, &source_path, &bytes, verified_vault);
         }
 
-        let bytes = {
+        let (bytes, verified_vault) = {
             let loaded = self
                 .vault_session
-                .find_loaded_mut(vault_id)
+                .find_loaded(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
-            let Some(vault) = loaded.vault.as_mut() else {
+            let Some(vault) = loaded.vault.as_ref() else {
                 anyhow::bail!("vault is locked: {vault_id}");
             };
-            let bytes = save_kdbx_with_history_limits_transformed(vault, &key, save_profile)
-                .with_context(|| format!("failed to save vault: {vault_id}"))?;
-            loaded.save_profile.kdf = None;
-            bytes
+            Self::serialize_and_verify_vault_candidate(vault.clone(), &key, save_profile)
+                .with_context(|| format!("failed to save vault: {vault_id}"))?
         };
 
         let next_fingerprint = match self.write_local_source(vault_id, &bytes, &current.fingerprint)
@@ -6717,7 +6746,12 @@ impl Runtime {
                     Some(LocalFileCommitError::Conflict { .. })
                 ) =>
             {
-                return self.local_conflict_copy_result(vault_id, &source_path, &bytes);
+                return self.local_conflict_copy_result(
+                    vault_id,
+                    &source_path,
+                    &bytes,
+                    verified_vault,
+                );
             }
             Err(error) => {
                 return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
@@ -6743,6 +6777,8 @@ impl Runtime {
                 .vault_session
                 .find_loaded_mut(vault_id)
                 .with_context(|| format!("vault not opened: {vault_id}"))?;
+            loaded.vault = Some(verified_vault);
+            loaded.save_profile.kdf = None;
             loaded.bytes = if retain_committed_bytes {
                 bytes
             } else {
@@ -6762,14 +6798,21 @@ impl Runtime {
     }
 
     fn local_conflict_copy_result(
-        &self,
+        &mut self,
         vault_id: &str,
         source_path: &str,
         bytes: &[u8],
+        verified_vault: Vault,
     ) -> Result<RuntimeResponse> {
         let conflict_copy_path =
             write_local_conflict_copy(Path::new(source_path), bytes, self.current_unix_time())
                 .with_context(|| format!("failed to write conflict copy for: {vault_id}"))?;
+        let loaded = self
+            .vault_session
+            .find_loaded_mut(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        loaded.vault = Some(verified_vault);
+        loaded.save_profile.kdf = None;
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::ConflictCopy,
             merge_summary: None,
@@ -7583,11 +7626,16 @@ impl Runtime {
             display_name,
             bytes,
         ) {
-            Ok(name) => Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
-                merge_summary: None,
-                conflict_copy_path: Some(format!("onedrive:{name}")),
-            })),
+            Ok(name) => {
+                if let Some(vault) = pending_vault {
+                    self.install_pending_vault_candidate(vault_id, vault)?;
+                }
+                Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                    status: SaveVaultStatusDto::ConflictCopy,
+                    merge_summary: None,
+                    conflict_copy_path: Some(format!("onedrive:{name}")),
+                }))
+            }
             Err(upload_error) => {
                 let response = self.save_conflict_copy_to_pending_cache(
                     vault_id,
@@ -7667,23 +7715,21 @@ impl Runtime {
         }
     }
 
-    fn save_loaded_vault_bytes(
-        &mut self,
+    fn serialize_loaded_vault_candidate(
+        &self,
         vault_id: &str,
         key: &TransformedKey,
         save_profile: SaveProfile,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, Vault)> {
         let loaded = self
             .vault_session
-            .find_loaded_mut(vault_id)
+            .find_loaded(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
-        let Some(vault) = loaded.vault.as_mut() else {
+        let Some(vault) = loaded.vault.as_ref() else {
             anyhow::bail!("vault is locked: {vault_id}");
         };
-        let bytes = save_kdbx_with_history_limits_transformed(vault, key, save_profile)
-            .with_context(|| format!("failed to save vault: {vault_id}"))?;
-        loaded.save_profile.kdf = None;
-        Ok(bytes)
+        Self::serialize_and_verify_vault_candidate(vault.clone(), key, save_profile)
+            .with_context(|| format!("failed to save vault: {vault_id}"))
     }
 
     fn save_remote_vault_to_pending_cache(
@@ -9121,100 +9167,6 @@ impl Runtime {
             .find_loaded(&vault_id)
             .and_then(|loaded| loaded.source_status.clone())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BrowserCommandAuthorization {
-    ChannelTrustOnly,
-    FreshInteractive,
-    IntrinsicallyVerified,
-    PasskeyCeremonyBound,
-}
-
-fn browser_command_authorization(command: &RuntimeCommand) -> BrowserCommandAuthorization {
-    match command {
-        RuntimeCommand::AddLocalVaultReference { .. }
-        | RuntimeCommand::BeginOneDriveLogin
-        | RuntimeCommand::CompletePendingOneDriveLogin
-        | RuntimeCommand::ListOneDriveChildren { .. }
-        | RuntimeCommand::AddOneDriveVaultReference { .. }
-        | RuntimeCommand::RetryVaultSourceSync { .. }
-        | RuntimeCommand::DeleteVaultReference { .. }
-        | RuntimeCommand::CreateEntry { .. }
-        | RuntimeCommand::UpdateEntryFields { .. }
-        | RuntimeCommand::CompareAndUpdateEntryFields { .. }
-        | RuntimeCommand::PersistAutofillMutation { .. }
-        | RuntimeCommand::ClearEntryTotp { .. }
-        | RuntimeCommand::SetEntryPasskey { .. }
-        | RuntimeCommand::ClearEntryPasskey { .. }
-        | RuntimeCommand::DeleteEntry { .. }
-        | RuntimeCommand::GetEntryDetail { .. }
-        | RuntimeCommand::GetEntryHistoryDetail { .. }
-        | RuntimeCommand::GetEntryAttachmentContent { .. }
-        | RuntimeCommand::AddEntryAttachment { .. }
-        | RuntimeCommand::UpdateEntryAttachmentMetadata { .. }
-        | RuntimeCommand::ReplaceEntryAttachmentContent { .. }
-        | RuntimeCommand::DeleteEntryAttachment { .. }
-        | RuntimeCommand::UpdateEntry { .. }
-        | RuntimeCommand::UpdateDatabaseSettings { .. }
-        | RuntimeCommand::DisableQuickUnlockForCurrentVault => {
-            BrowserCommandAuthorization::FreshInteractive
-        }
-        RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
-        | RuntimeCommand::UnlockCurrentVaultWithQuickUnlock
-        | RuntimeCommand::VerifyPasskeyUser { .. } => {
-            BrowserCommandAuthorization::IntrinsicallyVerified
-        }
-        RuntimeCommand::ListPasskeyCredentials { .. }
-        | RuntimeCommand::RegisterPasskeyCeremony { .. }
-        | RuntimeCommand::AdvancePasskeyCeremonyPhase { .. }
-        | RuntimeCommand::BindPasskeyCeremonyVault { .. }
-        | RuntimeCommand::QueryPasskeyCeremonyLedger { .. }
-        | RuntimeCommand::ReconcilePasskeyCeremonyLedger { .. }
-        | RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery { .. }
-        | RuntimeCommand::CreatePasskeyAssertion { .. }
-        | RuntimeCommand::CreatePasskeyRegistration { .. }
-        | RuntimeCommand::SavePasskeyRegistration { .. }
-        | RuntimeCommand::AbortPasskeyRegistration { .. }
-        | RuntimeCommand::CommitPasskeyRegistration { .. }
-        | RuntimeCommand::PasskeyCredentialStatus { .. }
-        | RuntimeCommand::PasskeyCredentialStatusBatch { .. } => {
-            BrowserCommandAuthorization::PasskeyCeremonyBound
-        }
-        RuntimeCommand::Handshake { .. }
-        | RuntimeCommand::GetSessionState
-        | RuntimeCommand::GetBrowserIntegrationSettings
-        | RuntimeCommand::ActivateResidentApp { .. }
-        | RuntimeCommand::ListRecentVaults
-        | RuntimeCommand::PreloadCurrentVault
-        | RuntimeCommand::SetCurrentVault { .. }
-        | RuntimeCommand::DeleteVaultReferenceIfNotCurrent { .. }
-        | RuntimeCommand::UnlockCurrentVaultWithPassword { .. }
-        | RuntimeCommand::UnlockCurrentVault { .. }
-        | RuntimeCommand::OpenLocalVault { .. }
-        | RuntimeCommand::LockSession
-        | RuntimeCommand::RecordUserActivity
-        | RuntimeCommand::UnlockWithPassword { .. }
-        | RuntimeCommand::UnlockVault { .. }
-        | RuntimeCommand::ListGroups { .. }
-        | RuntimeCommand::ListEntries { .. }
-        | RuntimeCommand::ListEntryHistory { .. }
-        | RuntimeCommand::GetPasskeyUserVerificationCapability
-        | RuntimeCommand::SaveVault { .. }
-        | RuntimeCommand::GetDatabaseSettings { .. }
-        | RuntimeCommand::FindFillCandidates { .. }
-        | RuntimeCommand::GetAutofillCredential { .. }
-        | RuntimeCommand::GetAutofillEntryFields { .. }
-        | RuntimeCommand::GetAutofillCreateContext { .. }
-        | RuntimeCommand::FindExactMatchingEntryIds { .. } => {
-            BrowserCommandAuthorization::ChannelTrustOnly
-        }
-    }
-}
-
-#[cfg(test)]
-fn browser_command_requires_fresh_verification(command: &RuntimeCommand) -> bool {
-    browser_command_authorization(command) == BrowserCommandAuthorization::FreshInteractive
 }
 
 #[allow(dead_code)]
@@ -11644,84 +11596,46 @@ mod tests {
     use zeroize::Zeroizing;
 
     #[test]
-    fn browser_authorization_matches_the_resident_autofill_contract() {
-        assert!(browser_command_requires_fresh_verification(
-            &RuntimeCommand::GetEntryDetail {
-                vault_id: "vault".into(),
-                entry_id: "entry".into(),
-            }
-        ));
-        assert!(browser_command_requires_fresh_verification(
-            &RuntimeCommand::UpdateDatabaseSettings {
-                vault_id: "vault".into(),
-                update: DatabaseSettingsUpdateDto::default(),
-            }
-        ));
-        assert!(!browser_command_requires_fresh_verification(
-            &RuntimeCommand::GetAutofillCredential {
-                vault_id: "vault".into(),
-                entry_id: "entry".into(),
-                url: "https://example.com/login".into(),
-            }
-        ));
-        assert!(!browser_command_requires_fresh_verification(
-            &RuntimeCommand::GetAutofillEntryFields {
-                vault_id: "vault".into(),
-                entry_id: "entry".into(),
-                url: "https://example.com/login".into(),
-            }
-        ));
-        assert!(!browser_command_requires_fresh_verification(
-            &RuntimeCommand::Handshake {
-                protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
-                capabilities: vec!["browser-extension".into()],
-            }
-        ));
-        assert!(!browser_command_requires_fresh_verification(
-            &RuntimeCommand::FindExactMatchingEntryIds {
-                vault_id: "vault".into(),
-                fields: EntryFieldsDto {
-                    title: String::new().into(),
-                    username: String::new().into(),
-                    password: String::new().into(),
-                    url: String::new().into(),
-                    notes: String::new().into(),
-                    totp_uri: None,
-                    custom_fields: Vec::new(),
-                },
-            }
-        ));
-        assert!(!browser_command_requires_fresh_verification(
-            &RuntimeCommand::DeleteVaultReferenceIfNotCurrent {
-                vault_ref_id: "stale-reference".into(),
-            }
-        ));
-    }
-
-    #[test]
-    fn browser_runtime_authorizes_before_dispatching_a_secret_read() {
+    fn browser_runtime_rejects_vault_management_before_dispatch() {
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.biometric = Box::new(CountingBiometricProvider {
             authorizations: authorizations.clone(),
         });
 
-        let _ = runtime.handle_browser_command(RuntimeCommand::GetEntryDetail {
-            vault_id: "missing-vault".into(),
-            entry_id: "missing-entry".into(),
-        });
+        for command in [
+            RuntimeCommand::GetEntryDetail {
+                vault_id: "missing-vault".into(),
+                entry_id: "missing-entry".into(),
+            },
+            RuntimeCommand::UpdateDatabaseSettings {
+                vault_id: "missing-vault".into(),
+                update: DatabaseSettingsUpdateDto::default(),
+            },
+            RuntimeCommand::DeleteVaultReferenceIfNotCurrent {
+                vault_ref_id: "missing-reference".into(),
+            },
+        ] {
+            let error = runtime
+                .handle_browser_command(command)
+                .expect_err("browser management commands must fail at the resident boundary");
+            assert!(
+                error.to_string().contains("browser command forbidden"),
+                "{error:#}"
+            );
+        }
 
-        assert_eq!(
+        assert!(
             authorizations
                 .lock()
                 .expect("authorization lock")
-                .as_slice(),
-            ["Allow browser access to VaultKern secrets or security settings"]
+                .is_empty(),
+            "forbidden browser commands must not reach a platform prompt"
         );
     }
 
     #[test]
-    fn browser_runtime_answers_the_connection_handshake_without_hello() {
+    fn browser_runtime_serves_allowed_status_without_hello() {
         let authorizations = Arc::new(Mutex::new(Vec::new()));
         let mut runtime = Runtime::for_tests();
         runtime.biometric = Box::new(CountingBiometricProvider {
@@ -11729,11 +11643,8 @@ mod tests {
         });
 
         let response = runtime
-            .handle_browser_command(RuntimeCommand::Handshake {
-                protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
-                capabilities: vec!["runtime-core".into(), "browser-extension".into()],
-            })
-            .expect("authorized handshake should be answered");
+            .handle_browser_command(RuntimeCommand::GetSessionState)
+            .expect("authorized status should be answered");
 
         assert!(
             authorizations
@@ -11742,61 +11653,7 @@ mod tests {
                 .is_empty(),
             "an authenticated browser channel must not require per-connection Hello"
         );
-        assert!(matches!(response, RuntimeResponse::Handshake(_)));
-    }
-
-    #[test]
-    fn browser_request_cancelled_during_verification_is_not_dispatched() {
-        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut runtime = Runtime::for_tests();
-        runtime.biometric = Box::new(CancellingBiometricProvider {
-            cancelled: cancelled.clone(),
-        });
-
-        let error = runtime
-            .handle_browser_command_cancellable(
-                RuntimeCommand::GetEntryDetail {
-                    vault_id: "missing-vault".into(),
-                    entry_id: "missing-entry".into(),
-                },
-                cancelled.as_ref(),
-            )
-            .expect_err("cancellation during verification must stop command dispatch");
-
-        assert!(error.to_string().contains("cancelled"));
-    }
-
-    #[test]
-    fn browser_cancellation_interrupts_an_in_progress_biometric_verification() {
-        let cancelled = Arc::new(AtomicBool::new(false));
-        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
-        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-        let mut runtime = Runtime::for_tests();
-        runtime.biometric = Box::new(WaitingCancellableBiometricProvider {
-            started: started_tx,
-        });
-        let request_cancelled = cancelled.clone();
-
-        std::thread::spawn(move || {
-            let result = runtime.handle_browser_command_cancellable(
-                RuntimeCommand::GetEntryDetail {
-                    vault_id: "missing-vault".into(),
-                    entry_id: "missing-entry".into(),
-                },
-                request_cancelled.as_ref(),
-            );
-            let _ = result_tx.send(result.map_err(|error| error.to_string()));
-        });
-
-        started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("biometric verification started");
-        cancelled.store(true, Ordering::Release);
-        let error = result_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .expect("cancellation must release the runtime worker")
-            .expect_err("cancelled verification must not dispatch the command");
-        assert!(error.contains("browser request was cancelled"), "{error}");
+        assert!(matches!(response, RuntimeResponse::SessionState(_)));
     }
 
     #[test]
@@ -12506,6 +12363,51 @@ mod tests {
                 .unwrap()
                 .expect("published conflict-copy receipt")
                 .pending_sync
+        );
+    }
+
+    #[test]
+    fn published_onedrive_conflict_copy_installs_its_exact_retained_model() {
+        let mut runtime = demo_onedrive_runtime(1_700_000_106);
+        let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &vault_id);
+        {
+            let loaded = runtime.vault_session.find_loaded_mut(&vault_id).unwrap();
+            let vault = loaded.vault.as_mut().unwrap();
+            let core = KeepassCore::new();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            vault.history_max_items = Some(1);
+        }
+        let mut foreign_key = CompositeKey::default();
+        foreign_key.add_password("foreign-password");
+        let foreign = runtime
+            .core
+            .save_kdbx(
+                &Vault::empty("foreign"),
+                &foreign_key,
+                SaveProfile::recommended(),
+            )
+            .unwrap();
+        runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
+
+        let response = runtime.save_vault(&vault_id).unwrap();
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::ConflictCopy,
+                ..
+            })
+        ));
+        assert_eq!(
+            runtime
+                .list_entry_history(&vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1,
+            "a published conflict copy must become the resident's exact retained model"
         );
     }
 
@@ -13243,22 +13145,6 @@ mod tests {
                 .lock()
                 .expect("authorization lock")
                 .push(reason.to_owned());
-            Ok(())
-        }
-    }
-
-    struct CancellingBiometricProvider {
-        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    }
-
-    impl BiometricProvider for CancellingBiometricProvider {
-        fn supports_quick_unlock(&self) -> bool {
-            true
-        }
-
-        fn authorize(&self, _reason: &str) -> Result<()> {
-            self.cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
         }
     }
@@ -16079,6 +15965,105 @@ mod tests {
                 .items
                 .len(),
             1
+        );
+    }
+
+    #[test]
+    fn local_save_installs_the_exact_history_retained_model_that_was_published() {
+        let mut runtime = Runtime::for_tests_at(1_700_000_000);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        {
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap();
+            let vault = loaded.vault.as_mut().unwrap();
+            let core = KeepassCore::new();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            // A third-party or older writer may leave more snapshots in the
+            // model than its declared retention permits.
+            vault.history_max_items = Some(1);
+        }
+
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        assert_eq!(
+            runtime
+                .list_entry_history(&opened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1,
+            "the resident model must be the same retained model that was committed"
+        );
+
+        runtime
+            .update_database_settings(
+                &opened.vault_id,
+                DatabaseSettingsUpdateDto {
+                    history: Some(DatabaseHistorySettingsDto {
+                        max_items_per_entry: Some(2),
+                        max_total_size_bytes: None,
+                    }),
+                    ..DatabaseSettingsUpdateDto::default()
+                },
+            )
+            .unwrap();
+        runtime.save_vault(&opened.vault_id).unwrap();
+
+        let mut restarted = Runtime::for_tests_at(1_700_000_001);
+        let reopened = restarted.open_local_vault(&opened.path).unwrap();
+        restarted
+            .unlock_vault(&reopened.vault_id, Some("demo-password"), None)
+            .unwrap();
+        assert_eq!(
+            restarted
+                .list_entry_history(&reopened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1,
+            "raising the limit must not resurrect snapshots pruned by an earlier commit"
+        );
+    }
+
+    #[test]
+    fn local_conflict_copy_installs_the_exact_history_retained_model_that_was_published() {
+        let mut runtime = Runtime::for_tests_at(1_700_000_002);
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
+        {
+            let loaded = runtime
+                .vault_session
+                .find_loaded_mut(&opened.vault_id)
+                .unwrap();
+            let vault = loaded.vault.as_mut().unwrap();
+            let core = KeepassCore::new();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            core.snapshot_entry_to_history(vault, &entry.id).unwrap();
+            vault.history_max_items = Some(1);
+        }
+        std::fs::write(&opened.path, b"external generation").unwrap();
+
+        let response = runtime.save_vault(&opened.vault_id).unwrap();
+
+        assert!(matches!(
+            response,
+            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                status: SaveVaultStatusDto::ConflictCopy,
+                ..
+            })
+        ));
+        assert_eq!(
+            runtime
+                .list_entry_history(&opened.vault_id, &entry.id)
+                .unwrap()
+                .items
+                .len(),
+            1,
+            "a recoverable conflict-copy commit must install the exact retained model it published"
         );
     }
 

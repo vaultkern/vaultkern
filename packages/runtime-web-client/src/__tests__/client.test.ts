@@ -789,6 +789,44 @@ describe("RuntimeClient", () => {
     });
   });
 
+  it("keeps the mutation outcome unknown when an ambiguous attempt is followed by a business error", async () => {
+    const disconnect = Object.assign(new Error("native port disconnected"), {
+      code: "native_port_disconnected"
+    });
+    const transport = {
+      send: vi
+        .fn()
+        .mockRejectedValueOnce(disconnect)
+        .mockResolvedValueOnce({
+          type: "error",
+          code: "runtime_error",
+          message: "entry not found"
+        })
+    };
+    const client = new RuntimeClient(transport);
+
+    let failure: unknown;
+    try {
+      await client.deleteEntry(
+        "vault-1",
+        "12345678-1234-4abc-8def-1234567890ab"
+      );
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toMatchObject({
+      name: "RuntimeMutationOutcomeUnknownError",
+      code: "request_outcome_unknown",
+      message: expect.stringContaining("outcome is unknown")
+    });
+    expect(runtimeMutationOperationId(failure)).toEqual(expect.any(String));
+    expect(transport.send).toHaveBeenCalledTimes(2);
+    expect(transport.send.mock.calls[1]?.[0]).toEqual(
+      transport.send.mock.calls[0]?.[0]
+    );
+  });
+
   it("returns the save receipt bound to the exact mutation instead of a vault-wide queue", async () => {
     const mutationResults = [
       { type: "entry_detail", id: "entry-a" },

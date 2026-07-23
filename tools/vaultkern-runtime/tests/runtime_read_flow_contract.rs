@@ -1329,7 +1329,7 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
 }
 
 #[test]
-fn preferred_uv_ceremony_cannot_release_a_passkey_without_fresh_verification() {
+fn preferred_uv_ceremony_falls_back_to_presence_without_fresh_verification() {
     let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
     let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXByZWZlcnJlZA","origin":"https://example.com","crossOrigin":false}"#;
     let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
@@ -1357,14 +1357,55 @@ fn preferred_uv_ceremony_cannot_release_a_passkey_without_fresh_verification() {
         })
         .unwrap();
 
-    let RuntimeResponse::Error(error) = response else {
-        panic!("expected fresh UV error, got {response:?}");
+    let RuntimeResponse::PasskeyAssertion(assertion) = response else {
+        panic!("expected presence-only assertion, got {response:?}");
     };
-    assert!(
-        error
-            .message
-            .contains("passkey user verification was not verified")
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x01, 0);
+    assert_eq!(authenticator_data[32] & 0x04, 0);
+}
+
+#[test]
+fn discouraged_uv_registration_uses_presence_without_setting_uv() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItZGlzY291cmFnZWQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_ceremony_at_s4_with_user_verification(
+        &mut runtime,
+        "registration-token-discouraged-no-uv",
+        PasskeyCeremonyKindDto::Create,
+        "https://example.com",
+        "example.com",
+        "cmVnaXN0ZXItZGlzY291cmFnZWQ",
+        false,
+        PasskeyUserVerificationRequirementDto::Discouraged,
     );
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-discouraged-no-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "bob@example.com".into(),
+            user_display_name: Some("Bob".into()),
+            user_handle_base64url: "dXNlci0y".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data_json),
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyRegistration(registration) = response else {
+        panic!("expected presence-only registration, got {response:?}");
+    };
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(registration.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x01, 0);
+    assert_eq!(authenticator_data[32] & 0x04, 0);
 }
 
 #[test]
@@ -1480,6 +1521,78 @@ fn runtime_sets_assertion_uv_flag_after_master_password_user_verification() {
             .message
             .contains("passkey user verification was not verified")
     );
+}
+
+#[test]
+fn unknown_allow_credential_does_not_consume_required_user_verification() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXV2LXN0YWxl","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_ceremony_at_s1_with_user_verification(
+        &mut runtime,
+        "assertion-token-uv-stale-credential",
+        PasskeyCeremonyKindDto::Get,
+        "Y2hhbGxlbmdlLXV2LXN0YWxl",
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+    let verified = runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "assertion-token-uv-stale-credential".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some("demo-password".into()),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+        panic!("expected UV proof, got {verified:?}");
+    };
+    assert!(verified.verified);
+    advance_ceremony_from_s1_to_s4(&mut runtime, "assertion-token-uv-stale-credential");
+
+    let stale = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-uv-stale-credential".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("c3RhbGUtY3JlZGVudGlhbA".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: client_data_json_base64url.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::Error(error) = stale else {
+        panic!("expected stale credential error, got {stale:?}");
+    };
+    assert!(
+        error.message.contains("passkey credential"),
+        "unexpected stale credential error: {error:?}"
+    );
+
+    let valid = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-uv-stale-credential".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyAssertion(assertion) = valid else {
+        panic!("expected assertion after stale candidate, got {valid:?}");
+    };
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x04, 0);
 }
 
 #[test]
