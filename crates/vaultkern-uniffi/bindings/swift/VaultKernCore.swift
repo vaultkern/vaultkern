@@ -1747,6 +1747,8 @@ public protocol VaultSourcesProtocol: AnyObject, Sendable {
 
     func completePendingOneDriveLogin() throws  -> OneDriveAuthStatusDto
 
+    func currentLocalVaultPath() throws  -> String?
+
     func listOneDriveChildren(parentItemId: String?) throws  -> OneDriveItemListDto
 
     func listRecent() throws  -> VaultReferenceListDto
@@ -1837,6 +1839,14 @@ open func beginOneDriveLogin()throws  -> OneDriveAuthSessionDto  {
 open func completePendingOneDriveLogin()throws  -> OneDriveAuthStatusDto  {
     return try  FfiConverterTypeOneDriveAuthStatusDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+
+open func currentLocalVaultPath()throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_current_local_vault_path(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -4944,6 +4954,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login() != 5690) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_current_local_vault_path() != 77) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children() != 2771) {

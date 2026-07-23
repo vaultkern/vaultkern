@@ -1546,6 +1546,13 @@ impl VaultSources {
             .map_err(Into::into)
     }
 
+    pub fn current_local_vault_path(&self) -> Result<Option<String>, VaultKernError> {
+        self.shared
+            .lock()?
+            .current_local_vault_path()
+            .map_err(Into::into)
+    }
+
     pub fn begin_one_drive_login(&self) -> Result<OneDriveAuthSessionDto, VaultKernError> {
         match self
             .shared

@@ -327,6 +327,10 @@ fn ffi_sources_can_select_a_local_vault_without_loading_its_snapshot() {
     assert_eq!(selected.source_kind, "local");
     assert!(selected.is_current);
     assert_eq!(
+        session.sources().current_local_vault_path().unwrap(),
+        Some(path),
+    );
+    assert_eq!(
         session.session_state().unwrap().active_vault_id,
         None,
         "selecting a document must not retain its encrypted snapshot",

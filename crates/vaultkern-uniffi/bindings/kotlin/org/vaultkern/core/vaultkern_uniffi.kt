@@ -814,6 +814,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_current_local_vault_path(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_recent(
@@ -953,6 +955,8 @@ external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_begin_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_current_local_vault_path(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_list_one_drive_children(`ptr`: Long,`parentItemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1207,6 +1211,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_complete_pending_one_drive_login() != 5690.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_current_local_vault_path() != 77.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_list_one_drive_children() != 2771.toShort()) {
@@ -3502,6 +3509,8 @@ public interface VaultSourcesInterface {
 
     fun `completePendingOneDriveLogin`(): OneDriveAuthStatusDto
 
+    fun `currentLocalVaultPath`(): kotlin.String?
+
     fun `listOneDriveChildren`(`parentItemId`: kotlin.String?): OneDriveItemListDto
 
     fun `listRecent`(): VaultReferenceListDto
@@ -3655,6 +3664,20 @@ open class VaultSources: Disposable, AutoCloseable, VaultSourcesInterface
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_complete_pending_one_drive_login(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `currentLocalVaultPath`(): kotlin.String? {
+            return FfiConverterOptionalString.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_current_local_vault_path(
         it,
         _status)
 }

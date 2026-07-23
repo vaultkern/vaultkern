@@ -1314,6 +1314,16 @@ impl Runtime {
         Ok(list)
     }
 
+    pub fn current_local_vault_path(&self) -> Result<Option<String>> {
+        let Some(vault_ref_id) = self.vault_session.current_vault_ref_id() else {
+            return Ok(None);
+        };
+        Ok(match self.references.source_for(vault_ref_id)? {
+            StoredVaultSource::LocalPath { path } => Some(path),
+            StoredVaultSource::OneDriveItem { .. } => None,
+        })
+    }
+
     pub fn set_current_vault(&mut self, vault_ref_id: &str) -> Result<()> {
         self.pending_quick_unlock_enrollment = None;
         self.references
