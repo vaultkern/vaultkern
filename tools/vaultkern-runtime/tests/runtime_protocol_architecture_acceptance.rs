@@ -22,6 +22,30 @@ fn empty_vault_bytes() -> Vec<u8> {
         .expect("create in-memory KDBX snapshot")
 }
 
+fn vault_with_entry_bytes() -> (Vec<u8>, String) {
+    let core = KeepassCore::new();
+    let mut vault = Vault::empty("Architecture Acceptance");
+    let root_id = vault.root.id.to_string();
+    let entry = core
+        .add_entry(
+            &mut vault,
+            &root_id,
+            EntryCreate {
+                title: "Base account".into(),
+                username: "base-user".into(),
+                password: "base-password".into(),
+                url: "https://base.example".into(),
+                notes: String::new(),
+            },
+        )
+        .expect("create base entry");
+    vault.root.entries[0].modified_at = 1_500_000_000;
+    let bytes = core
+        .save_kdbx(&vault, &key(), SaveProfile::recommended())
+        .expect("create in-memory KDBX snapshot with an entry");
+    (bytes, entry.id)
+}
+
 #[test]
 fn resident_protocol_harness_observes_successful_and_stale_publication() {
     let core = KeepassCore::new();
@@ -101,10 +125,26 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         },
     )
     .expect("advance the Remote Head");
-    let remote_bytes = core
+    let first_remote_bytes = core
         .save_kdbx(&remote, &key(), SaveProfile::recommended())
-        .expect("encode advanced Remote Head");
-    harness.reject_next_publication_as_stale(remote_bytes);
+        .expect("encode first advanced Remote Head");
+    core.add_entry(
+        &mut remote,
+        &root_id,
+        EntryCreate {
+            title: "Second remote account".into(),
+            username: "carol".into(),
+            password: "second-remote-password".into(),
+            url: "https://second-remote.example".into(),
+            notes: String::new(),
+        },
+    )
+    .expect("advance the Remote Head again");
+    let second_remote_bytes = core
+        .save_kdbx(&remote, &key(), SaveProfile::recommended())
+        .expect("encode second advanced Remote Head");
+    harness.reject_next_publication_as_stale(first_remote_bytes);
+    harness.reject_next_publication_as_stale(second_remote_bytes);
 
     assert!(matches!(
         harness.command(RuntimeCommand::UpdateEntryFields {
@@ -128,9 +168,14 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         RuntimeResponse::EntryList(entries) => entries.entries,
         _ => panic!("expected entry list"),
     };
-    assert_eq!(entries.len(), 2);
+    assert_eq!(entries.len(), 3);
     assert!(entries.iter().any(|entry| entry.title == "Local account"));
     assert!(entries.iter().any(|entry| entry.title == "Remote account"));
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry.title == "Second remote account")
+    );
 
     assert!(matches!(
         harness.command(RuntimeCommand::DeleteEntry {
@@ -146,8 +191,140 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         .load_database(&harness.provider_snapshot().bytes, &key())
         .expect("decode deletion publication")
         .vault;
-    assert_eq!(published.root.entries.len(), 1);
-    assert_eq!(published.root.entries[0].title, "Remote account");
+    assert_eq!(published.root.entries.len(), 2);
+    assert!(
+        published
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Remote account")
+    );
+    assert!(
+        published
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Second remote account")
+    );
+}
+
+#[test]
+fn stale_reconciliation_keeps_base_and_local_fixed_until_publication_is_confirmed() {
+    let core = KeepassCore::new();
+    let (base_bytes, entry_id) = vault_with_entry_bytes();
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes.clone());
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    let mut first_remote = core
+        .load_database(&base_bytes, &key())
+        .expect("decode Base")
+        .vault;
+    let first_remote_entry = first_remote
+        .root
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id.to_string() == entry_id)
+        .expect("remote entry");
+    first_remote_entry.title = "First remote title".into();
+    first_remote_entry.username = "remote-user".into();
+    first_remote_entry.modified_at = 1_600_000_000;
+    let first_remote_bytes = core
+        .save_kdbx(&first_remote, &key(), SaveProfile::recommended())
+        .expect("encode first Remote Head");
+
+    let mut second_remote = first_remote;
+    let second_remote_entry = second_remote
+        .root
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id.to_string() == entry_id)
+        .expect("second remote entry");
+    second_remote_entry.title = "Base account".into();
+    second_remote_entry.username = "base-user".into();
+    second_remote_entry.modified_at = 1_800_000_000;
+    let second_remote_bytes = core
+        .save_kdbx(&second_remote, &key(), SaveProfile::recommended())
+        .expect("encode second Remote Head");
+
+    harness.reject_next_publication_as_stale(first_remote_bytes);
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Local title".into(),
+            username: "base-user".into(),
+            password: "base-password".into(),
+            url: "https://base.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::SavedToCache
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetEntryDetail {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        RuntimeResponse::EntryDetail(detail)
+            if detail.title == "Local title" && detail.username == "base-user"
+    ));
+
+    harness.reject_next_publication_as_stale(second_remote_bytes);
+    assert!(matches!(
+        harness.command(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        }),
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode confirmed Publication")
+        .vault;
+    let published_entry = core
+        .project_entry_detail(&published, &entry_id)
+        .expect("published entry");
+    assert_eq!(published_entry.title, "Local title");
+    assert_eq!(published_entry.username, "base-user");
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id,
+            entry_id,
+            title: "Local title".into(),
+            username: "base-user".into(),
+            password: "base-password".into(),
+            url: "https://base.example".into(),
+            notes: "after confirmed Base advancement".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::Saved
+    ));
 }
 
 #[test]

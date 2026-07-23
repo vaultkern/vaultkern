@@ -1229,18 +1229,11 @@ impl Runtime {
                                 .generic_pending_kind(&pending_cache_key, &baseline_fingerprint)?
                             {
                                 GenericPendingKind::SourceWrite => self
-                                    .remote_cache
-                                    .generic_pending_observed_source(
+                                    .recover_generic_pending_base(
+                                        &vault_id,
                                         &pending_cache_key,
                                         &baseline_fingerprint,
-                                    )?
-                                    .map(|observed| observed.bytes)
-                                    .or(self.synced_bases.read(&vault_id).with_context(|| {
-                                        format!("failed to read synced base: {vault_id}")
-                                    })?)
-                                    .with_context(|| {
-                                        format!("pending source-write base is missing: {vault_id}")
-                                    })?,
+                                    )?,
                                 GenericPendingKind::ConflictCopy => bytes.clone(),
                             }
                         }
@@ -6709,18 +6702,28 @@ impl Runtime {
         Ok(bytes)
     }
 
-    fn recover_pending_session_base(&self, vault_id: &str) -> Result<Vec<u8>> {
-        let synced = self
-            .synced_bases
-            .read(vault_id)
-            .with_context(|| format!("failed to read synced base: {vault_id}"))?;
+    fn recover_generic_pending_base(
+        &self,
+        vault_id: &str,
+        cache_key: &RemoteCacheKey,
+        pending_fingerprint: &VaultSourceFingerprint,
+    ) -> Result<Vec<u8>> {
+        let durable = self
+            .remote_cache
+            .generic_pending_base(cache_key, pending_fingerprint)?
+            .map(|base| base.bytes);
         let session = self
             .session_bases
             .read(vault_id)
             .with_context(|| format!("failed to read session base: {vault_id}"))?;
-        let bytes = synced
+        let synced = self
+            .synced_bases
+            .read(vault_id)
+            .with_context(|| format!("failed to read synced base: {vault_id}"))?;
+        let bytes = durable
             .or(session)
-            .with_context(|| format!("pending sync base is missing: {vault_id}"))?;
+            .or(synced)
+            .with_context(|| format!("pending Publication Base is missing: {vault_id}"))?;
         let _ = self.session_bases.store(vault_id, &bytes);
         Ok(bytes)
     }
@@ -7024,13 +7027,7 @@ impl Runtime {
             .generic_pending_kind(&cache_key, baseline_fingerprint)?
             == GenericPendingKind::SourceWrite;
         let base_bytes = if pending_source_write {
-            match self
-                .remote_cache
-                .generic_pending_observed_source(&cache_key, baseline_fingerprint)?
-            {
-                Some(observed) => observed.bytes,
-                None => self.recover_pending_session_base(vault_id)?,
-            }
+            self.recover_generic_pending_base(vault_id, &cache_key, baseline_fingerprint)?
         } else {
             self.session_base_for_fingerprint(vault_id, baseline_fingerprint)?
         };
@@ -7063,9 +7060,10 @@ impl Runtime {
                 baseline_fingerprint,
             );
         }
+        let local_key = key.clone();
         let (local_bytes, verified_local) = Self::serialize_and_verify_vault_candidate(
             local_vault.clone(),
-            &key,
+            &local_key,
             local_save_profile.clone(),
         )
         .context("failed to verify the local OneDrive candidate")?;
@@ -7098,6 +7096,7 @@ impl Runtime {
                             display_name,
                             Some(account_label),
                             format_error_chain(&error),
+                            base_bytes.clone(),
                         )?
                     };
                     self.install_pending_vault_candidate(vault_id, verified_local.clone())?;
@@ -7115,6 +7114,7 @@ impl Runtime {
                         display_name,
                         Some(account_label),
                         error.to_string(),
+                        base_bytes.clone(),
                     )?;
                     self.install_pending_vault_candidate(vault_id, verified_local.clone())?;
                     return Ok(response);
@@ -7136,6 +7136,7 @@ impl Runtime {
                             display_name,
                             Some(account_label),
                             error.to_string(),
+                            base_bytes.clone(),
                         )?;
                         self.install_pending_vault_candidate(vault_id, verified_local.clone())?;
                         return Ok(response);
@@ -7343,53 +7344,45 @@ impl Runtime {
                     saw_source_change = true;
                     continue;
                 }
-                Err(ProviderError::StaleRevision { .. }) => {
-                    return self.upload_or_persist_onedrive_conflict_copy(
+                Err(ProviderError::StaleRevision { message }) => {
+                    let response = self.save_remote_vault_to_pending_cache(
                         vault_id,
-                        drive_id,
-                        item_id,
-                        &display_name,
-                        &account_label,
+                        source,
+                        local_bytes,
                         baseline_fingerprint,
-                        &bytes,
-                        Some(verified_vault),
-                        "OneDrive CAS retry budget was exhausted",
-                    );
+                        display_name,
+                        Some(account_label),
+                        format!(
+                            "OneDrive Publication remains pending after repeated Stale Revision: {message}"
+                        ),
+                        base_bytes,
+                    )?;
+                    self.install_pending_vault_candidate(vault_id, verified_local)?;
+                    return Ok(response);
                 }
                 Err(ProviderError::OutcomeUnknown { message }) => {
-                    self.synced_bases
-                        .store(vault_id, &remote_bytes)
-                        .with_context(|| {
-                            format!("failed to store pending OneDrive base: {vault_id}")
-                        })?;
-                    let message = match self.session_bases.store(vault_id, &remote_bytes) {
-                        Ok(()) => message,
-                        Err(error) => format!(
-                            "{message}; pending session base could not be staged ({error}); the durable synced base will repair it"
-                        ),
-                    };
-                    let response = self.save_remote_vault_to_pending_cache_with_observed(
+                    let response = self.save_remote_vault_to_pending_cache_with_base(
                         vault_id,
                         source.clone(),
-                        bytes.clone(),
+                        local_bytes.clone(),
                         baseline_fingerprint,
                         display_name.clone(),
                         Some(account_label.clone()),
                         message.clone(),
-                        Some(remote_bytes.clone()),
+                        Some(base_bytes.clone()),
                     );
                     let response = match response {
                         Ok(response) => Ok(response),
                         Err(first_error) => self
-                            .save_remote_vault_to_pending_cache_with_observed(
+                            .save_remote_vault_to_pending_cache_with_base(
                                 vault_id,
                                 source,
-                                bytes,
+                                local_bytes,
                                 baseline_fingerprint,
                                 display_name,
                                 Some(account_label),
                                 message,
-                                Some(remote_bytes),
+                                Some(base_bytes),
                             )
                             .with_context(|| {
                                 format!(
@@ -7397,66 +7390,23 @@ impl Runtime {
                                 )
                             }),
                     };
-                    let response = match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
-                            let session_restore = self.session_bases.store(vault_id, &base_bytes);
-                            if let Err(restore_error) = synced_restore.and(session_restore) {
-                                return Err(error).context(format!(
-                                    "failed to restore OneDrive bases after pending cache failure: {restore_error}"
-                                ));
-                            }
-                            return Err(error);
-                        }
-                    };
-                    self.install_pending_vault_candidate(vault_id, verified_vault)?;
-                    self.replace_session_transformed_key(vault_id, key.clone())?;
+                    let response = response?;
+                    self.install_pending_vault_candidate(vault_id, verified_local)?;
                     return Ok(response);
                 }
                 Err(error) => {
-                    self.synced_bases
-                        .store(vault_id, &remote_bytes)
-                        .with_context(|| {
-                            format!("failed to store pending OneDrive base: {vault_id}")
-                        })?;
-                    if let Err(stage_error) = self.session_bases.store(vault_id, &remote_bytes) {
-                        let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
-                        let session_restore = self.session_bases.store(vault_id, &base_bytes);
-                        if let Err(restore_error) = synced_restore.and(session_restore) {
-                            return Err(stage_error).context(format!(
-                                "failed to restore OneDrive bases after session-base staging failed: {restore_error}"
-                            ));
-                        }
-                        return Err(stage_error).with_context(|| {
-                            format!("failed to store pending session base: {vault_id}")
-                        });
-                    }
-                    let response = self.save_remote_vault_to_pending_cache_with_observed(
+                    let response = self.save_remote_vault_to_pending_cache_with_base(
                         vault_id,
                         source,
-                        bytes,
+                        local_bytes,
                         baseline_fingerprint,
                         display_name,
                         Some(account_label),
                         error.to_string(),
-                        Some(remote_bytes),
+                        Some(base_bytes),
                     );
-                    let response = match response {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let synced_restore = self.synced_bases.store(vault_id, &base_bytes);
-                            let session_restore = self.session_bases.store(vault_id, &base_bytes);
-                            if let Err(restore_error) = synced_restore.and(session_restore) {
-                                return Err(error).context(format!(
-                                    "failed to restore OneDrive bases after pending cache failure: {restore_error}"
-                                ));
-                            }
-                            return Err(error);
-                        }
-                    };
-                    self.install_pending_vault_candidate(vault_id, verified_vault)?;
-                    self.replace_session_transformed_key(vault_id, key.clone())?;
+                    let response = response?;
+                    self.install_pending_vault_candidate(vault_id, verified_local)?;
                     return Ok(response);
                 }
             }
@@ -7895,8 +7845,9 @@ impl Runtime {
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
+        base_bytes: Vec<u8>,
     ) -> Result<RuntimeResponse> {
-        self.save_remote_vault_to_pending_cache_with_observed(
+        self.save_remote_vault_to_pending_cache_with_base(
             vault_id,
             source,
             bytes,
@@ -7904,12 +7855,12 @@ impl Runtime {
             display_name,
             account_label,
             remote_error,
-            None,
+            Some(base_bytes),
         )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn save_remote_vault_to_pending_cache_with_observed(
+    fn save_remote_vault_to_pending_cache_with_base(
         &mut self,
         vault_id: &str,
         source: VaultSource,
@@ -7918,7 +7869,7 @@ impl Runtime {
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
-        observed_source_bytes: Option<Vec<u8>>,
+        pending_base_bytes: Option<Vec<u8>>,
     ) -> Result<RuntimeResponse> {
         let cache_key = remote_cache_key_for_source(&source).context("source is not remote")?;
         let pending_kind = match self.remote_cache.read(&cache_key)? {
@@ -7940,7 +7891,7 @@ impl Runtime {
             account_label,
             remote_error,
             pending_kind,
-            observed_source_bytes,
+            pending_base_bytes,
         )
     }
 
@@ -7979,7 +7930,7 @@ impl Runtime {
         account_label: Option<String>,
         remote_error: String,
         pending_kind: GenericPendingKind,
-        observed_source_bytes: Option<Vec<u8>>,
+        pending_base_bytes: Option<Vec<u8>>,
     ) -> Result<RuntimeResponse> {
         let cache_key = remote_cache_key_for_source(&source).context("source is not remote")?;
         let save_profile = self
@@ -7988,7 +7939,7 @@ impl Runtime {
         let cached_at = self.current_unix_time() as i64;
         let fingerprint = fingerprint_for_cached_bytes(&bytes, cached_at);
         let account_label = account_label.unwrap_or_else(|| cache_key.provider_kind.clone());
-        let observed_source = observed_source_bytes.map(|bytes| RemoteVaultCacheEntry {
+        let pending_base = pending_base_bytes.map(|bytes| RemoteVaultCacheEntry {
             fingerprint: fingerprint_for_cached_bytes(&bytes, cached_at),
             bytes,
             display_name: display_name.clone(),
@@ -8005,14 +7956,12 @@ impl Runtime {
             pending_sync: true,
         };
         match pending_kind {
-            GenericPendingKind::SourceWrite => {
-                self.remote_cache.write_generic_pending_with_observed(
-                    &cache_key,
-                    entry,
-                    expected_cache_fingerprint,
-                    observed_source,
-                )?
-            }
+            GenericPendingKind::SourceWrite => self.remote_cache.write_generic_pending_with_base(
+                &cache_key,
+                entry,
+                expected_cache_fingerprint,
+                pending_base,
+            )?,
             GenericPendingKind::ConflictCopy => self.remote_cache.write_conflict_copy_pending(
                 &cache_key,
                 entry,
@@ -8839,13 +8788,8 @@ impl Runtime {
                 "retrying a pending conflict-copy publication",
             );
         }
-        let base_bytes = match self
-            .remote_cache
-            .generic_pending_observed_source(cache_key, pending_fingerprint)?
-        {
-            Some(observed) => observed.bytes,
-            None => self.recover_pending_session_base(vault_id)?,
-        };
+        let base_bytes =
+            self.recover_generic_pending_base(vault_id, cache_key, pending_fingerprint)?;
         let base_vault = Self::load_session_database(&base_bytes, &key)
             .context("failed to parse synced base during pending synchronization")?
             .vault;
@@ -9037,16 +8981,8 @@ impl Runtime {
                     continue;
                 }
                 Err(error) if error.downcast_ref::<PendingGenericCasConflict>().is_some() => {
-                    return self.upload_pending_onedrive_conflict_copy(
-                        vault_id,
-                        drive_id,
-                        item_id,
-                        cache_key,
-                        &pending,
-                        &bytes,
-                        key.clone(),
-                        &error.to_string(),
-                    );
+                    return Err(error)
+                        .context("Publication remains pending after repeated Stale Revision");
                 }
                 Err(error) => return Err(error),
             }
@@ -12430,7 +12366,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_source_write_reopens_from_its_observed_generation_without_a_synced_base() {
+    fn pending_source_write_reopens_from_its_authenticated_base_without_a_synced_base() {
         let mut runtime = demo_onedrive_runtime(1_700_000_105);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
         create_demo_entry(&mut runtime, &vault_id);
@@ -12445,7 +12381,7 @@ mod tests {
                 item_id: "item-1".into(),
                 account_label: "alice@example.com".into(),
             })
-            .expect("the pending manifest carries its authenticated observed source");
+            .expect("the pending manifest carries its authenticated fixed Base");
         let loaded = runtime.vault_session.find_loaded(&vault_id).unwrap();
         assert!(
             loaded
@@ -19357,7 +19293,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_conflict_copy_upload_never_reclassifies_remote_edits_as_local() {
+    fn stale_retry_exhaustion_never_reclassifies_remote_edits_as_local() {
         let cache_dir = tempfile::tempdir().unwrap();
         let mut runtime = demo_onedrive_runtime(1_700_000_059);
         runtime.remote_cache = RemoteVaultCache::new_at(cache_dir.path());
@@ -19419,23 +19355,21 @@ mod tests {
         for replacement in [remote_r1, remote_r2, remote_r3] {
             runtime.queue_test_onedrive_precondition_failure(Some(replacement));
         }
-        runtime.fail_next_test_onedrive_conflict_copy();
 
         assert!(matches!(
             runtime.save_vault(&vault_id).unwrap(),
             RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+                status: SaveVaultStatusDto::SavedToCache,
                 ..
             })
         ));
+        let pending_local = runtime.get_entry_detail(&vault_id, &entry.id).unwrap();
+        assert_eq!(pending_local.username, base_username);
+        assert_eq!(pending_local.notes, local_fields.notes);
 
         let second_local_fields = EntryFieldsDto {
-            notes: "newest edit while conflict copy remains pending".into(),
-            ..entry_fields(
-                &runtime
-                    .get_entry_detail(&vault_id, &entry.id)
-                    .expect("pending conflict candidate"),
-            )
+            notes: "newest edit while Publication remains pending".into(),
+            ..entry_fields(&pending_local)
         };
         runtime
             .update_entry_fields(
@@ -19454,7 +19388,7 @@ mod tests {
         assert!(matches!(
             runtime.save_vault(&vault_id).unwrap(),
             RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+                status: SaveVaultStatusDto::SavedToCache,
                 ..
             })
         ));
@@ -19472,7 +19406,7 @@ mod tests {
                     &pending_fingerprint,
                 )
                 .unwrap(),
-            GenericPendingKind::ConflictCopy
+            GenericPendingKind::SourceWrite
         );
 
         let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
@@ -19493,30 +19427,17 @@ mod tests {
             base_username.as_str(),
             "R2 must not be replayed over the later R3 restoration"
         );
+        assert_eq!(main_entry.notes, second_local_fields.notes.as_str());
 
-        let conflicts = runtime
+        let conflict_count = runtime
             .one_drive
             .list_children(None)
             .unwrap()
             .items
             .into_iter()
             .filter(|item| item.item_id.starts_with("vaultkern-conflict-"))
-            .collect::<Vec<_>>();
-        assert_eq!(conflicts.len(), 1);
-        let conflict_bytes = runtime
-            .read_test_onedrive_item_bytes(&conflicts[0].drive_id, &conflicts[0].item_id)
-            .unwrap();
-        let conflict = KdbxVaultCodec
-            .decode(&conflict_bytes, &transformed)
-            .unwrap();
-        let conflict_entry = conflict
-            .root
-            .entries
-            .iter()
-            .find(|candidate| candidate.id.to_string() == entry.id)
-            .unwrap();
-        assert_eq!(conflict_entry.username, "remote-r2");
-        assert_eq!(conflict_entry.notes, second_local_fields.notes.as_str());
+            .count();
+        assert_eq!(conflict_count, 0);
     }
 
     #[test]

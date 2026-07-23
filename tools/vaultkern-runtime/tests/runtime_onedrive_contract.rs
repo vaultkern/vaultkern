@@ -1231,7 +1231,7 @@ fn runtime_retries_generic_pending_with_fresh_three_way_patch_after_cas_failure(
 }
 
 #[test]
-fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
+fn runtime_pending_cas_exhaustion_stays_pending_without_conflict_split() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");
     let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
@@ -1300,18 +1300,17 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
     let RuntimeResponse::VaultSourceStatus(status) = response else {
         panic!("expected source status");
     };
-    assert_eq!(status.remote_state, "online");
-    let error = status.last_error.expect("conflict-copy recovery message");
-    assert!(error.contains("onedrive:"), "{error}");
-    assert!(error.contains("VaultKern conflict"), "{error}");
-    assert_eq!(runtime.test_onedrive_access_counts().writes, 4);
+    assert_eq!(status.remote_state, "pending_sync");
+    let error = status.last_error.expect("Stale Revision recovery message");
+    assert!(error.contains("Stale Revision"), "{error}");
+    assert_eq!(runtime.test_onedrive_access_counts().writes, 3);
     assert_eq!(
         runtime
             .get_entry_detail(&vault_id, &entry_id)
             .unwrap()
             .notes,
-        "final-cas-race-3",
-        "the terminal state must adopt the head that caused the final CAS failure"
+        "keep me",
+        "Stale Revision must not replace Local with a rejected merge candidate"
     );
 
     let list = runtime
@@ -1322,42 +1321,24 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
     let RuntimeResponse::OneDriveItemList(list) = list else {
         panic!("expected OneDrive list");
     };
-    assert_eq!(list.items.len(), 2);
-    let conflict = list
-        .items
-        .iter()
-        .find(|item| item.name.contains("VaultKern conflict"))
-        .expect("conflict copy");
-    let bytes = runtime
-        .read_test_onedrive_item_bytes("drive-1", &conflict.item_id)
-        .unwrap();
-    let vault = core.load_database(&bytes, &key()).unwrap().vault;
-    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
-    assert_eq!(entry.password, "pending-password");
+    assert_eq!(list.items.len(), 1);
 
     let retry = runtime
-        .handle(RuntimeCommand::RetryVaultSourceSync { vault_id })
+        .handle(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        })
         .unwrap();
     assert!(matches!(
         retry,
         RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
     ));
-    let list = runtime
-        .handle(RuntimeCommand::ListOneDriveChildren {
-            parent_item_id: None,
-        })
+    let uploaded = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
-    let RuntimeResponse::OneDriveItemList(list) = list else {
-        panic!("expected OneDrive list");
-    };
-    assert_eq!(
-        list.items
-            .iter()
-            .filter(|item| item.name.contains("VaultKern conflict"))
-            .count(),
-        1,
-        "a terminal conflict fallback must not upload duplicate copies"
-    );
+    let vault = core.load_database(&uploaded, &key()).unwrap().vault;
+    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
+    assert_eq!(entry.password, "pending-password");
+    assert_eq!(entry.notes, "keep me");
 }
 
 #[test]
@@ -2398,7 +2379,7 @@ fn source_refresh_turns_unrepresentable_live_edits_into_a_terminal_conflict_copy
 }
 
 #[test]
-fn repeated_generic_pending_saves_keep_the_original_observed_base() {
+fn repeated_generic_pending_saves_keep_the_fixed_base() {
     let core = KeepassCore::new();
     let initial_bytes = core
         .save_kdbx(

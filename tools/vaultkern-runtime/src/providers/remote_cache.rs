@@ -263,6 +263,7 @@ struct RemoteVaultGeneration {
 enum RemoteVaultPendingKind {
     None,
     Generic,
+    GenericFixedBase,
     ConflictCopy,
     Autofill,
 }
@@ -276,7 +277,7 @@ pub(crate) enum GenericPendingKind {
 impl GenericPendingKind {
     fn manifest_kind(self) -> RemoteVaultPendingKind {
         match self {
-            Self::SourceWrite => RemoteVaultPendingKind::Generic,
+            Self::SourceWrite => RemoteVaultPendingKind::GenericFixedBase,
             Self::ConflictCopy => RemoteVaultPendingKind::ConflictCopy,
         }
     }
@@ -287,9 +288,10 @@ fn resident_pending_kind_matches(
     expected: Option<GenericPendingKind>,
 ) -> bool {
     match (actual, expected) {
-        (Some(RemoteVaultPendingKind::Generic), None | Some(GenericPendingKind::SourceWrite)) => {
-            true
-        }
+        (
+            Some(RemoteVaultPendingKind::Generic | RemoteVaultPendingKind::GenericFixedBase),
+            None | Some(GenericPendingKind::SourceWrite),
+        ) => true,
         (
             Some(RemoteVaultPendingKind::ConflictCopy),
             None | Some(GenericPendingKind::ConflictCopy),
@@ -493,7 +495,11 @@ impl RemoteVaultCache {
         if current.generation.pending_kind != Some(RemoteVaultPendingKind::Autofill) {
             return if matches!(
                 current.generation.pending_kind,
-                Some(RemoteVaultPendingKind::Generic | RemoteVaultPendingKind::ConflictCopy)
+                Some(
+                    RemoteVaultPendingKind::Generic
+                        | RemoteVaultPendingKind::GenericFixedBase
+                        | RemoteVaultPendingKind::ConflictCopy
+                )
             ) && current.generation.pending_operation_id.is_none()
             {
                 Err(PendingRemoteCacheChainError::MissingOperationBinding)
@@ -679,19 +685,19 @@ impl RemoteVaultCache {
         )
     }
 
-    pub(crate) fn write_generic_pending_with_observed(
+    pub(crate) fn write_generic_pending_with_base(
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
         expected_current: &VaultSourceFingerprint,
-        observed_source: Option<RemoteVaultCacheEntry>,
+        base: Option<RemoteVaultCacheEntry>,
     ) -> Result<()> {
         self.write_resident_pending(
             key,
             entry,
             expected_current,
             GenericPendingKind::SourceWrite,
-            observed_source,
+            base,
         )
     }
 
@@ -716,7 +722,7 @@ impl RemoteVaultCache {
         entry: RemoteVaultCacheEntry,
         expected_current: &VaultSourceFingerprint,
         kind: GenericPendingKind,
-        observed_source: Option<RemoteVaultCacheEntry>,
+        base: Option<RemoteVaultCacheEntry>,
     ) -> Result<()> {
         if !entry.pending_sync {
             bail!("generic pending cache entry must be marked pending_sync");
@@ -724,7 +730,7 @@ impl RemoteVaultCache {
         require_durable_cache_publish(self.write_with_source_context(
             key,
             entry,
-            observed_source,
+            base,
             None,
             None,
             None,
@@ -855,7 +861,9 @@ impl RemoteVaultCache {
             .into());
         }
         match current.generation.pending_kind {
-            Some(RemoteVaultPendingKind::Generic) => Ok(GenericPendingKind::SourceWrite),
+            Some(RemoteVaultPendingKind::Generic | RemoteVaultPendingKind::GenericFixedBase) => {
+                Ok(GenericPendingKind::SourceWrite)
+            }
             Some(RemoteVaultPendingKind::ConflictCopy) => Ok(GenericPendingKind::ConflictCopy),
             None if current.legacy => Ok(GenericPendingKind::SourceWrite),
             _ => Err(PendingRemoteCacheConflict::new(
@@ -865,7 +873,7 @@ impl RemoteVaultCache {
         }
     }
 
-    pub(crate) fn generic_pending_observed_source(
+    pub(crate) fn generic_pending_base(
         &self,
         key: &RemoteCacheKey,
         expected_pending: &VaultSourceFingerprint,
@@ -886,7 +894,7 @@ impl RemoteVaultCache {
             })?;
         let AuthenticatedCacheRead::Current(current) = self.read_authenticated_locked(key) else {
             return Err(PendingRemoteCacheConflict::new(
-                "pending cache is unavailable before reading its observed source",
+                "pending cache is unavailable before reading its Base",
             )
             .into());
         };
@@ -894,34 +902,40 @@ impl RemoteVaultCache {
             || !same_content_fingerprint(&current.entry.fingerprint, expected_pending)
             || current.generation.pending_operation_id.is_some()
             || (!current.legacy
-                && current.generation.pending_kind != Some(RemoteVaultPendingKind::Generic))
+                && !matches!(
+                    current.generation.pending_kind,
+                    Some(RemoteVaultPendingKind::GenericFixedBase)
+                ))
         {
+            if current.generation.pending_kind == Some(RemoteVaultPendingKind::Generic) {
+                return Ok(None);
+            }
             return Err(PendingRemoteCacheConflict::new(
-                "source-write pending cache changed before reading its observed source",
+                "source-write pending cache changed before reading its Base",
             )
             .into());
         }
-        let Some(observed) = current.observed else {
+        let Some(base) = current.observed else {
             return Ok(None);
         };
-        if observed.pending_sync
-            || observed.pending_operation_id.is_some()
-            || observed.pending_kind != Some(RemoteVaultPendingKind::None)
+        if base.pending_sync
+            || base.pending_operation_id.is_some()
+            || base.pending_kind != Some(RemoteVaultPendingKind::None)
         {
             return Err(PendingRemoteCacheConflict::new(
-                "generic pending observed source is not a committed generation",
+                "generic pending Base is not a committed generation",
             )
             .into());
         }
         let digest = cache_key_digest(key);
-        let observed = self
-            .read_generation(&digest, &observed, false)
+        let base = self
+            .read_generation(&digest, &base, false)
             .map_err(|reason| {
                 PendingRemoteCacheConflict::new(format!(
-                    "generic pending observed source is corrupt: {reason}"
+                    "generic pending Base is corrupt: {reason}"
                 ))
             })?;
-        Ok(Some(observed.entry))
+        Ok(Some(base.entry))
     }
 
     fn require_generic_pending_locked(
@@ -2018,9 +2032,11 @@ fn generation_pending_schema_is_valid(generation: &RemoteVaultGeneration) -> boo
         Some(RemoteVaultPendingKind::None) => {
             !generation.pending_sync && generation.pending_operation_id.is_none()
         }
-        Some(RemoteVaultPendingKind::Generic | RemoteVaultPendingKind::ConflictCopy) => {
-            generation.pending_sync && generation.pending_operation_id.is_none()
-        }
+        Some(
+            RemoteVaultPendingKind::Generic
+            | RemoteVaultPendingKind::GenericFixedBase
+            | RemoteVaultPendingKind::ConflictCopy,
+        ) => generation.pending_sync && generation.pending_operation_id.is_none(),
         Some(RemoteVaultPendingKind::Autofill) => {
             generation.pending_sync
                 && generation
@@ -2316,16 +2332,11 @@ mod tests {
         cache.write(&key(), current.clone()).unwrap();
         let pending_a = entry(b"pending-a", 2, true);
         cache
-            .write_generic_pending_with_observed(
-                &key(),
-                pending_a.clone(),
-                &current.fingerprint,
-                None,
-            )
+            .write_generic_pending_with_base(&key(), pending_a.clone(), &current.fingerprint, None)
             .unwrap();
         let pending_b = entry(b"pending-b", 3, true);
         cache
-            .write_generic_pending_with_observed(&key(), pending_b, &pending_a.fingerprint, None)
+            .write_generic_pending_with_base(&key(), pending_b, &pending_a.fingerprint, None)
             .unwrap();
         let source_write_called = std::cell::Cell::new(false);
 
@@ -2347,12 +2358,7 @@ mod tests {
         cache.write(&key(), current.clone()).unwrap();
         let pending = entry(b"pending", 2, true);
         cache
-            .write_generic_pending_with_observed(
-                &key(),
-                pending.clone(),
-                &current.fingerprint,
-                None,
-            )
+            .write_generic_pending_with_base(&key(), pending.clone(), &current.fingerprint, None)
             .unwrap();
         let competing_cache = cache.clone();
         let expected = pending.fingerprint.clone();
@@ -2365,7 +2371,7 @@ mod tests {
             .complete_generic_pending_while(&key(), &pending.fingerprint, || {
                 handle.replace(Some(std::thread::spawn(move || {
                     started_tx.send(()).unwrap();
-                    let result = competing_cache.write_generic_pending_with_observed(
+                    let result = competing_cache.write_generic_pending_with_base(
                         &key(),
                         competing,
                         &expected,
@@ -2686,7 +2692,7 @@ mod tests {
         let cache = RemoteVaultCache::new_at(dir.path());
         cache.write(&key(), entry(b"baseline", 10, false)).unwrap();
         cache
-            .write_generic_pending_with_observed(
+            .write_generic_pending_with_base(
                 &key(),
                 entry(b"pending-1", 11, true),
                 &fingerprint(b"baseline", 10),
@@ -2695,7 +2701,7 @@ mod tests {
             .unwrap();
 
         let stale_error = cache
-            .write_generic_pending_with_observed(
+            .write_generic_pending_with_base(
                 &key(),
                 entry(b"stale-must-not-win", 12, true),
                 &fingerprint(b"baseline", 10),
@@ -2706,7 +2712,7 @@ mod tests {
         assert_eq!(cache.read(&key()).unwrap().unwrap().bytes, b"pending-1");
 
         cache
-            .write_generic_pending_with_observed(
+            .write_generic_pending_with_base(
                 &key(),
                 entry(b"pending-2", 13, true),
                 &fingerprint(b"pending-1", 11),
@@ -2737,6 +2743,39 @@ mod tests {
             PendingRemoteCacheCompletion::Durable
         );
         assert_eq!(cache.read(&key()).unwrap().unwrap().bytes, b"resolved");
+    }
+
+    #[test]
+    fn generic_pending_base_survives_later_pending_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = RemoteVaultCache::new_at(dir.path());
+        let base = entry(b"fixed-base", 10, false);
+        cache.write(&key(), base.clone()).unwrap();
+        let pending_1 = entry(b"pending-1", 11, true);
+        cache
+            .write_generic_pending_with_base(
+                &key(),
+                pending_1.clone(),
+                &base.fingerprint,
+                Some(base.clone()),
+            )
+            .unwrap();
+        let pending_2 = entry(b"pending-2", 12, true);
+        cache
+            .write_generic_pending_with_base(
+                &key(),
+                pending_2.clone(),
+                &pending_1.fingerprint,
+                Some(base.clone()),
+            )
+            .unwrap();
+
+        assert_eq!(
+            cache
+                .generic_pending_base(&key(), &pending_2.fingerprint)
+                .unwrap(),
+            Some(base)
+        );
     }
 
     #[test]
