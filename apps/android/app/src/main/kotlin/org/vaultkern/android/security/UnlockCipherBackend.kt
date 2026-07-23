@@ -23,7 +23,6 @@ data class PreparedUnlockCipher(
 interface UnlockCipherBackend {
     fun prepareEncryption(): PreparedUnlockCipher
     fun prepareDecryption(record: UnlockBlobRecord): PreparedUnlockCipher
-    fun contains(alias: String): Boolean
     fun delete(alias: String)
     fun aliases(): Set<String>
 }
@@ -68,8 +67,6 @@ class AndroidKeystoreUnlockCipherBackend(
             securityLevel = securityLevel(key),
         )
     }
-
-    override fun contains(alias: String): Boolean = keyStore().containsAlias(alias)
 
     override fun delete(alias: String) {
         val store = keyStore()

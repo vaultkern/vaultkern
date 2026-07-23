@@ -5,17 +5,24 @@ import java.nio.charset.CodingErrorAction
 import org.vaultkern.android.unlock.ResidentUnlockPort
 import org.vaultkern.android.unlock.UnlockAttemptOutcome
 import org.vaultkern.core.UnlockBlobStatusDto
+import org.vaultkern.core.VaultKernSensitiveBytes
 import org.vaultkern.core.VaultKernSensitiveString
 import org.vaultkern.core.VaultSession
 
 class VaultKernResidentUnlockPort(
     private val session: VaultSession,
 ) : ResidentUnlockPort {
-    override fun interactiveUnlock(path: String, credential: CharArray) {
-        val handle = session.openVault(path)
-        sensitiveCredential(credential).use { password ->
+    override fun interactiveUnlockCurrent(
+        credential: CharArray,
+        keyFile: VaultKernSensitiveBytes?,
+    ) {
+        withSensitiveCredential(credential) { password ->
             session.unlock().use { unlock ->
-                unlock.unlockVault(handle.vaultId, password, null, false)
+                if (keyFile == null) {
+                    unlock.unlockCurrent(password, null, false)
+                } else {
+                    unlock.unlockCurrentWithKeyFile(password, keyFile, false)
+                }
             }
         }
     }
@@ -31,16 +38,35 @@ class VaultKernResidentUnlockPort(
         }
     }
 
-    override fun enrollQuickUnlock(credential: CharArray) {
-        sensitiveCredential(credential).use { password ->
+    override fun enrollQuickUnlock(
+        credential: CharArray,
+        keyFile: VaultKernSensitiveBytes?,
+    ) {
+        withSensitiveCredential(credential) { password ->
             session.unlock().use { unlock ->
-                unlock.enroll(password, null, false)
+                if (keyFile == null) {
+                    unlock.enroll(password, null, false)
+                } else {
+                    unlock.enrollWithKeyFile(password, keyFile, false)
+                }
             }
         }
     }
 
-    private fun sensitiveCredential(chars: CharArray): VaultKernSensitiveString {
-        return withClearableUtf8Bytes(chars, VaultKernSensitiveString::fromUtf8Bytes)
+    private fun sensitiveCredential(chars: CharArray): VaultKernSensitiveString? =
+        chars.takeIf(CharArray::isNotEmpty)
+            ?.let { withClearableUtf8Bytes(it, VaultKernSensitiveString::fromUtf8Bytes) }
+
+    private inline fun <T> withSensitiveCredential(
+        chars: CharArray,
+        block: (VaultKernSensitiveString?) -> T,
+    ): T {
+        val password = sensitiveCredential(chars)
+        return try {
+            block(password)
+        } finally {
+            password?.close()
+        }
     }
 }
 

@@ -110,6 +110,52 @@ class AndroidUnlockBlobAdapterTest {
     }
 
     @Test
+    fun enrollmentProbeRejectsAPresentButPermanentlyInvalidatedKey() {
+        adapter.authorizeStoreUserPresence()
+        adapter.storeBlob(
+            TEST_KEY,
+            VaultKernSensitiveBytes.fromByteArray(ByteArray(32) { 9 }),
+        )
+        val selectedAlias = records.read(TEST_KEY)!!.keyAlias
+        keys.invalidatedAlias = selectedAlias
+
+        assertEquals(
+            UnlockEnrollmentState.INVALIDATED,
+            adapter.enrollmentState(TEST_KEY),
+        )
+        assertFalse(adapter.containsBlob(TEST_KEY))
+
+        assertFalse(records.exists(TEST_KEY))
+        assertFalse(keys.contains(selectedAlias))
+        assertEquals(UnlockEnrollmentState.INVALIDATED, adapter.enrollmentState(TEST_KEY))
+    }
+
+    @Test
+    fun securityReportingIsScopedToTheRequestedVaultBlob() {
+        val firstKey = "quick_unlock_first"
+        val secondKey = "quick_unlock_second"
+        keys.nextSecurityLevel = UnlockKeySecurityLevel.TRUSTED_ENVIRONMENT
+        adapter.authorizeStoreUserPresence()
+        adapter.storeBlob(
+            firstKey,
+            VaultKernSensitiveBytes.fromByteArray(ByteArray(32) { 1 }),
+        )
+        keys.nextSecurityLevel = UnlockKeySecurityLevel.STRONGBOX
+        adapter.authorizeStoreUserPresence()
+        adapter.storeBlob(
+            secondKey,
+            VaultKernSensitiveBytes.fromByteArray(ByteArray(32) { 2 }),
+        )
+
+        assertTrue(adapter.containsBlob(secondKey))
+
+        assertEquals(
+            UnlockKeySecurityLevel.TRUSTED_ENVIRONMENT,
+            adapter.securityLevel(firstKey),
+        )
+    }
+
+    @Test
     fun unrecoverableKeystoreKeyDeletesTheAtomicItemAndReportsInvalidated() {
         adapter.authorizeStoreUserPresence()
         adapter.storeBlob(
@@ -197,6 +243,23 @@ class AndroidUnlockBlobAdapterTest {
         assertEquals(original.keyAlias, records.read(TEST_KEY)!!.keyAlias)
         assertTrue(keys.contains(original.keyAlias))
         assertEquals(setOf(original.keyAlias), keys.aliases())
+    }
+
+    @Test
+    fun abandonedReplacementEnrollmentDeletesOnlyThePreparedKey() {
+        adapter.authorizeStoreUserPresence()
+        adapter.storeBlob(
+            TEST_KEY,
+            VaultKernSensitiveBytes.fromByteArray(ByteArray(32) { 5 }),
+        )
+        val original = records.read(TEST_KEY)!!
+
+        adapter.authorizeStoreUserPresence()
+        adapter.finishStoreAttempt()
+
+        assertEquals(original.keyAlias, records.read(TEST_KEY)!!.keyAlias)
+        assertEquals(setOf(original.keyAlias), keys.aliases())
+        assertEquals(UnlockEnrollmentState.ENROLLED, adapter.enrollmentState(TEST_KEY))
     }
 
     @Test
@@ -318,6 +381,7 @@ class AndroidUnlockBlobAdapterTest {
 
 private class FakeCipherBackend : UnlockCipherBackend {
     private val keys = ConcurrentHashMap<String, SecretKey>()
+    var nextSecurityLevel = UnlockKeySecurityLevel.SOFTWARE
     var invalidatedAlias: String? = null
     var unrecoverableAlias: String? = null
     var failNextDeleteAlias: String? = null
@@ -339,7 +403,7 @@ private class FakeCipherBackend : UnlockCipherBackend {
             cipher = Cipher.getInstance(TRANSFORMATION).apply {
                 init(Cipher.ENCRYPT_MODE, key)
             },
-            securityLevel = UnlockKeySecurityLevel.SOFTWARE,
+            securityLevel = nextSecurityLevel,
         )
     }
 
@@ -360,7 +424,7 @@ private class FakeCipherBackend : UnlockCipherBackend {
         )
     }
 
-    override fun contains(alias: String): Boolean = keys.containsKey(alias)
+    fun contains(alias: String): Boolean = keys.containsKey(alias)
     override fun delete(alias: String) {
         if (failNextDeleteAlias == alias) {
             failNextDeleteAlias = null

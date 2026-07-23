@@ -10,9 +10,7 @@ class CurrentVaultQuickUnlockActualState(
     private val revokeAll: () -> Unit,
 ) : QuickUnlockActualState {
     override fun enrollmentState(): UnlockEnrollmentState {
-        val current = session.sources().use { sources ->
-            sources.listRecent().vaults.firstOrNull { it.isCurrent }
-        }
+        val current = currentReference()
         if (current?.supportsQuickUnlock == true) {
             return UnlockEnrollmentState.ENROLLED
         }
@@ -22,10 +20,17 @@ class CurrentVaultQuickUnlockActualState(
             ?: UnlockEnrollmentState.NOT_ENROLLED
     }
 
+    fun currentStorageKey(): String? =
+        currentReference()?.vaultRefId?.let(::quickUnlockStorageKey)
+
     override fun vaultIsUnlocked(): Boolean = session.sessionState().unlocked
 
     override fun revokeAll() {
         revokeAll.invoke()
+    }
+
+    private fun currentReference() = session.sources().use { sources ->
+        sources.listRecent().vaults.firstOrNull { it.isCurrent }
     }
 
     private fun quickUnlockStorageKey(vaultRefId: String): String {

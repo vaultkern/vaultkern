@@ -85,15 +85,20 @@ class QuickUnlockReconciler(
             return QuickUnlockReconciliationOutcome.REVOKED
         }
 
+        if (enrollCurrentVault != null) {
+            if (!actualState.vaultIsUnlocked()) {
+                return QuickUnlockReconciliationOutcome.SKIPPED_LOCKED
+            }
+            enrollCurrentVault()
+            return QuickUnlockReconciliationOutcome.ENROLLED
+        }
         if (actualState.enrollmentState() == UnlockEnrollmentState.ENROLLED) {
             return QuickUnlockReconciliationOutcome.ALREADY_CONVERGED
         }
-        if (!actualState.vaultIsUnlocked()) {
-            return QuickUnlockReconciliationOutcome.SKIPPED_LOCKED
+        return if (actualState.vaultIsUnlocked()) {
+            QuickUnlockReconciliationOutcome.WAITING_FOR_CREDENTIAL
+        } else {
+            QuickUnlockReconciliationOutcome.SKIPPED_LOCKED
         }
-        val enroll = enrollCurrentVault
-            ?: return QuickUnlockReconciliationOutcome.WAITING_FOR_CREDENTIAL
-        enroll()
-        return QuickUnlockReconciliationOutcome.ENROLLED
     }
 }

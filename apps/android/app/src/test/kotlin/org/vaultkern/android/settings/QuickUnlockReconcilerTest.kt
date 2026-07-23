@@ -82,6 +82,27 @@ class QuickUnlockReconcilerTest {
     }
 
     @Test
+    fun freshInteractiveCredentialRefreshesAnExistingEnrollment() {
+        val actual = FakeUnlockActualState(
+            state = UnlockEnrollmentState.ENROLLED,
+            unlocked = true,
+        )
+        var refreshes = 0
+        val reconciler = QuickUnlockReconciler(
+            desiredSettings = FixedDesiredSettings(true),
+            actualState = actual,
+        )
+
+        val outcome = reconciler.reconcile {
+            refreshes += 1
+            actual.markEnrolled()
+        }
+
+        assertEquals(QuickUnlockReconciliationOutcome.ENROLLED, outcome)
+        assertEquals(1, refreshes)
+    }
+
+    @Test
     fun concurrentDisableCannotBeOverwrittenByAnOlderEnrollmentPass() {
         val desired = MutableDesiredSettings(true)
         val actual = BlockingEnrollmentActualState()

@@ -2,6 +2,8 @@ package org.vaultkern.android.unlock
 
 import java.util.concurrent.atomic.AtomicReference
 import org.vaultkern.android.settings.QuickUnlockReconciler
+import org.vaultkern.android.storage.SelectedKeyFile
+import org.vaultkern.core.VaultKernSensitiveBytes
 
 enum class UnlockAttemptOutcome {
     UNLOCKED,
@@ -13,9 +15,27 @@ enum class UnlockAttemptOutcome {
 }
 
 interface ResidentUnlockPort {
-    fun interactiveUnlock(path: String, credential: CharArray)
+    fun interactiveUnlockCurrent(
+        credential: CharArray,
+        keyFile: VaultKernSensitiveBytes?,
+    )
     fun quickUnlock(): UnlockAttemptOutcome
-    fun enrollQuickUnlock(credential: CharArray)
+    fun enrollQuickUnlock(
+        credential: CharArray,
+        keyFile: VaultKernSensitiveBytes?,
+    )
+}
+
+internal fun reconcilePlatformStores(vararg stores: () -> Unit) {
+    var failure: Exception? = null
+    stores.forEach { reconcile ->
+        try {
+            reconcile()
+        } catch (error: Exception) {
+            if (failure == null) failure = error else failure?.addSuppressed(error)
+        }
+    }
+    failure?.let { throw it }
 }
 
 fun interface PostUnlockReconciliation {
@@ -49,15 +69,39 @@ class CorePostUnlockReconciliation(
 class UnlockCoordinator(
     private val port: ResidentUnlockPort,
     private val reconciliation: PostUnlockReconciliation,
+    private val beforeVaultRead: () -> Unit = {},
+    private val finishEnrollmentAttempt: () -> Unit = {},
 ) {
     private val reconciliationFailure = AtomicReference<String?>(null)
 
-    fun interactiveUnlock(path: String, credential: CharArray): UnlockAttemptOutcome = try {
+    fun interactiveUnlockCurrent(
+        credential: CharArray,
+        keyFile: SelectedKeyFile? = null,
+    ): UnlockAttemptOutcome = interactiveUnlock(
+        credential = credential,
+        keyFile = keyFile,
+    ) { keyFileContent ->
+        port.interactiveUnlockCurrent(credential, keyFileContent)
+    }
+
+    private fun interactiveUnlock(
+        credential: CharArray,
+        keyFile: SelectedKeyFile?,
+        unlock: (VaultKernSensitiveBytes?) -> Unit,
+    ): UnlockAttemptOutcome = try {
         reconciliationFailure.set(null)
-        port.interactiveUnlock(path, credential)
+        beforeVaultRead()
+        keyFile.withOptionalSensitiveBytes(unlock)
         try {
             reconciliation.reconcile {
-                port.enrollQuickUnlock(credential)
+                try {
+                    keyFile.withOptionalSensitiveBytes { keyFileContent ->
+                        port.enrollQuickUnlock(credential, keyFileContent)
+                    }
+                } finally {
+                    credential.fill('\u0000')
+                    finishEnrollmentAttempt()
+                }
             }
         } catch (error: Exception) {
             reconciliationFailure.set(error.javaClass.simpleName)
@@ -68,6 +112,7 @@ class UnlockCoordinator(
     }
 
     fun quickUnlock(): UnlockAttemptOutcome {
+        beforeVaultRead()
         val outcome = port.quickUnlock()
         if (outcome == UnlockAttemptOutcome.UNLOCKED) {
             reconciliationFailure.set(null)
@@ -82,3 +127,7 @@ class UnlockCoordinator(
 
     fun lastReconciliationFailure(): String? = reconciliationFailure.get()
 }
+
+private fun <T> SelectedKeyFile?.withOptionalSensitiveBytes(
+    block: (VaultKernSensitiveBytes?) -> T,
+): T = if (this == null) block(null) else withSensitiveBytes { block(it) }

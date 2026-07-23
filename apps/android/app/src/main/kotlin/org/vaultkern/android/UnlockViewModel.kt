@@ -2,9 +2,8 @@ package org.vaultkern.android
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.CoroutineStart
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -13,43 +12,66 @@ import kotlinx.coroutines.launch
 import org.vaultkern.android.security.UnlockEnrollmentState
 import org.vaultkern.android.settings.QuickUnlockSettingsApplier
 import org.vaultkern.android.settings.QuickUnlockSettingsApplyOutcome
+import org.vaultkern.android.storage.SelectedKeyFile
 import org.vaultkern.android.ui.UnlockUiState
 import org.vaultkern.android.unlock.UnlockAttemptOutcome
 
 class UnlockViewModel(
     private val graph: VaultKernGraph,
 ) : ViewModel() {
-    private val mutableState = MutableStateFlow(
-        UnlockUiState(
+    private val selectedKeyFile = AtomicReference<SelectedKeyFile?>(null)
+    private val initialVaultSelection = runCatching { graph.vaultSelection.current() }
+    private val initialPresentation = runCatching {
+        RefreshedUnlockPresentation(
             quickUnlockDesired = graph.desiredSettings.load().quickUnlockEnabled,
             enrollmentState = graph.currentEnrollmentState(),
             keySecurityLevel = graph.currentKeySecurityLevel(),
+        )
+    }
+    private val mutableState = MutableStateFlow(
+        UnlockUiState(
+            selectedVaultName = initialVaultSelection.getOrNull()?.displayName,
+            currentVaultSelected = initialVaultSelection.getOrNull() != null,
+            quickUnlockDesired = initialPresentation.getOrNull()?.quickUnlockDesired ?: false,
+            enrollmentState = initialPresentation.getOrNull()?.enrollmentState
+                ?: UnlockEnrollmentState.NOT_ENROLLED,
+            keySecurityLevel = initialPresentation.getOrNull()?.keySecurityLevel,
+            status = initialFailureStatus(),
         ),
     )
+    private val actionGate = UnlockActionGate(mutableState)
     val state: StateFlow<UnlockUiState> = mutableState.asStateFlow()
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
             val refreshed = runCatching {
                 graph.awaitScheduledReconciliation()
-                graph.currentEnrollmentState() to graph.currentKeySecurityLevel()
+                val selection = graph.vaultSelection.current()
+                StartupUnlockSnapshot(
+                    selectedVaultName = selection?.displayName,
+                    currentVaultSelected = selection != null,
+                    quickUnlockDesired = graph.desiredSettings.load().quickUnlockEnabled,
+                    enrollmentState = graph.currentEnrollmentState(),
+                    keySecurityLevel = graph.currentKeySecurityLevel(),
+                )
             }
             mutableState.update { current ->
-                if (current.busy || current.status != INITIAL_STATUS) {
+                if (current.busy) {
                     current
                 } else {
                     refreshed.fold(
-                        onSuccess = { (enrollment, security) ->
-                            current.copy(
-                                enrollmentState = enrollment,
-                                keySecurityLevel = security,
-                            )
-                        },
+                        onSuccess = { applyStartupRefresh(current, it) },
                         onFailure = {
-                            current.copy(
-                                status = "Quick-unlock reconciliation needs retry " +
-                                    "(${it.javaClass.simpleName})",
-                            )
+                            if (current.status == INITIAL_STATUS ||
+                                current.status.startsWith(STARTUP_RETRY_PREFIX)
+                            ) {
+                                current.copy(
+                                    status = "Quick-unlock reconciliation needs retry " +
+                                        "(${it.javaClass.simpleName})",
+                                )
+                            } else {
+                                current
+                            }
                         },
                     )
                 }
@@ -57,41 +79,96 @@ class UnlockViewModel(
         }
     }
 
-    fun onPathChanged(value: String) {
-        mutableState.update { it.copy(vaultPath = value) }
-    }
-
-    fun onPasswordChanged(value: String) {
-        mutableState.update { it.copy(password = value) }
-    }
-
-    @OptIn(ExperimentalCoroutinesApi::class)
-    fun interactiveUnlock() {
-        val snapshot = mutableState.value
-        if (snapshot.vaultPath.isBlank()) return
-        val path = snapshot.vaultPath
-        val credential = snapshot.password.toCharArray()
-        mutableState.update {
-            it.copy(password = "", busy = true, status = "Unlocking vault")
+    fun selectKeyFile(uri: String) {
+        if (uri.isBlank() || !actionGate.tryBegin("Selecting key file")) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val selected = runCatching { graph.selectKeyFile(uri) }
+            selected.getOrNull()?.let(selectedKeyFile::set)
+            mutableState.update { current ->
+                selected.fold(
+                    onSuccess = { keyFile ->
+                        current.copy(
+                            selectedKeyFileName = keyFile.displayName,
+                            busy = false,
+                            status = "Key file selected",
+                        )
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "Key-file selection failed: ${it.javaClass.simpleName}",
+                        )
+                    },
+                )
+            }
         }
-        viewModelScope.launch(Dispatchers.IO, start = CoroutineStart.ATOMIC) {
-            val result = try {
-                runCatching {
-                    graph.unlockCoordinator.interactiveUnlock(path, credential)
+    }
+
+    fun selectLocalDocument(uri: String) {
+        if (uri.isBlank() ||
+            !actionGate.tryBegin("Opening selected local vault")
+        ) {
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val selected = runCatching { graph.selectLocalDocument(uri) }
+            selected.fold(
+                onSuccess = {
+                    selectedKeyFile.set(null)
+                    publishStatus("Local vault selected") { current ->
+                        current.copy(
+                            selectedVaultName = it.displayName,
+                            currentVaultSelected = true,
+                            selectedKeyFileName = null,
+                        )
+                    }
+                },
+                onFailure = {
+                    publishStatus("Vault selection failed: ${it.javaClass.simpleName}")
+                },
+            )
+        }
+    }
+
+    fun interactiveUnlock(credential: CharArray) {
+        if (!actionGate.tryBegin(
+                status = "Unlocking vault",
+                requireCurrentVault = true,
+            )
+        ) {
+            credential.fill('\u0000')
+            return
+        }
+        val keyFile = selectedKeyFile.get()
+        try {
+            viewModelScope.launchOwnedCredential(credential, Dispatchers.IO) { owned ->
+                val result = runCatching {
+                    graph.unlockCoordinator.interactiveUnlockCurrent(owned, keyFile)
                 }
-            } finally {
-                credential.fill('\u0000')
+                if (result.isSuccess) {
+                    selectedKeyFile.compareAndSet(keyFile, null)
+                    publishStatus(unlockedStatus()) { state ->
+                        state.copy(selectedKeyFileName = null)
+                    }
+                } else {
+                    publishStatus(
+                        "Unlock failed: ${result.exceptionOrNull()?.javaClass?.simpleName}",
+                    )
+                }
             }
-            if (result.isSuccess) {
-                publishStatus(unlockedStatus())
-            } else {
-                publishStatus("Unlock failed: ${result.exceptionOrNull()?.javaClass?.simpleName}")
-            }
+        } catch (error: Throwable) {
+            publishStatus("Unlock failed: ${error.javaClass.simpleName}")
         }
     }
 
     fun quickUnlock() {
-        mutableState.update { it.copy(busy = true, status = "Waiting for biometrics") }
+        if (!actionGate.tryBegin(
+                status = "Waiting for biometrics",
+                requireCurrentVault = true,
+            )
+        ) {
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching { graph.unlockCoordinator.quickUnlock() }
             val status = result.fold(
@@ -103,7 +180,15 @@ class UnlockViewModel(
     }
 
     fun setQuickUnlockDesired(enabled: Boolean) {
-        mutableState.update { it.copy(quickUnlockDesired = enabled, busy = true) }
+        if (!actionGate.tryBegin("Saving quick-unlock setting") {
+                it.copy(
+                    quickUnlockDesired = enabled,
+                    quickUnlockDraftDirty = true,
+                )
+            }
+        ) {
+            return
+        }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching {
                 QuickUnlockSettingsApplier(
@@ -125,28 +210,54 @@ class UnlockViewModel(
                     }
                 },
                 onFailure = {
-                    "Settings save failed: ${it.javaClass.simpleName}"
+                    "Settings save failed; unsaved change retained " +
+                        "(${it.javaClass.simpleName})"
                 },
             )
-            if (result.isFailure) {
-                mutableState.update { state ->
-                    state.copy(
-                        quickUnlockDesired = graph.desiredSettings.load().quickUnlockEnabled,
-                    )
-                }
+            mutableState.update { state ->
+                applyQuickUnlockSaveCompletion(
+                    state,
+                    committed = result.isSuccess,
+                )
             }
             publishStatus(status)
         }
     }
 
-    private fun publishStatus(status: String) {
-        mutableState.update {
-            it.copy(
-                busy = false,
-                status = status,
+    private fun publishStatus(
+        status: String,
+        update: (UnlockUiState) -> UnlockUiState = { it },
+    ) {
+        val refreshed = runCatching {
+            RefreshedUnlockPresentation(
                 quickUnlockDesired = graph.desiredSettings.load().quickUnlockEnabled,
                 enrollmentState = graph.currentEnrollmentState(),
                 keySecurityLevel = graph.currentKeySecurityLevel(),
+            )
+        }
+        mutableState.update {
+            val current = update(it)
+            refreshed.fold(
+                onSuccess = { presentation ->
+                    current.copy(
+                        busy = false,
+                        status = status,
+                        quickUnlockDesired = if (current.quickUnlockDraftDirty) {
+                            current.quickUnlockDesired
+                        } else {
+                            presentation.quickUnlockDesired
+                        },
+                        enrollmentState = presentation.enrollmentState,
+                        keySecurityLevel = presentation.keySecurityLevel,
+                    )
+                },
+                onFailure = { error ->
+                    current.copy(
+                        busy = false,
+                        status = "$status; state refresh needs retry " +
+                            "(${error.javaClass.simpleName})",
+                    )
+                },
             )
         }
     }
@@ -158,12 +269,9 @@ class UnlockViewModel(
 
     private fun quickUnlockStatus(outcome: UnlockAttemptOutcome): String = when (outcome) {
         UnlockAttemptOutcome.UNLOCKED -> unlockedStatus()
-        UnlockAttemptOutcome.NOT_ENROLLED ->
-            if (graph.currentEnrollmentState() == UnlockEnrollmentState.INVALIDATED) {
-                "Quick unlock invalidated; unlock interactively to re-enroll"
-            } else {
-                "Quick unlock is not enrolled"
-            }
+        UnlockAttemptOutcome.NOT_ENROLLED -> quickUnlockNotEnrolledStatus(
+            runCatching { graph.currentEnrollmentState() },
+        )
         UnlockAttemptOutcome.CANCELLED -> "Biometric authentication cancelled"
         UnlockAttemptOutcome.OPEN_APP_REQUIRED -> "Open the app once to refresh quick unlock"
         UnlockAttemptOutcome.CREDENTIAL_REQUIRED ->
@@ -171,7 +279,76 @@ class UnlockViewModel(
         UnlockAttemptOutcome.UNSUPPORTED -> "Biometric quick unlock is unavailable"
     }
 
-    companion object {
-        private const val INITIAL_STATUS = "Select a vault and unlock it"
+    private fun initialFailureStatus(): String {
+        val failure = initialVaultSelection.exceptionOrNull()
+            ?: initialPresentation.exceptionOrNull()
+            ?: return INITIAL_STATUS
+        return "$STARTUP_RETRY_PREFIX (${failure.javaClass.simpleName})"
     }
 }
+
+private data class RefreshedUnlockPresentation(
+    val quickUnlockDesired: Boolean,
+    val enrollmentState: UnlockEnrollmentState,
+    val keySecurityLevel: org.vaultkern.android.security.UnlockKeySecurityLevel?,
+)
+
+internal data class StartupUnlockSnapshot(
+    val selectedVaultName: String?,
+    val currentVaultSelected: Boolean,
+    val quickUnlockDesired: Boolean,
+    val enrollmentState: UnlockEnrollmentState,
+    val keySecurityLevel: org.vaultkern.android.security.UnlockKeySecurityLevel?,
+)
+
+internal fun applyStartupRefresh(
+    current: UnlockUiState,
+    refreshed: StartupUnlockSnapshot,
+): UnlockUiState {
+    val quickUnlockRefreshed = current.copy(
+        quickUnlockDesired = if (current.quickUnlockDraftDirty) {
+            current.quickUnlockDesired
+        } else {
+            refreshed.quickUnlockDesired
+        },
+        enrollmentState = refreshed.enrollmentState,
+        keySecurityLevel = refreshed.keySecurityLevel,
+    )
+    return if (current.status == INITIAL_STATUS ||
+        current.status.startsWith(STARTUP_RETRY_PREFIX)
+    ) {
+        quickUnlockRefreshed.copy(
+            selectedVaultName = refreshed.selectedVaultName,
+            currentVaultSelected = refreshed.currentVaultSelected,
+            status = INITIAL_STATUS,
+        )
+    } else {
+        quickUnlockRefreshed
+    }
+}
+
+internal fun applyQuickUnlockSaveCompletion(
+    current: UnlockUiState,
+    committed: Boolean,
+): UnlockUiState = current.copy(
+    quickUnlockDraftDirty = !committed && current.quickUnlockDraftDirty,
+)
+
+private const val INITIAL_STATUS = "Select a vault and unlock it"
+private const val STARTUP_RETRY_PREFIX = "Startup state needs retry"
+
+internal fun quickUnlockNotEnrolledStatus(
+    enrollment: Result<UnlockEnrollmentState>,
+): String = enrollment.fold(
+    onSuccess = {
+        if (it == UnlockEnrollmentState.INVALIDATED) {
+            "Quick unlock invalidated; unlock interactively to re-enroll"
+        } else {
+            "Quick unlock is not enrolled"
+        }
+    },
+    onFailure = {
+        "Quick unlock is not enrolled; state refresh needs retry " +
+            "(${it.javaClass.simpleName})"
+    },
+)

@@ -8,6 +8,8 @@ import org.vaultkern.android.settings.AndroidDesiredSettings
 import org.vaultkern.android.settings.DesiredSettingsStore
 import org.vaultkern.android.settings.QuickUnlockActualState
 import org.vaultkern.android.settings.QuickUnlockReconciler
+import org.vaultkern.android.storage.SelectedKeyFile
+import org.vaultkern.core.VaultKernSensitiveBytes
 
 class UnlockCoordinatorTest {
     @Test
@@ -16,10 +18,44 @@ class UnlockCoordinatorTest {
         val coordinator = coordinator(port, quickUnlockEnabled = true)
         val credential = "test-master-password".toCharArray()
 
-        val result = coordinator.interactiveUnlock("/vaults/demo.kdbx", credential)
+        val result = coordinator.interactiveUnlockCurrent(credential)
 
         assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
-        assertEquals(listOf("unlock", "enroll"), port.events)
+        assertEquals(listOf("unlock-current", "enroll"), port.events)
+        assertTrue(credential.all { it == '\u0000' })
+    }
+
+    @Test
+    fun keyFileCapabilityFlowsThroughUnlockAndFreshEnrollment() {
+        val port = RecordingUnlockPort()
+        val coordinator = coordinator(port, quickUnlockEnabled = true)
+        val credential = "test-master-password".toCharArray()
+        val keyFile = RecordingSelectedKeyFile(byteArrayOf(1, 3, 3, 7))
+
+        val result = coordinator.interactiveUnlockCurrent(credential, keyFile)
+
+        assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
+        assertEquals(
+            listOf(
+                "unlock-current:01030307",
+                "enroll:01030307",
+            ),
+            port.keyFileEvents,
+        )
+        assertEquals(2, keyFile.openCount)
+        assertTrue(credential.all { it == '\u0000' })
+    }
+
+    @Test
+    fun restoredCurrentVaultUnlockUsesTheSameFreshEnrollmentFlow() {
+        val port = RecordingUnlockPort()
+        val coordinator = coordinator(port, quickUnlockEnabled = true)
+        val credential = "restored-master-password".toCharArray()
+
+        val result = coordinator.interactiveUnlockCurrent(credential)
+
+        assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
+        assertEquals(listOf("unlock-current", "enroll"), port.events)
         assertTrue(credential.all { it == '\u0000' })
     }
 
@@ -30,11 +66,11 @@ class UnlockCoordinatorTest {
         val credential = "wrong-password".toCharArray()
 
         val result = runCatching {
-            coordinator.interactiveUnlock("/vaults/demo.kdbx", credential)
+            coordinator.interactiveUnlockCurrent(credential)
         }
 
         assertTrue(result.isFailure)
-        assertEquals(listOf("unlock"), port.events)
+        assertEquals(listOf("unlock-current"), port.events)
         assertTrue(credential.all { it == '\u0000' })
     }
 
@@ -55,6 +91,26 @@ class UnlockCoordinatorTest {
     }
 
     @Test
+    fun localDocumentAuthorityRefreshRunsBeforeBlobUnlockReadsTheVault() {
+        val port = RecordingUnlockPort(
+            initialEnrollment = UnlockEnrollmentState.ENROLLED,
+        )
+        val events = mutableListOf<String>()
+        port.beforeQuickUnlock = { events += "unlock" }
+        val coordinator = UnlockCoordinator(
+            port,
+            CountingReconciliation(
+                QuickUnlockReconciler(FixedSettings(true), port),
+            ),
+            beforeVaultRead = { events += "refresh" },
+        )
+
+        coordinator.quickUnlock()
+
+        assertEquals(listOf("refresh", "unlock"), events)
+    }
+
+    @Test
     fun reconciliationFailureDoesNotTurnASuccessfulUnlockIntoAnUnlockFailure() {
         val port = RecordingUnlockPort()
         val reconciliation = object : PostUnlockReconciliation {
@@ -65,11 +121,47 @@ class UnlockCoordinatorTest {
         val coordinator = UnlockCoordinator(port, reconciliation)
         val credential = "valid-password".toCharArray()
 
-        val result = coordinator.interactiveUnlock("/vaults/demo.kdbx", credential)
+        val result = coordinator.interactiveUnlockCurrent(credential)
 
         assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
         assertEquals("IllegalStateException", coordinator.lastReconciliationFailure())
         assertTrue(credential.all { it == '\u0000' })
+    }
+
+    @Test
+    fun failedFreshEnrollmentAlwaysFinishesPreparedPlatformState() {
+        val port = RecordingUnlockPort(failEnrollment = true)
+        var finishCalls = 0
+        val coordinator = UnlockCoordinator(
+            port,
+            CountingReconciliation(
+                QuickUnlockReconciler(FixedSettings(true), port),
+            ),
+            finishEnrollmentAttempt = { finishCalls += 1 },
+        )
+        val credential = "valid-password".toCharArray()
+
+        val result = coordinator.interactiveUnlockCurrent(credential)
+
+        assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
+        assertEquals(1, finishCalls)
+        assertEquals("IllegalStateException", coordinator.lastReconciliationFailure())
+    }
+
+    @Test
+    fun credentialIsClearedAsSoonAsFreshEnrollmentStopsUsingIt() {
+        val port = RecordingUnlockPort()
+        val credential = "valid-password".toCharArray()
+        var clearedBeforeReconciliationReturned = false
+        val reconciliation = PostUnlockReconciliation { enroll ->
+            requireNotNull(enroll).invoke()
+            clearedBeforeReconciliationReturned = credential.all { it == '\u0000' }
+        }
+        val coordinator = UnlockCoordinator(port, reconciliation)
+
+        coordinator.interactiveUnlockCurrent(credential)
+
+        assertTrue(clearedBeforeReconciliationReturned)
     }
 
     @Test
@@ -88,6 +180,23 @@ class UnlockCoordinatorTest {
         assertTrue(result.isFailure)
         assertEquals(UnlockEnrollmentState.NOT_ENROLLED, port.enrollmentState())
         assertEquals(2, cleanupCalls)
+    }
+}
+
+private class RecordingSelectedKeyFile(
+    private val content: ByteArray,
+) : SelectedKeyFile {
+    override val displayName = "test.key"
+    var openCount = 0
+
+    override fun <T> withSensitiveBytes(block: (VaultKernSensitiveBytes) -> T): T {
+        openCount += 1
+        val sensitive = VaultKernSensitiveBytes.fromByteArray(content.copyOf())
+        return try {
+            block(sensitive)
+        } finally {
+            sensitive.close()
+        }
     }
 }
 
@@ -119,29 +228,41 @@ private class CountingReconciliation(
 
 private class RecordingUnlockPort(
     private val failInteractiveUnlock: Boolean = false,
+    private val failEnrollment: Boolean = false,
     initialEnrollment: UnlockEnrollmentState = UnlockEnrollmentState.NOT_ENROLLED,
 ) : ResidentUnlockPort, QuickUnlockActualState {
     val events = mutableListOf<String>()
+    val keyFileEvents = mutableListOf<String>()
+    var beforeQuickUnlock: () -> Unit = {}
     private var unlocked = false
     private var enrollment = initialEnrollment
 
-    override fun interactiveUnlock(path: String, credential: CharArray) {
-        events += "unlock"
-        check(path == "/vaults/demo.kdbx")
+    override fun interactiveUnlockCurrent(
+        credential: CharArray,
+        keyFile: VaultKernSensitiveBytes?,
+    ) {
+        events += "unlock-current"
+        keyFileEvents += "unlock-current:${keyFile.marker()}"
         check(credential.isNotEmpty())
         if (failInteractiveUnlock) error("credential rejected")
         unlocked = true
     }
 
     override fun quickUnlock(): UnlockAttemptOutcome {
+        beforeQuickUnlock()
         unlocked = true
         return UnlockAttemptOutcome.UNLOCKED
     }
 
-    override fun enrollQuickUnlock(credential: CharArray) {
+    override fun enrollQuickUnlock(
+        credential: CharArray,
+        keyFile: VaultKernSensitiveBytes?,
+    ) {
         events += "enroll"
+        keyFileEvents += "enroll:${keyFile.marker()}"
         check(unlocked)
         check(credential.isNotEmpty())
+        if (failEnrollment) error("injected enrollment failure")
         enrollment = UnlockEnrollmentState.ENROLLED
     }
 
@@ -149,5 +270,15 @@ private class RecordingUnlockPort(
     override fun vaultIsUnlocked(): Boolean = unlocked
     override fun revokeAll() {
         enrollment = UnlockEnrollmentState.NOT_ENROLLED
+    }
+}
+
+private fun VaultKernSensitiveBytes?.marker(): String {
+    if (this == null) return "none"
+    val bytes = copyBytes()
+    return try {
+        bytes.joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    } finally {
+        bytes.fill(0)
     }
 }

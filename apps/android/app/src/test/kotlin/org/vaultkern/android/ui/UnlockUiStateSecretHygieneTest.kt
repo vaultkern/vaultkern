@@ -1,17 +1,15 @@
 package org.vaultkern.android.ui
 
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class UnlockUiStateSecretHygieneTest {
     @Test
-    fun diagnosticRenderingRedactsThePlaintextCredential() {
-        val state = UnlockUiState(password = "never-print-this-password")
+    fun durableUiStateHasNoMasterCredentialField() {
+        val fields = UnlockUiState::class.java.declaredFields.map { it.name }
 
-        val rendered = state.toString()
-
-        assertFalse(rendered.contains("never-print-this-password"))
-        assertTrue(rendered.contains("[REDACTED]"))
+        assertFalse(fields.contains("password"))
+        assertFalse(fields.contains("vaultPath"))
+        assertFalse(UnlockUiState().toString().contains("password", ignoreCase = true))
     }
 }

@@ -10,24 +10,24 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
+import org.vaultkern.android.handOffCredential
 import org.vaultkern.android.security.UnlockEnrollmentState
 import org.vaultkern.android.security.UnlockKeySecurityLevel
 
 data class UnlockUiState(
-    val vaultPath: String = "",
-    val password: String = "",
+    val selectedVaultName: String? = null,
+    val currentVaultSelected: Boolean = false,
+    val selectedKeyFileName: String? = null,
     val quickUnlockDesired: Boolean = false,
+    val quickUnlockDraftDirty: Boolean = false,
     val enrollmentState: UnlockEnrollmentState = UnlockEnrollmentState.NOT_ENROLLED,
     val keySecurityLevel: UnlockKeySecurityLevel? = null,
     val busy: Boolean = false,
@@ -35,9 +35,11 @@ data class UnlockUiState(
 ) {
     override fun toString(): String =
         "UnlockUiState(" +
-            "vaultPath=$vaultPath, " +
-            "password=[REDACTED], " +
+            "selectedVault=${if (selectedVaultName == null) "none" else "[REDACTED]"}, " +
+            "currentVaultSelected=$currentVaultSelected, " +
+            "selectedKeyFile=${if (selectedKeyFileName == null) "none" else "[REDACTED]"}, " +
             "quickUnlockDesired=$quickUnlockDesired, " +
+            "quickUnlockDraftDirty=$quickUnlockDraftDirty, " +
             "enrollmentState=$enrollmentState, " +
             "keySecurityLevel=$keySecurityLevel, " +
             "busy=$busy, " +
@@ -47,12 +49,13 @@ data class UnlockUiState(
 @Composable
 fun VaultKernUnlockScreen(
     state: UnlockUiState,
-    onPathChanged: (String) -> Unit,
-    onPasswordChanged: (String) -> Unit,
-    onInteractiveUnlock: () -> Unit,
+    onInteractiveUnlock: (CharArray) -> Unit,
     onQuickUnlock: () -> Unit,
     onQuickUnlockDesiredChanged: (Boolean) -> Unit,
+    onChooseLocalVault: () -> Unit = {},
+    onChooseKeyFile: () -> Unit = {},
 ) {
+    val credentialEditor = remember { ClearableCredentialEditor() }
     MaterialTheme {
         Column(
             modifier = Modifier
@@ -62,34 +65,52 @@ fun VaultKernUnlockScreen(
         ) {
             Text("VaultKern", style = MaterialTheme.typography.headlineMedium)
             Text(state.status, modifier = Modifier.testTag("unlock-status"))
-            OutlinedTextField(
-                value = state.vaultPath,
-                onValueChange = onPathChanged,
+            Button(
+                onClick = {
+                    credentialEditor.clear()
+                    onChooseLocalVault()
+                },
                 enabled = !state.busy,
-                label = { Text("Vault path") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("vault-path"),
+                modifier = Modifier.fillMaxWidth().testTag("choose-local-vault"),
+            ) {
+                Text("Choose local vault")
+            }
+            Text(
+                state.selectedVaultName?.let { "Selected: $it" } ?: "No local vault selected",
+                modifier = Modifier.testTag("selected-vault-name"),
             )
-            OutlinedTextField(
-                value = state.password,
-                onValueChange = onPasswordChanged,
+            ClearableMasterPasswordField(
+                editor = credentialEditor,
                 enabled = !state.busy,
-                label = { Text("Master password") },
-                singleLine = true,
-                visualTransformation = PasswordVisualTransformation(),
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                 modifier = Modifier.fillMaxWidth().testTag("master-password"),
             )
             Button(
-                onClick = onInteractiveUnlock,
-                enabled = !state.busy && state.vaultPath.isNotBlank(),
+                onClick = onChooseKeyFile,
+                enabled = !state.busy,
+                modifier = Modifier.fillMaxWidth().testTag("choose-key-file"),
+            ) {
+                Text("Choose key file (optional)")
+            }
+            Text(
+                state.selectedKeyFileName?.let { "Key file selected: $it" }
+                    ?: "No key file selected",
+                modifier = Modifier.testTag("selected-key-file"),
+            )
+            Button(
+                onClick = {
+                    handOffCredential(credentialEditor.take(), onInteractiveUnlock)
+                },
+                enabled = !state.busy && state.currentVaultSelected,
                 modifier = Modifier.fillMaxWidth().testTag("interactive-unlock"),
             ) {
                 Text("Open and unlock")
             }
             Button(
-                onClick = onQuickUnlock,
-                enabled = !state.busy,
+                onClick = {
+                    credentialEditor.clear()
+                    onQuickUnlock()
+                },
+                enabled = !state.busy && state.currentVaultSelected,
                 modifier = Modifier.fillMaxWidth().testTag("biometric-unlock"),
             ) {
                 Text("Unlock with biometrics")
@@ -112,6 +133,12 @@ fun VaultKernUnlockScreen(
                 enrollmentLabel(state.enrollmentState),
                 modifier = Modifier.testTag("unlock-enrollment-state"),
             )
+            if (state.quickUnlockDraftDirty) {
+                Text(
+                    "Quick-unlock change is not saved",
+                    modifier = Modifier.testTag("quick-unlock-unsaved"),
+                )
+            }
             Text(
                 securityLabel(state.keySecurityLevel),
                 modifier = Modifier.testTag("unlock-security-level"),

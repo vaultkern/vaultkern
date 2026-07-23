@@ -15,8 +15,16 @@ import org.vaultkern.android.settings.CurrentVaultQuickUnlockActualState
 import org.vaultkern.android.settings.QuickUnlockReconciler
 import org.vaultkern.android.settings.QuickUnlockSettingsController
 import org.vaultkern.android.settings.ReconciliationScheduler
+import org.vaultkern.android.storage.AndroidKeyFileSelection
+import org.vaultkern.android.storage.AndroidLocalDocumentAccess
+import org.vaultkern.android.storage.LocalDocumentSelectionService
+import org.vaultkern.android.storage.LocalDocumentWorkspace
+import org.vaultkern.android.storage.SelectedLocalDocument
+import org.vaultkern.android.storage.SelectedKeyFile
 import org.vaultkern.android.unlock.CorePostUnlockReconciliation
 import org.vaultkern.android.unlock.UnlockCoordinator
+import org.vaultkern.android.unlock.reconcilePlatformStores
+import org.vaultkern.android.vault.ResidentVaultSelection
 import org.vaultkern.core.OneDriveTokenAdapter
 import org.vaultkern.core.PlatformAdapterException
 import org.vaultkern.core.ResidentPlatform
@@ -31,6 +39,18 @@ class VaultKernGraph(context: Context) {
     }
     private val records = AtomicUnlockBlobRecordStore(applicationContext)
     private val biometricGate = ProcessBiometricGate(applicationContext)
+    private val keyFileSelection = AndroidKeyFileSelection(applicationContext.contentResolver)
+    private val localDocumentAccess = AndroidLocalDocumentAccess(
+        applicationContext.contentResolver,
+    )
+    private val localDocumentWorkspace = LocalDocumentWorkspace(
+        File(applicationContext.noBackupFilesDir, "local-document-workspaces"),
+        localDocumentAccess,
+    )
+    private val localDocumentSelection = LocalDocumentSelectionService(
+        localDocumentAccess,
+        localDocumentWorkspace,
+    )
 
     val unlockBlobAdapter = AndroidUnlockBlobAdapter(
         records = records,
@@ -62,10 +82,13 @@ class VaultKernGraph(context: Context) {
         revokeAll = unlockBlobAdapter::deleteAll,
     )
     private val reconciler = QuickUnlockReconciler(desiredSettings, actualState)
+    val vaultSelection = ResidentVaultSelection(session)
 
     val unlockCoordinator = UnlockCoordinator(
         residentUnlockPort,
-        CorePostUnlockReconciliation(reconciler, unlockBlobAdapter::reconcileStorage),
+        CorePostUnlockReconciliation(reconciler, ::reconcilePlatformStorage),
+        beforeVaultRead = ::prepareCurrentDocumentForUnlock,
+        finishEnrollmentAttempt = unlockBlobAdapter::finishStoreAttempt,
     )
     val settingsController = QuickUnlockSettingsController(
         desiredSettings,
@@ -85,18 +108,42 @@ class VaultKernGraph(context: Context) {
 
     fun currentEnrollmentState(): UnlockEnrollmentState = actualState.enrollmentState()
 
-    fun currentKeySecurityLevel() =
-        unlockBlobAdapter.securityLevel().takeIf {
-            currentEnrollmentState() == UnlockEnrollmentState.ENROLLED
+    fun selectKeyFile(uri: String): SelectedKeyFile = keyFileSelection.select(uri)
+
+    fun selectLocalDocument(uri: String): SelectedLocalDocument {
+        val selected = localDocumentSelection.select(uri)
+        session.sources().use { sources ->
+            sources.addLocalVault(selected.privatePath)
         }
+        return selected
+    }
+
+    fun currentKeySecurityLevel() = actualState.currentStorageKey()
+        ?.let(unlockBlobAdapter::securityLevel)
+        ?.takeIf { currentEnrollmentState() == UnlockEnrollmentState.ENROLLED }
 
     private fun scheduleReconciliation() {
         lastReconciliation = reconciliationExecutor.submit {
             CorePostUnlockReconciliation(
                 reconciler,
-                unlockBlobAdapter::reconcileStorage,
+                ::reconcilePlatformStorage,
             ).reconcile(null)
         }
+    }
+
+    private fun prepareCurrentDocumentForUnlock() {
+        if (!session.sessionState().unlocked) {
+            session.sources().use { sources ->
+                sources.currentLocalVaultPath()
+            }?.let(localDocumentWorkspace::refresh)
+        }
+    }
+
+    private fun reconcilePlatformStorage() {
+        reconcilePlatformStores(
+            unlockBlobAdapter::reconcileStorage,
+            ::prepareCurrentDocumentForUnlock,
+        )
     }
 }
 

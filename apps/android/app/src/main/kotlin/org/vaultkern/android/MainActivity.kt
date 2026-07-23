@@ -3,6 +3,7 @@ package org.vaultkern.android
 import android.os.Bundle
 import android.view.WindowManager
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
 import androidx.fragment.app.FragmentActivity
@@ -11,6 +12,18 @@ import androidx.lifecycle.ViewModelProvider
 import org.vaultkern.android.ui.VaultKernUnlockScreen
 
 class MainActivity : FragmentActivity() {
+    private val chooseLocalVault = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let { viewModel.selectLocalDocument(it.toString()) }
+    }
+
+    private val chooseKeyFile = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        uri?.let { viewModel.selectKeyFile(it.toString()) }
+    }
+
     private val viewModel: UnlockViewModel by lazy {
         val graph = (application as VaultKernApplication).graph
         ViewModelProvider(
@@ -30,11 +43,19 @@ class MainActivity : FragmentActivity() {
             val state by viewModel.state.collectAsState()
             VaultKernUnlockScreen(
                 state = state,
-                onPathChanged = viewModel::onPathChanged,
-                onPasswordChanged = viewModel::onPasswordChanged,
                 onInteractiveUnlock = viewModel::interactiveUnlock,
                 onQuickUnlock = viewModel::quickUnlock,
                 onQuickUnlockDesiredChanged = viewModel::setQuickUnlockDesired,
+                onChooseLocalVault = {
+                    chooseLocalVault.launch(
+                        arrayOf(
+                            org.vaultkern.android.storage.AndroidLocalDocumentAccess
+                                .KEEPASS_MIME_TYPE,
+                            "application/octet-stream",
+                        ),
+                    )
+                },
+                onChooseKeyFile = { chooseKeyFile.launch(arrayOf("*/*")) },
             )
         }
     }
