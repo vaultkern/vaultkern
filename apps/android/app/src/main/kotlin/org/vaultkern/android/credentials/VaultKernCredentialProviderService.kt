@@ -71,12 +71,14 @@ class VaultKernCredentialProviderService : CredentialProviderService() {
         if (state.unlocked) {
             val stored = try {
                 graph.session.listPasskeyCredentials()
-            } catch (_: Throwable) {
+            } catch (_: Exception) {
                 callback.onError(androidx.credentials.exceptions.GetCredentialUnknownException())
                 return
             }
             options.forEach { option ->
-                val parsed = runCatching { graph.webAuthnCodec.parseRequestOptions(option.requestJson) }
+                val parsed = credentialResult {
+                    graph.webAuthnCodec.parseRequestOptions(option.requestJson)
+                }
                     .getOrNull() ?: return@forEach
                 stored.asSequence()
                     .filter { credential ->

@@ -3,14 +3,18 @@ package org.vaultkern.android
 import android.content.Context
 import androidx.biometric.BiometricManager
 import java.io.File
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.Executors
 import java.util.concurrent.Future
+import org.vaultkern.android.credentials.AutofillTargetResolver
 import org.vaultkern.android.credentials.AutofillVaultPort
 import org.vaultkern.android.credentials.CredentialReleaseCoordinator
 import org.vaultkern.android.credentials.FreshUserVerification
+import org.vaultkern.android.credentials.GoogleDigitalAssetLinkVerifier
 import org.vaultkern.android.credentials.PasskeyCeremony
 import org.vaultkern.android.credentials.PasskeyClientContextResolver
 import org.vaultkern.android.credentials.WebAuthnCodec
+import org.vaultkern.android.credentials.signingCertificateFingerprints
 import org.vaultkern.android.security.AndroidKeystoreUnlockCipherBackend
 import org.vaultkern.android.security.AndroidUnlockBlobAdapter
 import org.vaultkern.android.security.AtomicUnlockBlobRecordStore
@@ -45,6 +49,11 @@ class VaultKernGraph(context: Context) {
     }
     private val records = AtomicUnlockBlobRecordStore(applicationContext)
     private val biometricGate = ProcessBiometricGate(applicationContext)
+    private val privilegedCredentialApps: String by lazy {
+        applicationContext.resources.openRawResource(R.raw.gpm_passkeys_privileged_apps)
+            .bufferedReader(StandardCharsets.UTF_8)
+            .use { it.readText() }
+    }
 
     val unlockBlobAdapter = AndroidUnlockBlobAdapter(
         records = records,
@@ -105,6 +114,13 @@ class VaultKernGraph(context: Context) {
         selectedLocalDocuments = localDocumentSaves,
     )
     val passkeyClientContext = PasskeyClientContextResolver(applicationContext)
+    val autofillTargetResolver = AutofillTargetResolver(
+        signingFingerprints = { packageName ->
+            signingCertificateFingerprints(applicationContext, packageName)
+        },
+        assetLinks = GoogleDigitalAssetLinkVerifier(),
+        privilegedAllowlist = { privilegedCredentialApps },
+    )
     val autofillVault = AutofillVaultPort(session)
     val credentialRelease = CredentialReleaseCoordinator(
         session = session,

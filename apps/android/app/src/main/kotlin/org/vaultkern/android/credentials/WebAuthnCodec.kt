@@ -327,32 +327,32 @@ class WebAuthnCodec {
 
     private fun parseObject(value: String): JSONObject = try {
         JSONObject(value)
-    } catch (error: Throwable) {
+    } catch (error: Exception) {
         throw IllegalArgumentException("requestJson is not a JSON object", error)
     }
 
     private fun JSONObject.requiredObject(name: String): JSONObject = try {
         getJSONObject(name)
-    } catch (error: Throwable) {
+    } catch (error: Exception) {
         throw IllegalArgumentException("missing or invalid $name", error)
     }
 
     private fun JSONObject.requiredArray(name: String): JSONArray = try {
         getJSONArray(name)
-    } catch (error: Throwable) {
+    } catch (error: Exception) {
         throw IllegalArgumentException("missing or invalid $name", error)
     }
 
     private fun JSONObject.requiredString(name: String): String = try {
         getString(name).also { require(it.isNotBlank()) { "$name is empty" } }
-    } catch (error: Throwable) {
+    } catch (error: Exception) {
         throw IllegalArgumentException("missing or invalid $name", error)
     }
 
     private fun validateRpId(value: String): String {
         val ascii = try {
             IDN.toASCII(value, IDN.USE_STD3_ASCII_RULES).lowercase()
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             throw IllegalArgumentException("invalid relying party id", error)
         }
         require(ascii == value && ascii.length <= 253) {

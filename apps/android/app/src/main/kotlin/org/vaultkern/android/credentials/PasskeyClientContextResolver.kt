@@ -78,7 +78,7 @@ class PasskeyClientContextResolver(
     private fun validateWebOrigin(value: String) {
         val origin = try {
             URI(value)
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
             throw IllegalArgumentException("privileged caller supplied an invalid origin", error)
         }
         require(
@@ -115,16 +115,11 @@ class GoogleDigitalAssetLinkVerifier : NativeAssetLinkVerifier {
         packageName: String,
         certificateFingerprint: String,
     ): Boolean {
-        val site = "https://$relyingParty"
-        val query = listOf(
-            "source.web.site" to site,
-            "target.android_app.package_name" to packageName,
-            "target.android_app.certificate.sha256_fingerprint" to certificateFingerprint,
-            "relation" to PASSKEY_RELATION,
-        ).joinToString("&") { (key, value) ->
-            "${encode(key)}=${encode(value)}"
-        }
-        val connection = URI("$API_ENDPOINT?$query").toURL().openConnection() as HttpsURLConnection
+        val connection = digitalAssetLinkCheckUri(
+            relyingParty,
+            packageName,
+            certificateFingerprint,
+        ).toURL().openConnection() as HttpsURLConnection
         connection.connectTimeout = TIMEOUT_MILLIS
         connection.readTimeout = TIMEOUT_MILLIS
         connection.instanceFollowRedirects = false
@@ -145,14 +140,27 @@ class GoogleDigitalAssetLinkVerifier : NativeAssetLinkVerifier {
         }
     }
 
-    private fun encode(value: String): String =
-        URLEncoder.encode(value, StandardCharsets.UTF_8.name())
-
     companion object {
-        private const val API_ENDPOINT =
-            "https://digitalassetlinks.googleapis.com/v1/assetlinks:check"
-        private const val PASSKEY_RELATION = "delegate_permission/common.handle_all_urls"
         private const val TIMEOUT_MILLIS = 5_000
         private const val MAX_RESPONSE_BYTES = 64 * 1024
     }
 }
+
+internal fun digitalAssetLinkCheckUri(
+    relyingParty: String,
+    packageName: String,
+    certificateFingerprint: String,
+): URI {
+    val query = listOf(
+        "source.web.site" to "https://$relyingParty",
+        "target.android_app.package_name" to packageName,
+        "target.android_app.certificate.sha256_fingerprint" to certificateFingerprint,
+        "relation" to "delegate_permission/common.get_login_creds",
+    ).joinToString("&") { (key, value) ->
+        "${encodeDigitalAssetLinkParameter(key)}=${encodeDigitalAssetLinkParameter(value)}"
+    }
+    return URI("https://digitalassetlinks.googleapis.com/v1/assetlinks:check?$query")
+}
+
+private fun encodeDigitalAssetLinkParameter(value: String): String =
+    URLEncoder.encode(value, StandardCharsets.UTF_8.name())

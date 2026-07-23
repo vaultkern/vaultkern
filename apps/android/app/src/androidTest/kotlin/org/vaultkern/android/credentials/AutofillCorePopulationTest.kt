@@ -1,7 +1,6 @@
 package org.vaultkern.android.credentials
 
 import android.view.View
-import android.view.autofill.AutofillValue
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import java.io.File
@@ -12,6 +11,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.vaultkern.android.vault.VaultKernResidentVaultPort
 import org.vaultkern.android.vault.VaultSaveStatus
+import org.vaultkern.android.vault.closeSecrets
 import org.vaultkern.core.OneDriveTokenAdapter
 import org.vaultkern.core.PlatformAdapterException
 import org.vaultkern.core.ResidentPlatform
@@ -45,24 +45,39 @@ class AutofillCorePopulationTest {
                 val draft = editor.readEntry(editor.listEntries().first().id)
                 assertEquals(
                     VaultSaveStatus.SAVED,
-                    editor.editAndSave(draft.copy(totpUri = TEST_TOTP_URI)).status,
+                    editor.editAndSave(
+                        draft.copy(
+                            url = "https://login.example.com/account",
+                            totpUri = TEST_TOTP_URI,
+                        ),
+                    ).status,
                 )
                 val port = AutofillVaultPort(session)
-                val candidate = port.candidates(requireTotp = true).first()
-                val credential = port.credential(candidate.entryId)
+                val candidate = port.candidates(
+                    target = AutofillTarget.Web("https://login.example.com/account"),
+                    requireTotp = true,
+                ).first()
+                assertTrue(
+                    port.candidates(
+                        target = AutofillTarget.Web("https://unrelated.invalid/login"),
+                        requireTotp = true,
+                    ).isEmpty(),
+                )
                 val ids = AutofillFieldIds(
                     username = View(context).apply { id = View.generateViewId() }.autofillId,
                     password = View(context).apply { id = View.generateViewId() }.autofillId,
                     totp = View(context).apply { id = View.generateViewId() }.autofillId,
                 )
 
-                val populated = AutofillDatasetFactory.populated(context, ids, credential)
-
-                assertNotNull(populated.dataset)
-                assertEquals(AutofillValue.forText(credential.username), populated.values[ids.username])
-                assertEquals(AutofillValue.forText(credential.password), populated.values[ids.password])
-                assertEquals(AutofillValue.forText(credential.totp), populated.values[ids.totp])
-                assertTrue(credential.totp?.matches(Regex("[0-9]{6,8}")) == true)
+                assertNotNull(port.populatedDataset(context, ids, candidate.entryId))
+                val detail = session.readEntry(handle.vaultId, candidate.entryId)
+                try {
+                    assertTrue(detail.username.reveal().isNotEmpty())
+                    assertTrue(detail.password.reveal().isNotEmpty())
+                    assertTrue(detail.totp?.reveal()?.matches(Regex("[0-9]{6,8}")) == true)
+                } finally {
+                    detail.closeSecrets()
+                }
             }
         } finally {
             root.deleteRecursively()

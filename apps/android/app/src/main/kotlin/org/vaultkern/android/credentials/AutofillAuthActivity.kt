@@ -41,13 +41,25 @@ class AutofillAuthActivity : FragmentActivity() {
             cancel()
             return
         }
+        val origin = AutofillRequestOrigin(
+            packageName = intent.getStringExtra(EXTRA_CALLING_PACKAGE).orEmpty(),
+            webScheme = intent.getStringExtra(EXTRA_WEB_SCHEME),
+            webDomain = intent.getStringExtra(EXTRA_WEB_DOMAIN),
+        )
+        if (origin.packageName.isBlank()) {
+            cancel()
+            return
+        }
         val graph = (application as VaultKernApplication).graph
         lifecycleScope.launch(Dispatchers.IO) {
-            runCatching {
+            credentialResult {
+                val target = requireNotNull(graph.autofillTargetResolver.resolve(origin)) {
+                    "autofill caller is not authorized for the requested target"
+                }
                 verificationLease = graph.credentialRelease.ensureUnlockedWithFreshUserVerification(
                     "Verify autofill",
                 )
-                graph.autofillVault.candidates(requireTotp = ids.totp != null)
+                graph.autofillVault.candidates(target, requireTotp = ids.totp != null)
             }.fold(
                 onSuccess = { candidates ->
                     withContext(Dispatchers.Main) {
@@ -74,10 +86,13 @@ class AutofillAuthActivity : FragmentActivity() {
         if (!completed.compareAndSet(false, true)) return
         val graph = (application as VaultKernApplication).graph
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching {
+            val result = credentialResult {
                 verificationLease.refreshIfStale("Verify autofill")
-                val credential = graph.autofillVault.credential(entryId)
-                AutofillDatasetFactory.populated(this@AutofillAuthActivity, ids, credential).dataset
+                graph.autofillVault.populatedDataset(
+                    this@AutofillAuthActivity,
+                    ids,
+                    entryId,
+                )
             }
             withContext(Dispatchers.Main) {
                 result.fold(
@@ -107,6 +122,9 @@ class AutofillAuthActivity : FragmentActivity() {
         const val EXTRA_USERNAME_ID = "org.vaultkern.android.autofill.USERNAME_ID"
         const val EXTRA_PASSWORD_ID = "org.vaultkern.android.autofill.PASSWORD_ID"
         const val EXTRA_TOTP_ID = "org.vaultkern.android.autofill.TOTP_ID"
+        const val EXTRA_CALLING_PACKAGE = "org.vaultkern.android.autofill.CALLING_PACKAGE"
+        const val EXTRA_WEB_SCHEME = "org.vaultkern.android.autofill.WEB_SCHEME"
+        const val EXTRA_WEB_DOMAIN = "org.vaultkern.android.autofill.WEB_DOMAIN"
     }
 }
 

@@ -24,18 +24,6 @@ data class AutofillFieldIds(
             "totp=${totp != null})"
 }
 
-class AutofillCredential(
-    val entryId: String,
-    val label: String,
-    val username: String,
-    val password: String,
-    val totp: String?,
-) {
-    override fun toString(): String =
-        "AutofillCredential(entryId=$entryId, label=[REDACTED], username=[REDACTED], " +
-            "password=[REDACTED], totp=[REDACTED])"
-}
-
 data class AutofillCandidate(
     val entryId: String,
     val label: String,
@@ -45,14 +33,6 @@ data class AutofillCandidate(
     override fun toString(): String =
         "AutofillCandidate(entryId=$entryId, label=[REDACTED], username=[REDACTED], " +
             "hasTotp=$hasTotp)"
-}
-
-class PopulatedAutofillDataset(
-    val dataset: Dataset,
-    val values: Map<AutofillId, AutofillValue>,
-) {
-    override fun toString(): String =
-        "PopulatedAutofillDataset(fieldCount=${values.size}, values=[REDACTED])"
 }
 
 object AutofillDatasetFactory {
@@ -73,17 +53,14 @@ object AutofillDatasetFactory {
     fun populated(
         context: Context,
         ids: AutofillFieldIds,
-        credential: AutofillCredential,
-    ): PopulatedAutofillDataset {
-        val values = buildMap {
-            ids.username?.let { put(it, AutofillValue.forText(credential.username)) }
-            ids.password?.let { put(it, AutofillValue.forText(credential.password)) }
-            ids.totp?.let { id ->
-                credential.totp?.let { put(id, AutofillValue.forText(it)) }
-            }
-        }
+        label: String,
+        username: String?,
+        password: String?,
+        totp: String?,
+    ): Dataset {
+        val values = autofillValues(ids, username, password, totp)
         require(values.isNotEmpty()) { "selected entry has no value for the requested fields" }
-        val presentations = presentations(context, credential.label)
+        val presentations = presentations(context, label)
         val builder = Dataset.Builder(presentations)
         values.forEach { (id, value) ->
             builder.setField(
@@ -91,7 +68,7 @@ object AutofillDatasetFactory {
                 Field.Builder().setValue(value).setPresentations(presentations).build(),
             )
         }
-        return PopulatedAutofillDataset(builder.build(), values)
+        return builder.build()
     }
 
     fun authenticationResult(dataset: Dataset): Intent =
@@ -108,10 +85,25 @@ object AutofillDatasetFactory {
             .build()
 }
 
+internal fun autofillValues(
+    ids: AutofillFieldIds,
+    username: String?,
+    password: String?,
+    totp: String?,
+): Map<AutofillId, AutofillValue> = buildMap {
+    ids.username?.let { id -> username?.let { put(id, AutofillValue.forText(it)) } }
+    ids.password?.let { id -> password?.let { put(id, AutofillValue.forText(it)) } }
+    ids.totp?.let { id -> totp?.let { put(id, AutofillValue.forText(it)) } }
+}
+
 class AutofillVaultPort(private val session: VaultSession) {
-    fun candidates(requireTotp: Boolean): List<AutofillCandidate> =
-        session.listEntries(activeVaultId())
+    fun candidates(
+        target: AutofillTarget,
+        requireTotp: Boolean,
+    ): List<AutofillCandidate> =
+        session.findFillCandidates(activeVaultId(), target.matchUrl)
             .asSequence()
+            .filter { target.accepts(it.url) }
             .filter { !requireTotp || it.hasTotp }
             .map { entry ->
                 AutofillCandidate(
@@ -123,15 +115,20 @@ class AutofillVaultPort(private val session: VaultSession) {
             }
             .toList()
 
-    fun credential(entryId: String): AutofillCredential {
+    fun populatedDataset(
+        context: Context,
+        ids: AutofillFieldIds,
+        entryId: String,
+    ): Dataset {
         val detail = session.readEntry(activeVaultId(), entryId)
         return try {
-            AutofillCredential(
-                entryId = detail.id.reveal(),
+            AutofillDatasetFactory.populated(
+                context = context,
+                ids = ids,
                 label = detail.title.reveal(),
-                username = detail.username.reveal(),
-                password = detail.password.reveal(),
-                totp = detail.totp?.reveal(),
+                username = if (ids.username == null) null else detail.username.reveal(),
+                password = if (ids.password == null) null else detail.password.reveal(),
+                totp = if (ids.totp == null) null else detail.totp?.reveal(),
             )
         } finally {
             detail.closeSecrets()

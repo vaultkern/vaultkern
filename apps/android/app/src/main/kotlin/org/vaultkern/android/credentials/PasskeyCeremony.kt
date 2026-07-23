@@ -3,6 +3,7 @@ package org.vaultkern.android.credentials
 import java.security.SecureRandom
 import java.util.concurrent.atomic.AtomicBoolean
 import org.vaultkern.android.vault.SelectedLocalDocumentSaveCoordinator
+import org.vaultkern.android.vault.SelectedLocalDocumentSaveTransaction
 import org.vaultkern.android.vault.VaultSaveResult
 import org.vaultkern.android.vault.VaultSaveStatus
 import org.vaultkern.core.PlatformPasskeyCredential
@@ -36,8 +37,7 @@ class PasskeyCeremony(
             val output = operation.registerPasskey(options.registrationInput())
             val response = codec.registrationResponse(options, context, output)
             val localSave = selectedLocalDocuments?.prepare(activeVaultId())
-            operation.commitRegistration()
-            localSave?.complete(VaultSaveResult(VaultSaveStatus.SAVED))
+            commitPasskeyRegistrationAndPublish(localSave, operation::commitRegistration)
             return response
         } catch (error: Throwable) {
             primaryFailure = error
@@ -106,6 +106,19 @@ class PasskeyCeremony(
     }
 }
 
+internal fun commitPasskeyRegistrationAndPublish(
+    localSave: SelectedLocalDocumentSaveTransaction?,
+    commitRegistration: () -> Unit,
+) {
+    try {
+        commitRegistration()
+        localSave?.complete(VaultSaveResult(VaultSaveStatus.SAVED))
+    } catch (error: Throwable) {
+        localSave?.abandon()
+        throw error
+    }
+}
+
 class ActivePasskeyAssertion internal constructor(
     private val operation: VaultPasskeyOperation,
     private val options: ParsedRequestOptions,
@@ -115,11 +128,11 @@ class ActivePasskeyAssertion internal constructor(
     private val verificationLease: FreshUserVerificationLease,
 ) : AutoCloseable {
     val candidates: List<PasskeyCandidate> = credentials.map(::PasskeyCandidate)
-    private val completionStarted = AtomicBoolean(false)
+    private val completionState = CredentialCompletionState()
     private val finished = AtomicBoolean(false)
 
     fun complete(selectedCredentialId: ByteArray?): String {
-        check(completionStarted.compareAndSet(false, true)) {
+        check(completionState.beginCompletion()) {
             "passkey assertion operation is already completing or closed"
         }
         check(!finished.get()) { "passkey assertion operation is already closed" }
@@ -141,12 +154,16 @@ class ActivePasskeyAssertion internal constructor(
             primaryFailure = error
             throw error
         } finally {
-            closeWithPrimaryFailure(primaryFailure)
+            try {
+                closeWithPrimaryFailure(primaryFailure)
+            } finally {
+                completionState.endCompletion()
+            }
         }
     }
 
     override fun close() {
-        if (completionStarted.get()) return
+        if (!completionState.canClose()) return
         closeWithPrimaryFailure(null)
     }
 
@@ -159,6 +176,20 @@ class ActivePasskeyAssertion internal constructor(
             primaryFailure.addSuppressed(finishFailure)
         }
     }
+}
+
+internal class CredentialCompletionState {
+    private val started = AtomicBoolean(false)
+    private val bodyExited = AtomicBoolean(false)
+
+    fun beginCompletion(): Boolean = started.compareAndSet(false, true)
+
+    fun endCompletion() {
+        check(started.get()) { "credential completion did not start" }
+        bodyExited.set(true)
+    }
+
+    fun canClose(): Boolean = !started.get() || bodyExited.get()
 }
 
 data class PasskeyCandidate(

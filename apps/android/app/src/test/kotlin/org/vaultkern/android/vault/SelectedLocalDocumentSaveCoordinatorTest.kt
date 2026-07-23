@@ -11,6 +11,7 @@ import org.vaultkern.android.storage.LocalDocumentAccess
 import org.vaultkern.android.storage.LocalDocumentPublishStatus
 import org.vaultkern.android.storage.LocalDocumentSnapshot
 import org.vaultkern.android.storage.LocalDocumentWorkspace
+import org.vaultkern.android.credentials.commitPasskeyRegistrationAndPublish
 
 class SelectedLocalDocumentSaveCoordinatorTest {
     @get:Rule
@@ -73,6 +74,26 @@ class SelectedLocalDocumentSaveCoordinatorTest {
         val retried = assertNotNullTransaction(
             SelectedLocalDocumentSaveCoordinator(workspace).prepare(selected.privatePath),
         )
+        retried.abandon()
+    }
+
+    @Test
+    fun failedPasskeyCommitAbandonsTheSelectedDocumentSaveTransaction() {
+        val uri = "content://documents/local/vault.kdbx"
+        val access = CoordinatorDocumentAccess(uri, ByteArray(48) { 56 })
+        val workspace = LocalDocumentWorkspace(temporary.newFolder("failed-passkey-commit"), access)
+        val selected = workspace.select(uri, "vault.kdbx")
+        val coordinator = SelectedLocalDocumentSaveCoordinator(workspace)
+        val transaction = assertNotNullTransaction(coordinator.prepare(selected.privatePath))
+
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            commitPasskeyRegistrationAndPublish(transaction) {
+                throw IllegalStateException("injected passkey commit failure")
+            }
+        }
+
+        assertEquals(LocalDocumentPublishStatus.NO_CHANGE, workspace.reconcilePending().single().status)
+        val retried = assertNotNullTransaction(coordinator.prepare(selected.privatePath))
         retried.abandon()
     }
 

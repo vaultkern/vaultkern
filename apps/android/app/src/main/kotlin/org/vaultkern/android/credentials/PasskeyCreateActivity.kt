@@ -27,7 +27,7 @@ class PasskeyCreateActivity : FragmentActivity() {
         }
         val graph = (application as VaultKernApplication).graph
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching {
+            val result = credentialResult {
                 val options = graph.webAuthnCodec.parseCreationOptions(request.requestJson)
                 val context = graph.passkeyClientContext.resolve(
                     options.relyingParty,

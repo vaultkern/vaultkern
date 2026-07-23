@@ -60,7 +60,7 @@ class PasskeyGetActivity : FragmentActivity() {
             var producedAssertion: ActivePasskeyAssertion? = null
             var claimedByActivity = false
             try {
-                val result = runCatching {
+                val result = credentialResult {
                     val request = selectRequest(
                         options,
                         selectedCredentialId,
@@ -117,7 +117,7 @@ class PasskeyGetActivity : FragmentActivity() {
             return
         }
         lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching { active.complete(credentialId) }
+            val result = credentialResult { active.complete(credentialId) }
             withContext(Dispatchers.Main) {
                 result.fold(
                     onSuccess = { response ->
@@ -168,7 +168,7 @@ class PasskeyGetActivity : FragmentActivity() {
             CredentialOptionBinding.key(option.requestJson, option.clientDataHash) ==
                 selectedOptionKey &&
                 (selectedCredentialId == null ||
-                    runCatching { codec.parseRequestOptions(option.requestJson) }.getOrNull()
+                    credentialResult { codec.parseRequestOptions(option.requestJson) }.getOrNull()
                         ?.let { parsed ->
                             parsed.allowedCredentialIds.isEmpty() ||
                                 parsed.allowedCredentialIds.any {

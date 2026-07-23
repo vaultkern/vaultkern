@@ -28,8 +28,13 @@ class VaultKernAutofillService : AutofillService() {
             callback.onFailure("No autofill structure")
             return
         }
-        val ids = AutofillStructureParser.find(structure)
-        if (ids.isEmpty) {
+        val parsed = try {
+            AutofillStructureParser.find(structure)
+        } catch (_: IllegalArgumentException) {
+            callback.onFailure("Unsupported autofill origin")
+            return
+        }
+        if (parsed.ids.isEmpty) {
             callback.onSuccess(null)
             return
         }
@@ -40,9 +45,12 @@ class VaultKernAutofillService : AutofillService() {
             return
         }
         val intent = Intent(this, AutofillAuthActivity::class.java).apply {
-            putExtra(AutofillAuthActivity.EXTRA_USERNAME_ID, ids.username)
-            putExtra(AutofillAuthActivity.EXTRA_PASSWORD_ID, ids.password)
-            putExtra(AutofillAuthActivity.EXTRA_TOTP_ID, ids.totp)
+            putExtra(AutofillAuthActivity.EXTRA_USERNAME_ID, parsed.ids.username)
+            putExtra(AutofillAuthActivity.EXTRA_PASSWORD_ID, parsed.ids.password)
+            putExtra(AutofillAuthActivity.EXTRA_TOTP_ID, parsed.ids.totp)
+            putExtra(AutofillAuthActivity.EXTRA_CALLING_PACKAGE, parsed.origin.packageName)
+            putExtra(AutofillAuthActivity.EXTRA_WEB_SCHEME, parsed.origin.webScheme)
+            putExtra(AutofillAuthActivity.EXTRA_WEB_DOMAIN, parsed.origin.webDomain)
         }
         val authentication = PendingIntent.getActivity(
             this,
@@ -53,7 +61,7 @@ class VaultKernAutofillService : AutofillService() {
         if (cancellationSignal.isCanceled) return
         callback.onSuccess(
             FillResponse.Builder()
-                .addDataset(AutofillDatasetFactory.locked(this, ids, authentication))
+                .addDataset(AutofillDatasetFactory.locked(this, parsed.ids, authentication))
                 .build(),
         )
     }
@@ -67,13 +75,25 @@ class VaultKernAutofillService : AutofillService() {
     }
 }
 
+internal data class ParsedAutofillRequest(
+    val ids: AutofillFieldIds,
+    val origin: AutofillRequestOrigin,
+)
+
 internal object AutofillStructureParser {
-    fun find(structure: AssistStructure): AutofillFieldIds {
+    fun find(structure: AssistStructure): ParsedAutofillRequest {
         var username: android.view.autofill.AutofillId? = null
         var password: android.view.autofill.AutofillId? = null
         var totp: android.view.autofill.AutofillId? = null
+        val webOrigins = mutableSetOf<Pair<String?, String>>()
 
-        fun visit(node: AssistStructure.ViewNode) {
+        fun visit(
+            node: AssistStructure.ViewNode,
+            inheritedScheme: String? = null,
+            inheritedDomain: String? = null,
+        ) {
+            val webScheme = node.webScheme ?: inheritedScheme
+            val webDomain = node.webDomain ?: inheritedDomain
             val hints = buildList {
                 addAll(node.autofillHints.orEmpty())
                 node.hint?.let(::add)
@@ -84,18 +104,44 @@ internal object AutofillStructureParser {
                     }
                 }
             }.map { it.lowercase(Locale.ROOT) }
-            when {
-                hints.any(::isTotpHint) -> if (totp == null) totp = node.autofillId
-                hints.any(::isPasswordHint) -> if (password == null) password = node.autofillId
-                hints.any(::isUsernameHint) -> if (username == null) username = node.autofillId
+            val recognized = when {
+                hints.any(::isTotpHint) -> {
+                    if (totp == null) totp = node.autofillId
+                    true
+                }
+                hints.any(::isPasswordHint) -> {
+                    if (password == null) password = node.autofillId
+                    true
+                }
+                hints.any(::isUsernameHint) -> {
+                    if (username == null) username = node.autofillId
+                    true
+                }
+                else -> false
             }
-            for (index in 0 until node.childCount) visit(node.getChildAt(index))
+            if (recognized && !webDomain.isNullOrBlank()) {
+                webOrigins += webScheme to webDomain
+            }
+            for (index in 0 until node.childCount) {
+                visit(node.getChildAt(index), webScheme, webDomain)
+            }
         }
 
         for (window in 0 until structure.windowNodeCount) {
             visit(structure.getWindowNodeAt(window).rootViewNode)
         }
-        return AutofillFieldIds(username, password, totp)
+        require(webOrigins.size <= 1) { "autofill fields span multiple web origins" }
+        val webOrigin = webOrigins.singleOrNull()
+        val packageName = structure.activityComponent?.packageName
+        require(!packageName.isNullOrBlank()) { "autofill caller package is missing" }
+        return ParsedAutofillRequest(
+            ids = AutofillFieldIds(username, password, totp),
+            origin = AutofillRequestOrigin(
+                packageName = packageName,
+                webScheme = webOrigin?.first,
+                webDomain = webOrigin?.second,
+            ),
+        )
     }
 
     private fun isUsernameHint(value: String): Boolean =

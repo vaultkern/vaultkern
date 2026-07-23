@@ -1,8 +1,11 @@
 package org.vaultkern.android.credentials
 
+import java.util.concurrent.CancellationException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertThrows
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CredentialActivityOwnershipTest {
@@ -39,6 +42,28 @@ class CredentialActivityOwnershipTest {
         assertThrows(IllegalArgumentException::class.java) {
             decodeSelectedCredentialId("not+base64url")
         }
+    }
+
+    @Test
+    fun operationCanBeClosedAgainAfterItsCompletionBodyHasExited() {
+        val state = CredentialCompletionState()
+
+        assertTrue(state.beginCompletion())
+        assertFalse(state.canClose())
+
+        state.endCompletion()
+
+        assertTrue(state.canClose())
+    }
+
+    @Test
+    fun coroutineCancellationIsNeverConvertedToAProviderFailure() {
+        assertThrows(CancellationException::class.java) {
+            credentialResult<Unit> { throw CancellationException("activity destroyed") }
+        }
+        assertTrue(
+            credentialResult<Unit> { throw IllegalArgumentException("bad request") }.isFailure,
+        )
     }
 }
 
