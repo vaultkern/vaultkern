@@ -5,7 +5,8 @@ use super::durable_file::{
     sync_published_target, unique_sibling_path, write_verified_temp,
 };
 use super::provider::{
-    Provider, ProviderCommit, ProviderError, ProviderRevision, ProviderSnapshot,
+    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
+    ProviderSnapshot,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
@@ -14,7 +15,7 @@ use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LOCAL_WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 const LOCAL_PROVIDER_REVISION_PREFIX: &[u8] = b"local-file:v1:";
@@ -297,6 +298,91 @@ impl Provider for LocalFileProvider {
             }
         }
     }
+
+    fn preserve_conflict_copy(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ProviderConflictCopy, ProviderError> {
+        let path =
+            write_conflict_copy(&self.path, bytes).map_err(|error| ProviderError::Unavailable {
+                message: format!("failed to preserve local Conflict Copy: {error}"),
+            })?;
+        Ok(ProviderConflictCopy {
+            display_name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("VaultKern conflict.kdbx")
+                .to_owned(),
+            identity: path.to_string_lossy().into_owned(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn write_conflict_copy(source_path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    let source_path = match fs::canonicalize(source_path) {
+        Ok(source_path) => source_path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = source_path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent")
+            })?;
+            let file_name = source_path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no file name")
+            })?;
+            fs::canonicalize(parent)?.join(file_name)
+        }
+        Err(error) => return Err(error),
+    };
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent"))?;
+    let stem = source_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("vault");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let faults = DurableFaultInjector::default();
+    let points = TempWriteFaultPoints {
+        created: DurableFaultPoint::GenerationTempCreated,
+        written: DurableFaultPoint::GenerationTempWritten,
+        synced: DurableFaultPoint::GenerationTempSynced,
+        verified: DurableFaultPoint::GenerationReadbackVerified,
+    };
+
+    for collision in 0..128u32 {
+        let suffix = if collision == 0 {
+            String::new()
+        } else {
+            format!("-{collision}")
+        };
+        let target = parent.join(format!(
+            "{stem} (VaultKern conflict {timestamp}{suffix}).kdbx"
+        ));
+        let temp = write_verified_temp(&target, bytes, &faults, points)?;
+        match publish_temp(
+            temp,
+            &target,
+            TargetExpectation::Missing,
+            None,
+            &faults,
+            DurableFaultPoint::BeforeGenerationPublish,
+            DurableFaultPoint::GenerationPublished,
+            DurableFaultPoint::GenerationParentSynced,
+        ) {
+            Ok(()) => return Ok(target),
+            Err(error) if error.target_conflict => continue,
+            Err(error) => return Err(error.source),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique conflict-copy path",
+    ))
 }
 
 fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {

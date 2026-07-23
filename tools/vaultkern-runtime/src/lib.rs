@@ -31,7 +31,8 @@ pub use providers::onedrive::{
 };
 pub use providers::onedrive_token_store::OneDriveRefreshTokenStore;
 pub use providers::provider::{
-    Provider, ProviderCommit, ProviderError, ProviderRevision, ProviderSnapshot,
+    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
+    ProviderSnapshot,
 };
 pub use providers::secure_storage::{SecureStorageError, SecureStorageProvider};
 pub use runtime::{

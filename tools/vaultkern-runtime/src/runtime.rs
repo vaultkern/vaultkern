@@ -81,7 +81,9 @@ use crate::providers::onedrive::{
     OneDriveProvider, OneDriveSnapshot, OneDriveVaultSourceProvider, is_onedrive_item_not_found,
 };
 use crate::providers::onedrive_token_store::OneDriveRefreshTokenStore;
-use crate::providers::provider::{Provider, ProviderCommit, ProviderError, ProviderRevision};
+use crate::providers::provider::{
+    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
+};
 use crate::providers::remote_cache::{
     GenericPendingKind, PendingRemoteCacheChain, PendingRemoteCacheChainError,
     PendingRemoteCacheCompletion, RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry,
@@ -96,7 +98,7 @@ use crate::session::{
     LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id,
 };
 use crate::state_paths::extension_id_from_browser_origin;
-use crate::sync::{SessionBaseStore, SyncedBaseStore, write_local_conflict_copy};
+use crate::sync::{SessionBaseStore, SyncedBaseStore};
 use crate::unlock::{
     MasterCredential, MasterCredentialShape, UnlockAttempt, enroll_unlock_blob,
     unlock_from_blob_with_policy, unlock_historical_snapshot_from_blob_with_policy,
@@ -289,6 +291,18 @@ struct SessionLoadedDatabase {
 enum SourceRefreshConflictDisposition {
     UploadedConflictCopy { warning: String },
     Pending { status: VaultSourceStatusDto },
+}
+
+#[derive(Clone)]
+struct OneDriveConflictHead {
+    vault: Option<Vault>,
+    bytes: Vec<u8>,
+    fingerprint: VaultSourceFingerprint,
+    revision: ProviderRevision,
+    display_name: String,
+    account_label: String,
+    save_profile: SaveProfile,
+    key: Option<Arc<TransformedKey>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2611,12 +2625,14 @@ impl Runtime {
             loaded.clone()
         };
 
+        let mut completed_conflict_split = false;
         let result = (|| {
             let updated_settings = self.update_database_settings(vault_id, update)?;
             let RuntimeResponse::SaveVaultResult(save_result) = self.save_vault(vault_id)? else {
                 anyhow::bail!("database settings save returned an unexpected response");
             };
             if save_result.status == SaveVaultStatusDto::ConflictCopy {
+                completed_conflict_split = self.completed_conflict_split(vault_id, &previous);
                 anyhow::bail!(
                     "database settings were not committed to the active vault; conflict copy: {}",
                     save_result
@@ -2634,11 +2650,29 @@ impl Runtime {
             })
         })();
 
-        if result.is_err() {
+        if result.is_err() && !completed_conflict_split {
             self.restore_loaded_after_failed_commit(vault_id, previous);
         }
 
         result
+    }
+
+    fn completed_conflict_split(&self, vault_id: &str, previous: &LoadedVault) -> bool {
+        let Some(current) = self.vault_session.find_loaded(vault_id) else {
+            return false;
+        };
+        let generation_changed = current.baseline_fingerprint != previous.baseline_fingerprint
+            || current.provider_revision != previous.provider_revision;
+        if !generation_changed {
+            return false;
+        }
+        match current.source {
+            VaultSource::LocalPath(_) => true,
+            VaultSource::OneDriveItem { .. } => current
+                .source_status
+                .as_ref()
+                .is_some_and(|status| status.remote_state == "online"),
+        }
     }
 
     fn commit_entry_mutation(
@@ -6653,6 +6687,64 @@ impl Runtime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn install_locked_generation(
+        &mut self,
+        vault_id: &str,
+        bytes: Vec<u8>,
+        fingerprint: VaultSourceFingerprint,
+        provider_revision: Option<ProviderRevision>,
+        save_profile: SaveProfile,
+        mut source_status: Option<VaultSourceStatusDto>,
+        display_name: Option<String>,
+        account_label: Option<String>,
+    ) -> Result<()> {
+        let mut warnings = Vec::new();
+        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
+            warnings.push(format!(
+                "failed to store synced base for {vault_id}: {error}"
+            ));
+        }
+        if let Err(error) = self.session_bases.store(vault_id, &bytes) {
+            warnings.push(format!(
+                "failed to store session base for {vault_id}: {error}"
+            ));
+        }
+        if !warnings.is_empty()
+            && let Some(status) = source_status.as_mut()
+        {
+            let warning = warnings.join("; ");
+            status.last_error = Some(match status.last_error.take() {
+                Some(previous) => format!("{previous}; {warning}"),
+                None => warning,
+            });
+        }
+        let loaded = self
+            .vault_session
+            .find_loaded_mut(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        loaded.vault = None;
+        loaded.transformed_key = None;
+        loaded.bytes = bytes;
+        loaded.baseline_fingerprint = fingerprint;
+        loaded.provider_revision = provider_revision;
+        loaded.save_profile = save_profile;
+        loaded.requires_source_migration = false;
+        if let Some(status) = source_status {
+            loaded.source_status = Some(status);
+        }
+        if let Some(display_name) = display_name {
+            loaded.name = display_name;
+        }
+        if account_label.is_some() {
+            loaded.source_account_label = account_label;
+        }
+        if !warnings.is_empty() && loaded.source_status.is_none() {
+            self.record_local_save_warnings(warnings);
+        }
+        Ok(())
+    }
+
     fn session_base_for_fingerprint(
         &self,
         vault_id: &str,
@@ -6824,6 +6916,7 @@ impl Runtime {
                     &source_path,
                     &bytes,
                     verified_vault,
+                    key.clone(),
                 );
             }
             Err(error) => {
@@ -6845,6 +6938,7 @@ impl Runtime {
                     &source_path,
                     &bytes,
                     verified_vault,
+                    key.clone(),
                 );
             }
             None if same_content_fingerprint(&current.fingerprint, &baseline_fingerprint) => {
@@ -6858,6 +6952,7 @@ impl Runtime {
                     &source_path,
                     &bytes,
                     verified_vault,
+                    key.clone(),
                 );
             }
         };
@@ -6865,7 +6960,13 @@ impl Runtime {
         if !same_content_fingerprint(&current.fingerprint, &baseline_fingerprint) {
             let (bytes, verified_vault) =
                 self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
-            return self.local_conflict_copy_result(vault_id, &source_path, &bytes, verified_vault);
+            return self.local_conflict_copy_result(
+                vault_id,
+                &source_path,
+                &bytes,
+                verified_vault,
+                key.clone(),
+            );
         }
 
         let (bytes, verified_vault) = {
@@ -6894,6 +6995,7 @@ impl Runtime {
                         &source_path,
                         &bytes,
                         verified_vault,
+                        key.clone(),
                     );
                 }
                 Err(error) => {
@@ -6948,20 +7050,97 @@ impl Runtime {
         source_path: &str,
         bytes: &[u8],
         verified_vault: Vault,
+        key: Arc<TransformedKey>,
     ) -> Result<RuntimeResponse> {
-        let conflict_copy_path =
-            write_local_conflict_copy(Path::new(source_path), bytes, self.current_unix_time())
-                .with_context(|| format!("failed to write conflict copy for: {vault_id}"))?;
-        let loaded = self
-            .vault_session
-            .find_loaded_mut(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        loaded.vault = Some(verified_vault);
-        loaded.save_profile.kdf = None;
+        let conflict_copy = self
+            .local_files
+            .bind(source_path)
+            .preserve_conflict_copy(bytes)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("failed to preserve Conflict Copy for: {vault_id}"))?;
+        match self.local_files.bind(source_path).read() {
+            Ok(remote) => {
+                let remote_fingerprint = fingerprint_for_cached_bytes(&remote.bytes, 0);
+                let remote_save_profile = match self.inspected_save_profile(&remote.bytes) {
+                    Ok(profile) => profile,
+                    Err(_) => {
+                        self.install_pending_vault_candidate(vault_id, verified_vault)?;
+                        return Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                            status: SaveVaultStatusDto::ConflictCopy,
+                            merge_summary: None,
+                            conflict_copy_path: Some(conflict_copy.identity),
+                        }));
+                    }
+                };
+                match Self::load_session_database(&remote.bytes, &key) {
+                    Ok(database) => {
+                        self.install_committed_autofill_generation(
+                            vault_id,
+                            database.vault,
+                            remote.bytes,
+                            remote_fingerprint,
+                            None,
+                        )?;
+                        self.vault_session
+                            .find_loaded_mut(vault_id)
+                            .expect("local Conflict Split keeps the vault loaded")
+                            .provider_revision = Some(remote.revision);
+                        self.replace_session_transformed_key(vault_id, key)?;
+                    }
+                    Err(KdbxError::HeaderHmacMismatch) => {
+                        match self
+                            .refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes)?
+                        {
+                            Some((vault, refreshed_key)) => {
+                                self.install_committed_autofill_generation(
+                                    vault_id,
+                                    vault,
+                                    remote.bytes,
+                                    remote_fingerprint,
+                                    None,
+                                )?;
+                                self.vault_session
+                                    .find_loaded_mut(vault_id)
+                                    .expect("local Conflict Split keeps the vault loaded")
+                                    .provider_revision = Some(remote.revision);
+                                self.replace_session_transformed_key(vault_id, refreshed_key)?;
+                            }
+                            None => {
+                                self.install_locked_generation(
+                                    vault_id,
+                                    remote.bytes,
+                                    remote_fingerprint,
+                                    Some(remote.revision),
+                                    remote_save_profile,
+                                    None,
+                                    None,
+                                    None,
+                                )?;
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        self.install_locked_generation(
+                            vault_id,
+                            remote.bytes,
+                            remote_fingerprint,
+                            Some(remote.revision),
+                            remote_save_profile,
+                            None,
+                            None,
+                            None,
+                        )?;
+                    }
+                }
+            }
+            Err(_) => {
+                self.install_pending_vault_candidate(vault_id, verified_vault)?;
+            }
+        }
         Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
             status: SaveVaultStatusDto::ConflictCopy,
             merge_summary: None,
-            conflict_copy_path: Some(conflict_copy_path.to_string_lossy().into_owned()),
+            conflict_copy_path: Some(conflict_copy.identity),
         }))
     }
 
@@ -7150,6 +7329,22 @@ impl Runtime {
                         .refresh_transformed_key_from_unlock_blob(vault_id, &remote_bytes)
                         .context("failed to refresh quick unlock after the OneDrive KDF changed")?
                     else {
+                        let remote_save_profile = self
+                            .inspected_save_profile(&remote_bytes)
+                            .context("failed to inspect the locked OneDrive conflict head")?;
+                        let locked_head = OneDriveConflictHead {
+                            vault: None,
+                            bytes: remote_bytes.clone(),
+                            fingerprint: OneDriveProvider::legacy_fingerprint(
+                                &remote_bytes,
+                                &observed_revision,
+                            )?,
+                            revision: observed_revision.clone(),
+                            display_name: display_name_for_cloud_name(&state.name),
+                            account_label: account_label.clone(),
+                            save_profile: remote_save_profile,
+                            key: None,
+                        };
                         return self.upload_or_persist_onedrive_conflict_copy(
                             vault_id,
                             drive_id,
@@ -7159,6 +7354,7 @@ impl Runtime {
                             baseline_fingerprint,
                             &local_bytes,
                             Some(verified_local.clone()),
+                            Some(locked_head),
                             "current OneDrive generation uses a different vault key",
                         );
                     };
@@ -7166,6 +7362,22 @@ impl Runtime {
                     vault
                 }
                 Err(error) => {
+                    let remote_save_profile = self
+                        .inspected_save_profile(&remote_bytes)
+                        .context("failed to inspect the unreadable OneDrive conflict head")?;
+                    let locked_head = OneDriveConflictHead {
+                        vault: None,
+                        bytes: remote_bytes.clone(),
+                        fingerprint: OneDriveProvider::legacy_fingerprint(
+                            &remote_bytes,
+                            &observed_revision,
+                        )?,
+                        revision: observed_revision.clone(),
+                        display_name: display_name_for_cloud_name(&state.name),
+                        account_label: account_label.clone(),
+                        save_profile: remote_save_profile,
+                        key: None,
+                    };
                     return self.upload_or_persist_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
@@ -7175,9 +7387,26 @@ impl Runtime {
                         baseline_fingerprint,
                         &local_bytes,
                         Some(verified_local.clone()),
+                        Some(locked_head),
                         &format!("current OneDrive generation cannot be parsed: {error}"),
                     );
                 }
+            };
+            let remote_save_profile = self
+                .inspected_save_profile(&remote_bytes)
+                .context("failed to inspect the current OneDrive generation")?;
+            let conflict_head = OneDriveConflictHead {
+                vault: Some(remote_vault.clone()),
+                bytes: remote_bytes.clone(),
+                fingerprint: OneDriveProvider::legacy_fingerprint(
+                    &remote_bytes,
+                    &observed_revision,
+                )?,
+                revision: observed_revision.clone(),
+                display_name: display_name_for_cloud_name(&state.name),
+                account_label: account_label.clone(),
+                save_profile: remote_save_profile.clone(),
+                key: Some(key.clone()),
             };
             if !state.matches_fingerprint(baseline_fingerprint)
                 && !has_vaultkern_sync_lineage(&base_vault, &remote_vault)
@@ -7191,12 +7420,10 @@ impl Runtime {
                     baseline_fingerprint,
                     &local_bytes,
                     Some(verified_local.clone()),
+                    Some(conflict_head.clone()),
                     "current OneDrive generation has foreign or unclear writer lineage",
                 );
             }
-            let remote_save_profile = self
-                .inspected_save_profile(&remote_bytes)
-                .context("failed to inspect the current OneDrive generation")?;
             let merged_save_profile = match Self::merge_save_profile(
                 &base_save_profile,
                 &local_save_profile,
@@ -7213,6 +7440,7 @@ impl Runtime {
                         baseline_fingerprint,
                         &local_bytes,
                         Some(verified_local.clone()),
+                        Some(conflict_head.clone()),
                         &format!(
                             "concurrent OneDrive encryption profile cannot be merged: {error}"
                         ),
@@ -7231,6 +7459,7 @@ impl Runtime {
                         baseline_fingerprint,
                         &local_bytes,
                         Some(verified_local.clone()),
+                        Some(conflict_head.clone()),
                         &format!("concurrent changes cannot be represented: {error}"),
                     );
                 }
@@ -7248,6 +7477,7 @@ impl Runtime {
                     baseline_fingerprint,
                     &local_bytes,
                     Some(verified_local.clone()),
+                    Some(conflict_head),
                     &format!("concurrent changes exceed vault history retention: {error}"),
                 );
             }
@@ -7607,7 +7837,7 @@ impl Runtime {
         item_id: &str,
         display_name: &str,
         bytes: &[u8],
-    ) -> Result<String> {
+    ) -> Result<ProviderConflictCopy> {
         let receipt_key = onedrive_conflict_receipt_cache_key(drive_id, item_id);
         let current = self.remote_cache.read(&receipt_key)?;
         let same_candidate = current.as_ref().is_some_and(|receipt| {
@@ -7654,7 +7884,11 @@ impl Runtime {
                 })
                 .is_ok_and(|snapshot| snapshot.bytes == receipt.bytes)
         {
-            return Ok(receipt.display_name.clone());
+            return Ok(ProviderConflictCopy {
+                identity: receipt.account_label.clone(),
+                display_name: receipt.display_name.clone(),
+                warnings: Vec::new(),
+            });
         }
 
         let cached_at = self.current_unix_time() as i64;
@@ -7663,11 +7897,10 @@ impl Runtime {
             pending.pending_sync = true;
             pending
         } else {
-            let name = onedrive_conflict_copy_name(display_name, bytes);
             RemoteVaultCacheEntry {
                 bytes: bytes.to_vec(),
                 fingerprint: fingerprint_for_cached_bytes(bytes, cached_at),
-                display_name: name,
+                display_name: display_name.to_owned(),
                 account_label: item_id.to_owned(),
                 cached_at,
                 pending_sync: true,
@@ -7690,24 +7923,23 @@ impl Runtime {
 
         let completion_time = self.current_unix_time() as i64;
         let one_drive = &mut self.one_drive;
-        let (item, _) = self.remote_cache.complete_generic_pending_while(
+        let (conflict_copy, _) = self.remote_cache.complete_generic_pending_while(
             &receipt_key,
             &pending.fingerprint,
             || {
-                let item = one_drive.upload_sibling_conflict_copy(
-                    drive_id,
-                    item_id,
-                    &pending.display_name,
-                    &pending.bytes,
-                )?;
+                let conflict_copy = one_drive
+                    .bind(drive_id, item_id)
+                    .preserve_conflict_copy(&pending.bytes)
+                    .map_err(anyhow::Error::from)?;
                 let mut published = pending.clone();
                 published.pending_sync = false;
-                published.account_label = item.item_id.clone();
+                published.account_label = conflict_copy.identity.clone();
+                published.display_name = conflict_copy.display_name.clone();
                 published.cached_at = completion_time;
-                Ok((item, published))
+                Ok((conflict_copy, published))
             },
         )?;
-        Ok(item.name)
+        Ok(conflict_copy)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -7721,6 +7953,7 @@ impl Runtime {
         baseline_fingerprint: &VaultSourceFingerprint,
         bytes: &[u8],
         pending_vault: Option<Vault>,
+        remote_head: Option<OneDriveConflictHead>,
         reason: &str,
     ) -> Result<RuntimeResponse> {
         match self.publish_onedrive_conflict_copy_receipt(
@@ -7730,14 +7963,23 @@ impl Runtime {
             display_name,
             bytes,
         ) {
-            Ok(name) => {
-                if let Some(vault) = pending_vault {
+            Ok(conflict_copy) => {
+                if let Some(remote_head) = remote_head {
+                    self.adopt_onedrive_conflict_head(
+                        vault_id,
+                        drive_id,
+                        item_id,
+                        remote_head,
+                        &conflict_copy,
+                        reason,
+                    )?;
+                } else if let Some(vault) = pending_vault {
                     self.install_pending_vault_candidate(vault_id, vault)?;
                 }
                 Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
                     status: SaveVaultStatusDto::ConflictCopy,
                     merge_summary: None,
-                    conflict_copy_path: Some(format!("onedrive:{name}")),
+                    conflict_copy_path: Some(format!("onedrive:{}", conflict_copy.display_name)),
                 }))
             }
             Err(upload_error) => {
@@ -7760,6 +8002,92 @@ impl Runtime {
                 }
                 Ok(response)
             }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn adopt_onedrive_conflict_head(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        remote_head: OneDriveConflictHead,
+        conflict_copy: &ProviderConflictCopy,
+        reason: &str,
+    ) -> Result<()> {
+        let OneDriveConflictHead {
+            vault,
+            bytes,
+            fingerprint,
+            revision,
+            display_name,
+            account_label,
+            save_profile,
+            key,
+        } = remote_head;
+        let source = VaultSource::OneDriveItem {
+            drive_id: drive_id.to_owned(),
+            item_id: item_id.to_owned(),
+        };
+        let cache_key = remote_cache_key_for_source(&source).expect("OneDrive source");
+        let source_etag = OneDriveProvider::source_etag(&revision)?;
+        let cached_at = self.current_unix_time() as i64;
+        let cache_result = self.remote_cache.write_with_source_etag(
+            &cache_key,
+            RemoteVaultCacheEntry {
+                bytes: bytes.clone(),
+                fingerprint: fingerprint.clone(),
+                display_name: display_name.clone(),
+                account_label: account_label.clone(),
+                cached_at,
+                pending_sync: false,
+            },
+            source_etag.as_deref(),
+        );
+        let (_, mut status) =
+            remote_source_status_after_commit(&cache_key, cached_at, cache_result.as_ref().err());
+        let mut split_warning = format!(
+            "{reason}; local changes were saved to onedrive:{}",
+            conflict_copy.display_name
+        );
+        if !conflict_copy.warnings.is_empty() {
+            split_warning.push_str(&format!("; {}", conflict_copy.warnings.join("; ")));
+        }
+        status.last_error = Some(match status.last_error.take() {
+            Some(cache_warning) => format!("{split_warning}; {cache_warning}"),
+            None => split_warning,
+        });
+        match (vault, key) {
+            (Some(vault), Some(key)) => {
+                self.install_committed_autofill_generation(
+                    vault_id,
+                    vault,
+                    bytes,
+                    fingerprint,
+                    Some(status),
+                )?;
+                {
+                    let loaded = self
+                        .vault_session
+                        .find_loaded_mut(vault_id)
+                        .with_context(|| format!("vault not opened: {vault_id}"))?;
+                    loaded.provider_revision = Some(revision);
+                    loaded.name = display_name;
+                    loaded.source_account_label = Some(account_label);
+                }
+                self.replace_session_transformed_key(vault_id, key)
+            }
+            (None, None) => self.install_locked_generation(
+                vault_id,
+                bytes,
+                fingerprint,
+                Some(revision),
+                save_profile,
+                Some(status),
+                Some(display_name),
+                Some(account_label),
+            ),
+            _ => anyhow::bail!("OneDrive conflict head has inconsistent unlock state"),
         }
     }
 
@@ -7790,8 +8118,11 @@ impl Runtime {
             display_name,
             &bytes,
         ) {
-            Ok(name) => Ok(SourceRefreshConflictDisposition::UploadedConflictCopy {
-                warning: format!("{reason}; local changes were saved to onedrive:{}", name),
+            Ok(conflict_copy) => Ok(SourceRefreshConflictDisposition::UploadedConflictCopy {
+                warning: format!(
+                    "{reason}; local changes were saved to onedrive:{}",
+                    conflict_copy.display_name
+                ),
             }),
             Err(upload_error) => {
                 self.save_conflict_copy_to_pending_cache(
@@ -8087,13 +8418,14 @@ impl Runtime {
                 &receipt.display_name,
                 &receipt.bytes,
             ) {
-                Ok(name) => VaultSourceStatusDto {
+                Ok(conflict_copy) => VaultSourceStatusDto {
                     source_kind: cache_key.provider_kind.clone(),
                     remote_state: "online".into(),
                     last_sync_at: Some(self.current_unix_time() as i64),
                     cached_at: Some(cached_at),
                     last_error: Some(format!(
-                        "interrupted conflict-copy publication completed at onedrive:{name}"
+                        "interrupted conflict-copy publication completed at onedrive:{}",
+                        conflict_copy.display_name
                     )),
                 },
                 Err(error) => VaultSourceStatusDto {
@@ -9003,7 +9335,7 @@ impl Runtime {
         reason: &str,
     ) -> Result<VaultSourceStatusDto> {
         let mut key = key;
-        let conflict_name = self.publish_onedrive_conflict_copy_receipt(
+        let conflict_copy = self.publish_onedrive_conflict_copy_receipt(
             vault_id,
             drive_id,
             item_id,
@@ -9012,34 +9344,44 @@ impl Runtime {
         )?;
         let remote_state = self.one_drive.remote_state(drive_id, item_id)?;
         let remote = read_onedrive_provider(&mut self.one_drive, drive_id, item_id, &remote_state)?;
-        let (remote_vault, adoption_error) = match Self::load_session_database(&remote.bytes, &key)
-        {
-            Ok(database) => {
-                self.inspected_save_profile(&remote.bytes).context(
-                    "failed to inspect the current OneDrive head after conflict fallback",
-                )?;
-                (Some(database.vault), None)
-            }
+        let remote_save_profile = self
+            .inspected_save_profile(&remote.bytes)
+            .context("failed to inspect the current OneDrive head after conflict fallback")?;
+        let (remote_vault, remote_key, locked_reason) = match Self::load_session_database(
+            &remote.bytes,
+            &key,
+        ) {
+            Ok(database) => (Some(database.vault), Some(key.clone()), None),
             Err(KdbxError::HeaderHmacMismatch) => {
                 match self.refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes) {
                     Ok(Some((vault, refreshed_key))) => {
                         key = refreshed_key;
-                        self.inspected_save_profile(&remote.bytes).context(
-                            "failed to inspect the current OneDrive head after KDF refresh",
-                        )?;
-                        (Some(vault), None)
+                        (Some(vault), Some(key.clone()), None)
                     }
                     Ok(None) => (
                         None,
+                        None,
                         Some(
-                            "current OneDrive head changed KDF and quick unlock is unavailable"
-                                .into(),
+                            "current OneDrive head changed KDF and was adopted in locked state"
+                                .to_owned(),
                         ),
                     ),
-                    Err(error) => (None, Some(format!("failed to refresh KDF: {error:#}"))),
+                    Err(error) => (
+                        None,
+                        None,
+                        Some(format!(
+                            "current OneDrive head was adopted in locked state after KDF refresh failed: {error:#}"
+                        )),
+                    ),
                 }
             }
-            Err(error) => (None, Some(error.to_string())),
+            Err(error) => (
+                None,
+                None,
+                Some(format!(
+                    "current OneDrive head was adopted in locked state after decode failed: {error}"
+                )),
+            ),
         };
         let cached_at = self.current_unix_time() as i64;
         let completion = self.remote_cache.complete_generic_pending(
@@ -9054,51 +9396,36 @@ impl Runtime {
                 pending_sync: false,
             },
         )?;
-        let mut last_error = format!(
-            "{reason}; local changes were saved to onedrive:{}",
-            conflict_name
-        );
-        if let Some(error) = adoption_error {
-            last_error.push_str(&format!(
-                "; current OneDrive head could not be adopted: {error}"
-            ));
+        let mut adoption_reason = reason.to_owned();
+        if let Some(locked_reason) = locked_reason {
+            adoption_reason.push_str(&format!("; {locked_reason}"));
         }
         if matches!(completion, PendingRemoteCacheCompletion::DurabilityUnknown) {
-            last_error.push_str("; remote cache completion is visible but durability is unknown");
+            adoption_reason
+                .push_str("; remote cache completion is visible but durability is unknown");
         }
-        let mut status = VaultSourceStatusDto {
-            source_kind: cache_key.provider_kind.clone(),
-            remote_state: if remote_vault.is_some() {
-                "online".into()
-            } else {
-                "conflict_copy".into()
-            },
-            last_sync_at: remote_vault.as_ref().map(|_| cached_at),
-            cached_at: Some(cached_at),
-            last_error: Some(last_error),
+        let remote_head = OneDriveConflictHead {
+            vault: remote_vault,
+            bytes: remote.bytes,
+            fingerprint: remote.fingerprint,
+            revision: OneDriveProvider::revision_for_state(&remote_state)?,
+            display_name: display_name_for_cloud_name(&remote.name),
+            account_label: remote.account_label,
+            save_profile: remote_save_profile,
+            key: remote_key,
         };
-        if let Some(remote_vault) = remote_vault {
-            self.install_committed_autofill_generation(
-                vault_id,
-                remote_vault,
-                remote.bytes.clone(),
-                remote.fingerprint.clone(),
-                Some(status.clone()),
-            )?;
-            self.replace_session_transformed_key(vault_id, key)?;
-            status = self
-                .vault_session
-                .find_loaded(vault_id)
-                .and_then(|loaded| loaded.source_status.clone())
-                .unwrap_or(status);
-        } else {
-            let loaded = self
-                .vault_session
-                .find_loaded_mut(vault_id)
-                .with_context(|| format!("vault not opened: {vault_id}"))?;
-            loaded.source_status = Some(status.clone());
-        }
-        Ok(status)
+        self.adopt_onedrive_conflict_head(
+            vault_id,
+            drive_id,
+            item_id,
+            remote_head,
+            &conflict_copy,
+            &adoption_reason,
+        )?;
+        self.vault_session
+            .find_loaded(vault_id)
+            .and_then(|loaded| loaded.source_status.clone())
+            .context("Conflict Split did not install a OneDrive source status")
     }
 
     fn loaded_vault(&self, vault_id: &str) -> Result<&Vault> {
@@ -10869,19 +11196,6 @@ fn display_name_for_cloud_name(name: &str) -> String {
         .to_owned()
 }
 
-fn onedrive_conflict_copy_name(display_name: &str, bytes: &[u8]) -> String {
-    let stem = Path::new(display_name)
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("vault");
-    let digest = Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("{stem} (VaultKern conflict {digest}).kdbx")
-}
-
 fn transformed_key_from_loaded_vault(loaded: &LoadedVault) -> Result<Arc<TransformedKey>> {
     loaded
         .transformed_key
@@ -12264,7 +12578,14 @@ mod tests {
         );
 
         let status = runtime.retry_vault_source_sync(&vault_id).unwrap();
-        assert_eq!(status.remote_state, "conflict_copy", "{status:?}");
+        assert_eq!(status.remote_state, "online", "{status:?}");
+        assert!(
+            runtime
+                .vault_session
+                .find_loaded(&vault_id)
+                .is_some_and(|loaded| loaded.vault.is_none()),
+            "a Remote Head without an available transformed key is adopted locked"
+        );
         assert!(
             !runtime
                 .remote_cache
@@ -12276,7 +12597,7 @@ mod tests {
     }
 
     #[test]
-    fn published_onedrive_conflict_copy_installs_its_exact_retained_model() {
+    fn published_onedrive_conflict_copy_retains_local_and_adopts_remote_locked() {
         let mut runtime = demo_onedrive_runtime(1_700_000_106);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &vault_id);
@@ -12298,7 +12619,7 @@ mod tests {
                 SaveProfile::recommended(),
             )
             .unwrap();
-        runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
+        runtime.replace_test_onedrive_item("drive-1", "item-1", foreign.clone());
 
         let response = runtime.save_vault(&vault_id).unwrap();
 
@@ -12309,14 +12630,34 @@ mod tests {
                 ..
             })
         ));
+        let loaded = runtime.vault_session.find_loaded(&vault_id).unwrap();
+        assert!(loaded.vault.is_none());
+        assert_eq!(loaded.bytes, foreign);
         assert_eq!(
-            runtime
-                .list_entry_history(&vault_id, &entry.id)
-                .unwrap()
-                .items
-                .len(),
+            runtime.session_bases.read(&vault_id).unwrap().unwrap(),
+            foreign
+        );
+
+        runtime
+            .unlock_with_password(&vault_id, "foreign-password")
+            .unwrap();
+        assert_eq!(runtime.loaded_vault(&vault_id).unwrap().name, "foreign");
+
+        let receipt = runtime
+            .remote_cache
+            .read(&onedrive_conflict_receipt_cache_key("drive-1", "item-1"))
+            .unwrap()
+            .expect("published Conflict Copy receipt");
+        let mut local_key = CompositeKey::default();
+        local_key.add_password("demo-password");
+        let local_copy = runtime
+            .core
+            .load_kdbx(&receipt.bytes, &local_key)
+            .expect("decode retained Local Conflict Copy");
+        assert_eq!(
+            local_copy.root.entries[0].history.len(),
             1,
-            "a published conflict copy must become the resident's exact retained model"
+            "the durable Conflict Copy must contain the exact retained Local model"
         );
     }
 
@@ -12475,7 +12816,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_database_settings_conflict_reuses_the_published_receipt() {
+    fn database_settings_conflict_splits_then_retry_targets_adopted_remote() {
         let mut runtime = demo_onedrive_runtime(1_700_000_107);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
         let before = runtime.get_database_settings(&vault_id).unwrap();
@@ -12502,12 +12843,33 @@ mod tests {
         let first = runtime
             .commit_database_settings(&vault_id, update())
             .expect_err("conflict copy is not an active-vault settings commit");
-        assert_eq!(runtime.get_database_settings(&vault_id).unwrap(), before);
+        assert!(format!("{first:#}").contains("conflict copy"));
+        assert!(
+            runtime
+                .vault_session
+                .find_loaded(&vault_id)
+                .is_some_and(|loaded| loaded.vault.is_none())
+        );
+        runtime
+            .unlock_with_password(&vault_id, "demo-password")
+            .expect("unlock the adopted Remote Head");
+        assert_eq!(
+            runtime
+                .get_database_settings(&vault_id)
+                .unwrap()
+                .metadata
+                .name,
+            "foreign"
+        );
         let second = runtime
             .commit_database_settings(&vault_id, update())
-            .expect_err("retry remains an uncommitted settings conflict");
-        assert_eq!(format!("{first:#}"), format!("{second:#}"));
-        assert_eq!(runtime.get_database_settings(&vault_id).unwrap(), before);
+            .expect("retry applies to the adopted Remote Head");
+        assert_eq!(
+            second.save_result.status,
+            SaveVaultStatusDto::Saved,
+            "{second:?}"
+        );
+        assert_eq!(second.settings.metadata.name, "desired local settings");
 
         let RuntimeResponse::OneDriveItemList(list) = runtime
             .handle(RuntimeCommand::ListOneDriveChildren {
@@ -13314,6 +13676,24 @@ mod tests {
         let conflict_bytes = std::fs::read(conflict_path).unwrap();
         let conflict_vault = KeepassCore::new().load_kdbx(&conflict_bytes, &key).unwrap();
         assert_eq!(conflict_vault.root.entries.len(), 1);
+        let loaded = runtime.vault_session.find_loaded(&opened.vault_id).unwrap();
+        assert!(loaded.vault.is_none());
+        assert_eq!(loaded.bytes, external);
+        assert_eq!(
+            runtime
+                .session_bases
+                .read(&opened.vault_id)
+                .unwrap()
+                .unwrap(),
+            external
+        );
+        runtime
+            .unlock_with_password(&opened.vault_id, "demo-password")
+            .expect("unlock adopted external generation");
+        assert_eq!(
+            runtime.loaded_vault(&opened.vault_id).unwrap().name,
+            "external-generation"
+        );
     }
 
     #[test]
@@ -15923,7 +16303,7 @@ mod tests {
     }
 
     #[test]
-    fn local_conflict_copy_installs_the_exact_history_retained_model_that_was_published() {
+    fn invalid_local_remote_keeps_the_exact_history_retained_conflict_copy_active() {
         let mut runtime = Runtime::for_tests_at(1_700_000_002);
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         let entry = create_demo_entry(&mut runtime, &opened.vault_id);

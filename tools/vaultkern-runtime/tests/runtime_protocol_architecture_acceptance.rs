@@ -1,7 +1,10 @@
 mod support;
 
 use support::RuntimeProtocolHarness;
-use vaultkern_core::{CompositeKey, EntryCreate, KeepassCore, SaveProfile, Vault};
+use vaultkern_core::{
+    CompositeKey, EntryCreate, KeepassCore, SaveProfile, Vault, derive_transformed_key,
+    save_kdbx_with_transformed_key,
+};
 use vaultkern_runtime_protocol::{
     CommitStatusDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
 };
@@ -43,6 +46,43 @@ fn vault_with_entry_bytes() -> (Vec<u8>, String) {
     let bytes = core
         .save_kdbx(&vault, &key(), SaveProfile::recommended())
         .expect("create in-memory KDBX snapshot with an entry");
+    (bytes, entry.id)
+}
+
+fn foreign_remote_head_bytes(base_bytes: &[u8]) -> (Vec<u8>, String) {
+    let core = KeepassCore::new();
+    let base = core
+        .load_database(base_bytes, &key())
+        .expect("decode Base for a same-key foreign Remote Head");
+    let transformed_key =
+        derive_transformed_key(base_bytes, &key()).expect("derive Base transformed key");
+    let mut vault = Vault::empty("Foreign Remote Head");
+    vault.kdf_parameters = base.vault.kdf_parameters;
+    let root_id = vault.root.id.to_string();
+    let entry = core
+        .add_entry(
+            &mut vault,
+            &root_id,
+            EntryCreate {
+                title: "Remote-only account".into(),
+                username: "remote-user".into(),
+                password: "remote-password".into(),
+                url: "https://remote-only.example".into(),
+                notes: String::new(),
+            },
+        )
+        .expect("create foreign Remote Head entry");
+    let bytes = save_kdbx_with_transformed_key(
+        &vault,
+        &transformed_key,
+        &SaveProfile {
+            version: base.inspection.save_target_version,
+            cipher: base.inspection.header.cipher,
+            compression: base.inspection.header.compression,
+            kdf: None,
+        },
+    )
+    .expect("encode same-key foreign Remote Head");
     (bytes, entry.id)
 }
 
@@ -325,6 +365,231 @@ fn stale_reconciliation_keeps_base_and_local_fixed_until_publication_is_confirme
             if result.commit == CommitStatusDto::Committed
                 && result.publication.status == SaveVaultStatusDto::Saved
     ));
+}
+
+#[test]
+fn successful_conflict_split_preserves_local_then_adopts_remote_head() {
+    let core = KeepassCore::new();
+    let (base_bytes, local_entry_id) = vault_with_entry_bytes();
+    let (remote_bytes, remote_entry_id) = foreign_remote_head_bytes(&base_bytes);
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    harness.reject_next_publication_as_stale(remote_bytes.clone());
+    let conflict_identity = match harness.command(RuntimeCommand::UpdateEntryFields {
+        vault_id: vault_id.clone(),
+        entry_id: local_entry_id.clone(),
+        title: "Local conflict edit".into(),
+        username: "base-user".into(),
+        password: "local-password".into(),
+        url: "https://base.example".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+        custom_fields: vec![],
+    }) {
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.commit, CommitStatusDto::Committed);
+            assert_eq!(result.publication.status, SaveVaultStatusDto::ConflictCopy);
+            result
+                .publication
+                .conflict_copy_path
+                .expect("provider Conflict Copy identity")
+        }
+        other => panic!("expected Conflict Split result, got {other:?}"),
+    };
+    assert_eq!(harness.provider_snapshot().bytes, remote_bytes);
+
+    let active_entries = match harness.command(RuntimeCommand::ListEntries {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::EntryList(entries) => entries.entries,
+        other => panic!("expected active entry list, got {other:?}"),
+    };
+    assert_eq!(active_entries.len(), 1);
+    assert_eq!(active_entries[0].id, remote_entry_id);
+
+    let conflict_name = conflict_identity
+        .strip_prefix("onedrive:")
+        .expect("OneDrive Conflict Copy identity");
+    let items = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items.items,
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    let conflict_item = items
+        .iter()
+        .find(|item| item.name == conflict_name)
+        .expect("durable sibling Conflict Copy");
+    let conflict_vault = core
+        .load_database(&harness.provider_item_bytes(&conflict_item.item_id), &key())
+        .expect("decode Conflict Copy")
+        .vault;
+    let local_copy = core
+        .project_entry_detail(&conflict_vault, &local_entry_id)
+        .expect("local entry in Conflict Copy");
+    assert_eq!(local_copy.title, "Local conflict edit");
+    assert_eq!(local_copy.password, "local-password");
+
+    let remote_root_id = match harness.command(RuntimeCommand::ListGroups {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::GroupTree(groups) => groups.root.id,
+        other => panic!("expected Remote Head group tree, got {other:?}"),
+    };
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateEntry {
+            vault_id,
+            parent_group_id: remote_root_id,
+            entry_id: None,
+            title: "After Conflict Split".into(),
+            username: "alice".into(),
+            password: "after-split-password".into(),
+            url: "https://after-split.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::Saved
+    ));
+}
+
+#[test]
+fn failed_conflict_copy_preservation_keeps_local_until_retry_completes_split() {
+    let core = KeepassCore::new();
+    let (base_bytes, local_entry_id) = vault_with_entry_bytes();
+    let (remote_bytes, remote_entry_id) = foreign_remote_head_bytes(&base_bytes);
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    harness.reject_next_publication_as_stale(remote_bytes.clone());
+    harness.fail_next_conflict_copy_preservation();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+            title: "First local conflict edit".into(),
+            username: "base-user".into(),
+            password: "local-password".into(),
+            url: "https://base.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::ConflictCopy
+                && result.publication.conflict_copy_path.as_deref()
+                    == Some("onedrive:pending-conflict-copy")
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetEntryDetail {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+        }),
+        RuntimeResponse::EntryDetail(detail) if detail.title == "First local conflict edit"
+    ));
+    assert_eq!(harness.provider_snapshot().bytes, remote_bytes);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+            title: "Latest local conflict edit".into(),
+            username: "base-user".into(),
+            password: "latest-local-password".into(),
+            url: "https://base.example".into(),
+            notes: "committed while Conflict Copy was pending".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::ConflictCopy
+    ));
+    let items_before_retry = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items.items,
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    assert_eq!(items_before_retry.len(), 1);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        }),
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+    let active_entries = match harness.command(RuntimeCommand::ListEntries { vault_id }) {
+        RuntimeResponse::EntryList(entries) => entries.entries,
+        other => panic!("expected active entry list, got {other:?}"),
+    };
+    assert_eq!(active_entries.len(), 1);
+    assert_eq!(active_entries[0].id, remote_entry_id);
+
+    let items = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items.items,
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    let conflict_item = items
+        .iter()
+        .find(|item| item.name.contains("VaultKern conflict"))
+        .expect("retried durable Conflict Copy");
+    let conflict_vault = core
+        .load_database(&harness.provider_item_bytes(&conflict_item.item_id), &key())
+        .expect("decode retried Conflict Copy")
+        .vault;
+    let local_copy = core
+        .project_entry_detail(&conflict_vault, &local_entry_id)
+        .expect("latest Local entry in Conflict Copy");
+    assert_eq!(local_copy.title, "Latest local conflict edit");
+    assert_eq!(local_copy.password, "latest-local-password");
+    assert_eq!(
+        local_copy.notes,
+        "committed while Conflict Copy was pending"
+    );
 }
 
 #[test]

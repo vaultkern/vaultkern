@@ -1956,7 +1956,7 @@ fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
 }
 
 #[test]
-fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
+fn remote_kdf_rotation_with_unrelated_lineage_splits_once_then_adopts_remote() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");
     let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
@@ -2005,18 +2005,24 @@ fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
         .unwrap();
     runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
 
-    for _ in 0..2 {
-        let response = runtime
-            .handle(RuntimeCommand::SaveVault {
-                vault_id: vault_id.clone(),
-            })
-            .expect("conflict-copy retry must retain a key for the kept base");
-        assert!(matches!(
-            response,
-            RuntimeResponse::SaveVaultResult(result)
-                if result.status == SaveVaultStatusDto::ConflictCopy
-        ));
-    }
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault {
+            vault_id: vault_id.clone(),
+        })
+        .expect("Conflict Split must preserve Local before adopting Remote");
+    let RuntimeResponse::SaveVaultResult(result) = response else {
+        panic!("expected SaveVaultResult");
+    };
+    assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+    assert!(runtime.list_entries(&vault_id).unwrap().is_empty());
+
+    let response = runtime
+        .handle(RuntimeCommand::SaveVault { vault_id })
+        .expect("the adopted Remote Head must be the new common Base");
+    let RuntimeResponse::SaveVaultResult(result) = response else {
+        panic!("expected SaveVaultResult");
+    };
+    assert_eq!(result.status, SaveVaultStatusDto::Saved);
 }
 
 #[test]
@@ -2616,7 +2622,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
 }
 
 #[test]
-fn repeated_logical_conflict_save_reuses_one_published_onedrive_copy() {
+fn logical_conflict_splits_once_and_next_save_uses_the_adopted_remote() {
     let core = KeepassCore::new();
     let initial_bytes = core
         .save_kdbx(
@@ -2661,15 +2667,22 @@ fn repeated_logical_conflict_save_reuses_one_published_onedrive_copy() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
 
     let first = runtime.save_vault(&vault_id).unwrap();
-    let second = runtime.save_vault(&vault_id).unwrap();
-    let conflict_path = |response: RuntimeResponse| match response {
+    let conflict_path = match first {
         RuntimeResponse::SaveVaultResult(result) => {
             assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
             result.conflict_copy_path.unwrap()
         }
         other => panic!("expected conflict copy, got {other:?}"),
     };
-    assert_eq!(conflict_path(first), conflict_path(second));
+    assert!(conflict_path.starts_with("onedrive:"));
+    runtime
+        .unlock_with_password(&vault_id, "demo-password")
+        .expect("unlock the adopted Remote Head");
+    assert!(matches!(
+        runtime.save_vault(&vault_id).unwrap(),
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::Saved
+    ));
 
     let RuntimeResponse::OneDriveItemList(list) = runtime
         .handle(RuntimeCommand::ListOneDriveChildren {

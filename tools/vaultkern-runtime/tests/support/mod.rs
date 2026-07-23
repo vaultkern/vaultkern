@@ -115,6 +115,16 @@ impl RuntimeProtocolHarness {
             .queue_test_onedrive_precondition_failure(Some(remote_head));
     }
 
+    pub fn fail_next_conflict_copy_preservation(&self) {
+        self.runtime.fail_next_test_onedrive_conflict_copy();
+    }
+
+    pub fn provider_item_bytes(&self, item_id: &str) -> Vec<u8> {
+        self.runtime
+            .read_test_onedrive_item_bytes(DRIVE_ID, item_id)
+            .expect("read in-memory Provider item")
+    }
+
     pub fn make_next_publication_outcome_unknown_and_readback_unavailable(&mut self) {
         self.runtime
             .queue_test_onedrive_ambiguous_write_with_unavailable_readback(false);

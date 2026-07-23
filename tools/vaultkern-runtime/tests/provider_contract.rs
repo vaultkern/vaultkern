@@ -1,9 +1,9 @@
 use vaultkern_runtime::{
     InMemoryProvider, LocalFileProvider, OneDriveMemoryWriteBehavior, OneDriveVaultSourceProvider,
-    Provider, ProviderError, ProviderRevision,
+    Provider, ProviderConflictCopy, ProviderError, ProviderRevision,
 };
 
-fn assert_provider_contract(provider: &mut dyn Provider) {
+fn assert_provider_contract(provider: &mut dyn Provider) -> ProviderConflictCopy {
     let opened = provider.read().expect("read initial Provider snapshot");
     assert_eq!(opened.bytes, b"generation-a");
 
@@ -24,13 +24,32 @@ fn assert_provider_contract(provider: &mut dyn Provider) {
         provider.read().expect("read after stale rejection").bytes,
         b"generation-b"
     );
+
+    let conflict = provider
+        .preserve_conflict_copy(b"opaque-conflict-bytes")
+        .expect("durably preserve an opaque sibling Conflict Copy");
+    assert!(!conflict.identity.is_empty());
+    assert!(!conflict.display_name.is_empty());
+    assert_eq!(
+        provider
+            .read()
+            .expect("read main snapshot after Conflict Copy")
+            .bytes,
+        b"generation-b",
+        "Conflict Copy preservation must not replace the active snapshot"
+    );
+    conflict
 }
 
 #[test]
 fn in_memory_adapter_satisfies_the_provider_contract() {
     let mut provider = InMemoryProvider::new(b"generation-a".to_vec());
 
-    assert_provider_contract(&mut provider);
+    let conflict = assert_provider_contract(&mut provider);
+    assert_eq!(
+        provider.conflict_copy_bytes(&conflict.identity).as_deref(),
+        Some(b"opaque-conflict-bytes".as_slice())
+    );
 }
 
 #[test]
@@ -40,7 +59,11 @@ fn local_file_adapter_satisfies_the_provider_contract() {
     std::fs::write(&path, b"generation-a").expect("write initial local snapshot");
     let mut provider = LocalFileProvider::new(path);
 
-    assert_provider_contract(&mut provider);
+    let conflict = assert_provider_contract(&mut provider);
+    assert_eq!(
+        std::fs::read(&conflict.identity).expect("read local Conflict Copy"),
+        b"opaque-conflict-bytes"
+    );
 }
 
 #[test]
@@ -55,7 +78,14 @@ fn onedrive_adapter_satisfies_the_provider_contract() {
     );
     let mut provider = source.bind("drive-1", "item-1");
 
-    assert_provider_contract(&mut provider);
+    let conflict = assert_provider_contract(&mut provider);
+    drop(provider);
+    assert_eq!(
+        source
+            .read_memory_item_bytes("drive-1", &conflict.identity)
+            .expect("read OneDrive Conflict Copy"),
+        b"opaque-conflict-bytes"
+    );
 }
 
 #[test]

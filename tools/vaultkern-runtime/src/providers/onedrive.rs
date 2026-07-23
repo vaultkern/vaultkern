@@ -21,7 +21,8 @@ use crate::providers::onedrive_token_store::{
     production_default, production_for_extension_id,
 };
 use crate::providers::provider::{
-    Provider, ProviderCommit, ProviderError, ProviderRevision, ProviderSnapshot,
+    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
+    ProviderSnapshot,
 };
 use zeroize::Zeroizing;
 
@@ -1468,6 +1469,52 @@ impl Provider for OneDriveProvider<'_> {
             }
         }
     }
+
+    fn preserve_conflict_copy(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ProviderConflictCopy, ProviderError> {
+        let state = self
+            .source
+            .remote_state(&self.drive_id, &self.item_id)
+            .map_err(OneDriveProvider::read_error)?;
+        let name = conflict_copy_name(&state.name, bytes);
+        let item = self
+            .source
+            .upload_sibling_conflict_copy(&self.drive_id, &self.item_id, &name, bytes)
+            .map_err(|error| {
+                if is_onedrive_item_not_found(&error) {
+                    ProviderError::NotFound {
+                        message: format!("{error:#}"),
+                    }
+                } else {
+                    ProviderError::OutcomeUnknown {
+                        message: format!(
+                            "OneDrive Conflict Copy outcome could not be confirmed: {error:#}"
+                        ),
+                    }
+                }
+            })?;
+        Ok(ProviderConflictCopy {
+            identity: item.item_id,
+            display_name: item.name,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn conflict_copy_name(display_name: &str, bytes: &[u8]) -> String {
+    let path = std::path::Path::new(display_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("vault");
+    let digest = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{stem} (VaultKern conflict {digest}).kdbx")
 }
 
 fn load_refresh_token_state(

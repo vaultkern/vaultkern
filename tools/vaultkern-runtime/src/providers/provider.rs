@@ -50,6 +50,13 @@ impl fmt::Debug for ProviderCommit {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderConflictCopy {
+    pub identity: String,
+    pub display_name: String,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderError {
     StaleRevision { message: String },
     NotFound { message: String },
@@ -89,4 +96,9 @@ pub trait Provider {
         expected: &ProviderRevision,
         bytes: &[u8],
     ) -> Result<ProviderCommit, ProviderError>;
+
+    fn preserve_conflict_copy(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ProviderConflictCopy, ProviderError>;
 }
