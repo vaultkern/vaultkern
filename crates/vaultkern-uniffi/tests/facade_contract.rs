@@ -301,6 +301,46 @@ fn ffi_session_opens_lists_reads_edits_and_saves_using_protocol_vocabulary() {
 }
 
 #[test]
+fn ffi_session_exposes_core_fill_candidate_matching() {
+    let (_dir, session, _adapter, vault_id) = opened_session();
+    let first = session
+        .read_entry(
+            vault_id.clone(),
+            session.list_entries(vault_id.clone()).unwrap()[0]
+                .id
+                .clone(),
+        )
+        .unwrap();
+    let entry_id = first.id.as_str().to_owned();
+    session
+        .edit_entry(
+            vault_id.clone(),
+            entry_id.clone(),
+            EntryFieldsDto {
+                title: first.title,
+                username: first.username,
+                password: first.password,
+                url: "https://login.example.com/account".into(),
+                notes: first.notes,
+                totp_uri: first.totp_uri,
+                custom_fields: first.custom_fields,
+            },
+        )
+        .unwrap();
+
+    let candidates = session
+        .find_fill_candidates(vault_id.clone(), "https://login.example.com/account".into())
+        .unwrap();
+    assert_eq!(candidates[0].id, entry_id);
+    assert!(
+        session
+            .find_fill_candidates(vault_id, "https://unrelated.invalid/login".into())
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn ffi_sources_expose_the_existing_runtime_reference_vocabulary() {
     let (_dir, session, _adapter, _vault_id) = opened_session();
 

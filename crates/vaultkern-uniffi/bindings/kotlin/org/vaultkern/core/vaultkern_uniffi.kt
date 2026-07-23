@@ -786,6 +786,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_find_fill_candidates(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_passkey_credentials(
@@ -919,6 +921,8 @@ external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_capabilities(`ptr`: 
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_close_vault(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_edit_entry(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`entryId`: RustBuffer.ByValue,`fields`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_find_fill_candidates(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`url`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_list_entries(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1161,6 +1165,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_find_fill_candidates() != 36841.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708.toShort()) {
@@ -3020,6 +3027,8 @@ public interface VaultSessionInterface {
 
     fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryDetailDto
 
+    fun `findFillCandidates`(`vaultId`: kotlin.String, `url`: kotlin.String): List<EntrySummaryDto>
+
     fun `listEntries`(`vaultId`: kotlin.String): List<EntrySummaryDto>
 
     fun `listPasskeyCredentials`(): List<PlatformPasskeyCredential>
@@ -3196,6 +3205,20 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_edit_entry(
         it,
         FfiConverterString.lower(`vaultId`),FfiConverterString.lower(`entryId`),FfiConverterTypeEntryFieldsDto.lower(`fields`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `findFillCandidates`(`vaultId`: kotlin.String, `url`: kotlin.String): List<EntrySummaryDto> {
+            return FfiConverterSequenceTypeEntrySummaryDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_find_fill_candidates(
+        it,
+        FfiConverterString.lower(`vaultId`),FfiConverterString.lower(`url`),_status)
 }
     }
     )

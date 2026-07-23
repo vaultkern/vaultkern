@@ -1237,6 +1237,18 @@ impl VaultSession {
             .map_err(Into::into)
     }
 
+    pub fn find_fill_candidates(
+        &self,
+        vault_id: String,
+        url: String,
+    ) -> Result<Vec<EntrySummaryDto>, VaultKernError> {
+        self.shared
+            .lock()?
+            .find_fill_candidates(&vault_id, &url)
+            .map(|candidates| candidates.entries.into_iter().map(Into::into).collect())
+            .map_err(Into::into)
+    }
+
     pub fn read_entry(
         &self,
         vault_id: String,
