@@ -24,7 +24,12 @@ pub use passkey::{
 };
 pub use protocol_session::{RuntimeProtocolDispatch, RuntimeProtocolSession};
 pub use providers::biometric::BiometricProvider;
+pub use providers::local_file::LocalFileProvider;
+pub use providers::memory::InMemoryProvider;
 pub use providers::onedrive_token_store::OneDriveRefreshTokenStore;
+pub use providers::provider::{
+    Provider, ProviderCommit, ProviderError, ProviderRevision, ProviderSnapshot,
+};
 pub use providers::secure_storage::{SecureStorageError, SecureStorageProvider};
 pub use runtime::{
     ExternalKdfDisposition, ExternalKdfFailure, QuickUnlockOutcome,

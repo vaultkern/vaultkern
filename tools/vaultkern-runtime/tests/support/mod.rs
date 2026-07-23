@@ -15,6 +15,13 @@ pub struct RuntimeProtocolHarness {
 }
 
 impl RuntimeProtocolHarness {
+    pub fn resident() -> Self {
+        Self {
+            runtime: Runtime::for_tests(),
+            protocol_session: RuntimeProtocolSession::resident_app(),
+        }
+    }
+
     pub fn resident_with_in_memory_vault(bytes: Vec<u8>) -> Self {
         Self::with_protocol_session(bytes, RuntimeProtocolSession::resident_app())
     }

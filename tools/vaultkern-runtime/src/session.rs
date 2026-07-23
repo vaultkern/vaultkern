@@ -6,6 +6,7 @@ use vaultkern_core::{SaveProfile, TransformedKey, Vault};
 use vaultkern_runtime_protocol::{SessionStateDto, VaultSourceStatusDto};
 
 use crate::providers::local_file::VaultSourceFingerprint;
+use crate::providers::provider::ProviderRevision;
 use crate::unlock::MasterCredentialShape;
 
 #[derive(Debug, Clone, Default)]
@@ -65,6 +66,7 @@ pub(crate) struct LoadedVault {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
     pub(crate) baseline_fingerprint: VaultSourceFingerprint,
+    pub(crate) provider_revision: Option<ProviderRevision>,
     pub(crate) credential_shape: MasterCredentialShape,
     pub(crate) save_profile: SaveProfile,
     pub(crate) requires_source_migration: bool,
@@ -239,6 +241,7 @@ impl VaultSession {
 mod tests {
     use super::{LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id};
     use crate::providers::local_file::VaultSourceFingerprint;
+    use crate::providers::provider::ProviderRevision;
     use crate::unlock::MasterCredentialShape;
     use vaultkern_core::{SaveProfile, TransformedKey, Vault};
     use vaultkern_runtime_protocol::VaultSourceStatusDto;
@@ -259,6 +262,7 @@ mod tests {
         name: String,
         bytes: Vec<u8>,
         baseline_fingerprint: VaultSourceFingerprint,
+        provider_revision: Option<ProviderRevision>,
         save_profile: SaveProfile,
         requires_source_migration: bool,
         source_status: Option<VaultSourceStatusDto>,
@@ -272,6 +276,7 @@ mod tests {
             name,
             bytes,
             baseline_fingerprint,
+            provider_revision,
             credential_shape,
             save_profile,
             requires_source_migration,
@@ -286,6 +291,7 @@ mod tests {
             name: name.clone(),
             bytes: bytes.clone(),
             baseline_fingerprint: baseline_fingerprint.clone(),
+            provider_revision: provider_revision.clone(),
             save_profile: save_profile.clone(),
             requires_source_migration: *requires_source_migration,
             source_status: source_status.clone(),
@@ -387,6 +393,7 @@ mod tests {
                 size_bytes: 2,
                 modified_at: Some(u64::from(marker)),
             },
+            provider_revision: None,
             credential_shape: MasterCredentialShape {
                 has_password: true,
                 has_key_file: true,

@@ -4,6 +4,9 @@ use super::durable_file::{
     path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_parent,
     sync_published_target, unique_sibling_path, write_verified_temp,
 };
+use super::provider::{
+    Provider, ProviderCommit, ProviderError, ProviderRevision, ProviderSnapshot,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
@@ -14,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 const LOCAL_WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const LOCAL_PROVIDER_REVISION_PREFIX: &[u8] = b"local-file:v1:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFileSnapshot {
@@ -28,11 +32,17 @@ pub struct VaultSourceFingerprint {
     pub modified_at: Option<u64>,
 }
 
+#[derive(Clone)]
 pub struct LocalFileVaultSourceProvider {
     write_faults: DurableFaultInjector,
     writer_lock_timeout: Duration,
     #[cfg(test)]
     before_write: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+pub struct LocalFileProvider {
+    source: LocalFileVaultSourceProvider,
+    path: PathBuf,
 }
 
 impl Default for LocalFileVaultSourceProvider {
@@ -99,6 +109,13 @@ impl std::error::Error for LocalFileCommitError {
 }
 
 impl LocalFileVaultSourceProvider {
+    pub fn bind(&self, path: impl Into<PathBuf>) -> LocalFileProvider {
+        LocalFileProvider {
+            source: self.clone(),
+            path: path.into(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_before_write_hook(
         before_write: std::sync::Arc<dyn Fn() + Send + Sync>,
@@ -172,6 +189,113 @@ impl LocalFileVaultSourceProvider {
         }
         let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
         transaction.commit_inner(expected, bytes, &self.write_faults)
+    }
+}
+
+impl LocalFileProvider {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        LocalFileVaultSourceProvider::default().bind(path)
+    }
+
+    fn path(&self) -> Result<&str, ProviderError> {
+        self.path
+            .to_str()
+            .ok_or_else(|| ProviderError::Unavailable {
+                message: "local vault path is not valid UTF-8".into(),
+            })
+    }
+
+    fn revision(fingerprint: &VaultSourceFingerprint) -> ProviderRevision {
+        let encoded =
+            serde_json::to_vec(fingerprint).expect("VaultSourceFingerprint must serialize");
+        let mut revision = Vec::with_capacity(LOCAL_PROVIDER_REVISION_PREFIX.len() + encoded.len());
+        revision.extend_from_slice(LOCAL_PROVIDER_REVISION_PREFIX);
+        revision.extend_from_slice(&encoded);
+        ProviderRevision::from_opaque_bytes(revision)
+    }
+
+    fn fingerprint(revision: &ProviderRevision) -> Result<VaultSourceFingerprint, ProviderError> {
+        let encoded = revision
+            .opaque_bytes()
+            .strip_prefix(LOCAL_PROVIDER_REVISION_PREFIX)
+            .ok_or_else(|| ProviderError::StaleRevision {
+                message: "the expected revision belongs to another Provider".into(),
+            })?;
+        serde_json::from_slice(encoded).map_err(|_| ProviderError::StaleRevision {
+            message: "the expected local-file revision is invalid".into(),
+        })
+    }
+}
+
+impl Provider for LocalFileProvider {
+    fn read(&self) -> Result<ProviderSnapshot, ProviderError> {
+        let snapshot =
+            self.source
+                .read_snapshot(self.path()?)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::NotFound => ProviderError::NotFound {
+                        message: error.to_string(),
+                    },
+                    _ => ProviderError::Unavailable {
+                        message: error.to_string(),
+                    },
+                })?;
+        Ok(ProviderSnapshot {
+            revision: Self::revision(&snapshot.fingerprint),
+            bytes: snapshot.bytes,
+        })
+    }
+
+    fn publish(
+        &self,
+        expected: &ProviderRevision,
+        bytes: &[u8],
+    ) -> Result<ProviderCommit, ProviderError> {
+        let fingerprint = Self::fingerprint(expected)?;
+        match self
+            .source
+            .write_if_unchanged(self.path()?, &fingerprint, bytes)
+        {
+            Ok(commit) => Ok(ProviderCommit {
+                revision: Self::revision(&commit.fingerprint),
+                warnings: commit.warnings,
+            }),
+            Err(LocalFileCommitError::Conflict { message }) => {
+                Err(ProviderError::StaleRevision { message })
+            }
+            Err(LocalFileCommitError::BeforePublish { source }) => {
+                Err(ProviderError::Unavailable {
+                    message: format!("local vault write failed before publish: {source}"),
+                })
+            }
+            Err(LocalFileCommitError::OutcomeUnknown { source }) => {
+                match self.source.read_snapshot(self.path()?) {
+                    Ok(snapshot) if snapshot.bytes == bytes => Ok(ProviderCommit {
+                        revision: Self::revision(&snapshot.fingerprint),
+                        warnings: vec![format!(
+                            "local vault Publication initially had an unknown outcome but readback confirmed the intended generation: {source}"
+                        )],
+                    }),
+                    Ok(snapshot) if same_content(&snapshot.fingerprint, &fingerprint) => {
+                        Err(ProviderError::Unavailable {
+                            message: format!(
+                                "{source}; readback confirmed that the previous generation remains active"
+                            ),
+                        })
+                    }
+                    Ok(_) => Err(ProviderError::OutcomeUnknown {
+                        message: format!(
+                            "{source}; readback found a third generation instead of either the expected or intended bytes"
+                        ),
+                    }),
+                    Err(readback_error) => Err(ProviderError::OutcomeUnknown {
+                        message: format!(
+                            "{source}; independent outcome readback failed: {readback_error}"
+                        ),
+                    }),
+                }
+            }
+        }
     }
 }
 

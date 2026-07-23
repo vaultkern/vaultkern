@@ -81,6 +81,7 @@ use crate::providers::onedrive::{
     OneDriveVaultSourceProvider, is_onedrive_item_not_found,
 };
 use crate::providers::onedrive_token_store::OneDriveRefreshTokenStore;
+use crate::providers::provider::{Provider, ProviderError, ProviderRevision};
 use crate::providers::remote_cache::{
     GenericPendingKind, PendingRemoteCacheChain, PendingRemoteCacheChainError,
     PendingRemoteCacheCompletion, RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry,
@@ -188,6 +189,7 @@ fn entry_detail_matches_fields(detail: &EntryDetailDto, fields: &EntryFieldsDto)
 struct LoadedSourceSnapshot {
     bytes: Option<Vec<u8>>,
     fingerprint: VaultSourceFingerprint,
+    provider_revision: Option<ProviderRevision>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -950,10 +952,12 @@ impl Runtime {
     fn load_local_vault_snapshot(&mut self, path: &str) -> Result<VaultHandleDto> {
         let snapshot = self
             .local_files
-            .read_snapshot(path)
+            .bind(path)
+            .read()
             .with_context(|| format!("failed to read vault: {path}"))?;
         let bytes = snapshot.bytes;
-        let baseline_fingerprint = snapshot.fingerprint;
+        let baseline_fingerprint = fingerprint_for_cached_bytes(&bytes, 0);
+        let provider_revision = snapshot.revision;
         let vault_id = path.to_owned();
         self.synced_bases
             .store(&vault_id, &bytes)
@@ -979,6 +983,7 @@ impl Runtime {
                 name: name.clone(),
                 bytes,
                 baseline_fingerprint,
+                provider_revision: Some(provider_revision),
                 credential_shape: MasterCredentialShape {
                     has_password: false,
                     has_key_file: false,
@@ -1242,6 +1247,7 @@ impl Runtime {
                         name: name.clone(),
                         bytes,
                         baseline_fingerprint,
+                        provider_revision: None,
                         credential_shape: MasterCredentialShape {
                             has_password: false,
                             has_key_file: false,
@@ -6549,6 +6555,7 @@ impl Runtime {
             Vec::new()
         };
         loaded.baseline_fingerprint = fingerprint;
+        loaded.provider_revision = None;
         loaded.save_profile = save_profile;
         loaded.requires_source_migration = false;
         if let Some(source_status) = source_status {
@@ -6665,6 +6672,7 @@ impl Runtime {
         let (
             key,
             baseline_fingerprint,
+            baseline_provider_revision,
             save_profile,
             source,
             display_name,
@@ -6678,6 +6686,7 @@ impl Runtime {
             (
                 transformed_key_from_loaded_vault(loaded)?,
                 loaded.baseline_fingerprint.clone(),
+                loaded.provider_revision.clone(),
                 loaded.save_profile.clone(),
                 loaded.source.clone(),
                 loaded.name.clone(),
@@ -6703,7 +6712,12 @@ impl Runtime {
         };
         let current = match self.read_current_snapshot(vault_id, Some(&baseline_fingerprint)) {
             Ok(current) => current,
-            Err(error) if error_chain_has_io_kind(&error, std::io::ErrorKind::NotFound) => {
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<ProviderError>(),
+                    Some(ProviderError::NotFound { .. })
+                ) =>
+            {
                 let (bytes, verified_vault) =
                     self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
                 return self.local_conflict_copy_result(
@@ -6719,7 +6733,37 @@ impl Runtime {
             }
         };
 
-        if current.fingerprint != baseline_fingerprint {
+        let current_provider_revision = current
+            .provider_revision
+            .expect("Local File snapshots always carry a Provider Revision");
+        let expected_provider_revision = match baseline_provider_revision {
+            Some(expected) if expected == current_provider_revision => expected,
+            Some(_) => {
+                let (bytes, verified_vault) =
+                    self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
+                return self.local_conflict_copy_result(
+                    vault_id,
+                    &source_path,
+                    &bytes,
+                    verified_vault,
+                );
+            }
+            None if same_content_fingerprint(&current.fingerprint, &baseline_fingerprint) => {
+                current_provider_revision
+            }
+            None => {
+                let (bytes, verified_vault) =
+                    self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
+                return self.local_conflict_copy_result(
+                    vault_id,
+                    &source_path,
+                    &bytes,
+                    verified_vault,
+                );
+            }
+        };
+
+        if !same_content_fingerprint(&current.fingerprint, &baseline_fingerprint) {
             let (bytes, verified_vault) =
                 self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
             return self.local_conflict_copy_result(vault_id, &source_path, &bytes, verified_vault);
@@ -6737,26 +6781,27 @@ impl Runtime {
                 .with_context(|| format!("failed to save vault: {vault_id}"))?
         };
 
-        let next_fingerprint = match self.write_local_source(vault_id, &bytes, &current.fingerprint)
-        {
-            Ok(fingerprint) => fingerprint,
-            Err(error)
-                if matches!(
-                    error.downcast_ref::<LocalFileCommitError>(),
-                    Some(LocalFileCommitError::Conflict { .. })
-                ) =>
-            {
-                return self.local_conflict_copy_result(
-                    vault_id,
-                    &source_path,
-                    &bytes,
-                    verified_vault,
-                );
-            }
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to write vault: {vault_id}"));
-            }
-        };
+        let (next_provider_revision, next_fingerprint) =
+            match self.write_local_source(vault_id, &bytes, &expected_provider_revision) {
+                Ok(next) => next,
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<ProviderError>(),
+                        Some(ProviderError::StaleRevision { .. })
+                    ) =>
+                {
+                    return self.local_conflict_copy_result(
+                        vault_id,
+                        &source_path,
+                        &bytes,
+                        verified_vault,
+                    );
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to write vault: {vault_id}"));
+                }
+            };
         let mut warnings = Vec::new();
         let retain_committed_bytes = match self.session_bases.store(vault_id, &bytes) {
             Ok(()) => false,
@@ -6785,6 +6830,7 @@ impl Runtime {
                 Vec::new()
             };
             loaded.baseline_fingerprint = next_fingerprint;
+            loaded.provider_revision = Some(next_provider_revision);
             loaded.requires_source_migration = false;
         }
         if !warnings.is_empty() {
@@ -9043,11 +9089,13 @@ impl Runtime {
             VaultSource::LocalPath(path) => {
                 let snapshot = self
                     .local_files
-                    .read_snapshot(path)
+                    .bind(path)
+                    .read()
                     .with_context(|| format!("failed to read current vault source: {path}"))?;
                 Ok(LoadedSourceSnapshot {
+                    fingerprint: fingerprint_for_cached_bytes(&snapshot.bytes, 0),
                     bytes: Some(snapshot.bytes),
-                    fingerprint: snapshot.fingerprint,
+                    provider_revision: Some(snapshot.revision),
                 })
             }
             VaultSource::OneDriveItem { drive_id, item_id } => {
@@ -9057,6 +9105,7 @@ impl Runtime {
                         return Ok(LoadedSourceSnapshot {
                             bytes: None,
                             fingerprint: baseline.clone(),
+                            provider_revision: None,
                         });
                     }
                 }
@@ -9066,6 +9115,7 @@ impl Runtime {
                 Ok(LoadedSourceSnapshot {
                     bytes: Some(snapshot.bytes),
                     fingerprint: snapshot.fingerprint,
+                    provider_revision: None,
                 })
             }
         }
@@ -9075,8 +9125,8 @@ impl Runtime {
         &mut self,
         vault_id: &str,
         bytes: &[u8],
-        expected: &VaultSourceFingerprint,
-    ) -> Result<VaultSourceFingerprint> {
+        expected: &ProviderRevision,
+    ) -> Result<(ProviderRevision, VaultSourceFingerprint)> {
         let source = self
             .vault_session
             .find_loaded(vault_id)
@@ -9086,52 +9136,9 @@ impl Runtime {
         let VaultSource::LocalPath(path) = source else {
             anyhow::bail!("OneDrive writes require the CAS save path")
         };
-        match self.local_files.write_if_unchanged(&path, expected, bytes) {
-            Ok(commit) => {
-                self.record_local_save_warnings(commit.warnings);
-                Ok(commit.fingerprint)
-            }
-            Err(LocalFileCommitError::OutcomeUnknown { source }) => {
-                match self.local_files.read_snapshot(&path) {
-                    Ok(snapshot) if snapshot.bytes == bytes => {
-                        self.record_local_save_warnings(vec![format!(
-                            "local vault publish initially had an unknown outcome but readback confirmed the intended generation: {source}"
-                        )]);
-                        Ok(snapshot.fingerprint)
-                    }
-                    Ok(snapshot) if same_content_fingerprint(&snapshot.fingerprint, expected) => {
-                        Err(LocalFileCommitError::BeforePublish {
-                            source: std::io::Error::new(
-                                source.kind(),
-                                format!(
-                                    "{source}; readback confirmed that the previous generation remains active"
-                                ),
-                            ),
-                        }
-                        .into())
-                    }
-                    Ok(_) => Err(LocalFileCommitError::OutcomeUnknown {
-                        source: std::io::Error::new(
-                            source.kind(),
-                            format!(
-                                "{source}; readback found a third generation instead of either the expected or intended bytes"
-                            ),
-                        ),
-                    }
-                    .into()),
-                    Err(readback_error) => Err(LocalFileCommitError::OutcomeUnknown {
-                        source: std::io::Error::new(
-                            source.kind(),
-                            format!(
-                                "{source}; independent outcome readback failed: {readback_error}"
-                            ),
-                        ),
-                    }
-                    .into()),
-                }
-            }
-            Err(error) => Err(error.into()),
-        }
+        let commit = self.local_files.bind(path).publish(expected, bytes)?;
+        self.record_local_save_warnings(commit.warnings);
+        Ok((commit.revision, fingerprint_for_cached_bytes(bytes, 0)))
     }
 
     fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
@@ -11017,14 +11024,6 @@ fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
     diff == 0
 }
 
-fn error_chain_has_io_kind(error: &anyhow::Error, kind: std::io::ErrorKind) -> bool {
-    error.chain().any(|cause| {
-        cause
-            .downcast_ref::<std::io::Error>()
-            .is_some_and(|io_error| io_error.kind() == kind)
-    })
-}
-
 fn ensure_primary_passkey_save(response: &RuntimeResponse) -> Result<()> {
     let RuntimeResponse::SaveVaultResult(result) = response else {
         anyhow::bail!("passkey mutation received an unexpected save response: {response:?}");
@@ -11061,12 +11060,20 @@ fn write_runtime_warning(warning: &str) {
 }
 
 fn classified_runtime_error_response(error: &anyhow::Error) -> Option<RuntimeResponse> {
-    let code = match error.downcast_ref::<LocalFileCommitError>() {
-        Some(LocalFileCommitError::Conflict { .. }) => "conflict",
-        Some(LocalFileCommitError::BeforePublish { .. }) => "persist_io_unavailable",
-        Some(LocalFileCommitError::OutcomeUnknown { .. }) => "persist_outcome_unknown",
-        None if error.is::<PendingAutofillSyncRequired>() => "pending_autofill_sync_required",
-        None => return None,
+    let code = if let Some(provider_error) = error.downcast_ref::<ProviderError>() {
+        match provider_error {
+            ProviderError::StaleRevision { .. } | ProviderError::NotFound { .. } => "conflict",
+            ProviderError::Unavailable { .. } => "persist_io_unavailable",
+            ProviderError::OutcomeUnknown { .. } => "persist_outcome_unknown",
+        }
+    } else {
+        match error.downcast_ref::<LocalFileCommitError>() {
+            Some(LocalFileCommitError::Conflict { .. }) => "conflict",
+            Some(LocalFileCommitError::BeforePublish { .. }) => "persist_io_unavailable",
+            Some(LocalFileCommitError::OutcomeUnknown { .. }) => "persist_outcome_unknown",
+            None if error.is::<PendingAutofillSyncRequired>() => "pending_autofill_sync_required",
+            None => return None,
+        }
     };
     Some(RuntimeResponse::Error(ErrorDto {
         code: code.into(),
@@ -13456,21 +13463,26 @@ mod tests {
     }
 
     #[test]
-    fn local_write_returns_the_commit_fingerprint() {
+    fn local_write_returns_the_provider_revision() {
         let mut runtime = Runtime::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
         let expected = runtime
             .local_files
-            .read_snapshot(&opened.path)
+            .bind(&opened.path)
+            .read()
             .unwrap()
-            .fingerprint;
+            .revision;
 
-        let committed = runtime
+        let (committed_revision, committed_fingerprint) = runtime
             .write_local_source(&opened.vault_id, b"candidate-generation", &expected)
             .unwrap();
-        let visible = runtime.local_files.read_snapshot(&opened.path).unwrap();
+        let visible = runtime.local_files.bind(&opened.path).read().unwrap();
 
-        assert_eq!(committed, visible.fingerprint);
+        assert_eq!(committed_revision, visible.revision);
+        assert!(same_content_fingerprint(
+            &committed_fingerprint,
+            &fingerprint_for_cached_bytes(&visible.bytes, 0)
+        ));
         assert_eq!(visible.bytes, b"candidate-generation");
     }
 

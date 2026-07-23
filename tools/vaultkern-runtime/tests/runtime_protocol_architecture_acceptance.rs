@@ -141,6 +141,70 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
 }
 
 #[test]
+fn local_file_flow_publishes_through_the_runtime_protocol() {
+    let directory = tempfile::tempdir().expect("temporary local Provider directory");
+    let path = directory.path().join("local-provider.kdbx");
+    std::fs::write(&path, empty_vault_bytes()).expect("write local Provider snapshot");
+    let mut harness = RuntimeProtocolHarness::resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec!["runtime-core".into(), "resident-app".into()],
+    });
+
+    let vault_id = match harness.command(RuntimeCommand::OpenLocalVault {
+        path: path.to_string_lossy().into_owned(),
+    }) {
+        RuntimeResponse::VaultOpened(handle) => handle.vault_id,
+        _ => panic!("expected opened local vault"),
+    };
+    assert!(matches!(
+        harness.command(RuntimeCommand::UnlockWithPassword {
+            vault_id: vault_id.clone(),
+            password: "demo-password".into(),
+        }),
+        RuntimeResponse::SessionState(state) if state.unlocked
+    ));
+    let root_id = match harness.command(RuntimeCommand::ListGroups {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::GroupTree(groups) => groups.root.id,
+        _ => panic!("expected group tree"),
+    };
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateEntry {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id,
+            entry_id: None,
+            title: "Local Provider entry".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://local-provider.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::EntryDetail(_)
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::SaveVault { vault_id }),
+        RuntimeResponse::SaveVaultResult(result)
+            if result.status == SaveVaultStatusDto::Saved
+    ));
+
+    let published = std::fs::read(path).expect("read published local Provider snapshot");
+    let vault = KeepassCore::new()
+        .load_database(&published, &key())
+        .expect("decode published local Provider snapshot")
+        .vault;
+    assert!(
+        vault
+            .root
+            .entries
+            .iter()
+            .any(|entry| entry.title == "Local Provider entry")
+    );
+}
+
+#[test]
 fn harness_keeps_browser_commands_behind_the_protocol_session_boundary() {
     let mut harness = RuntimeProtocolHarness::browser_with_in_memory_vault(empty_vault_bytes());
     harness.command(RuntimeCommand::Handshake {
