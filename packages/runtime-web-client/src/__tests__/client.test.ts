@@ -1578,7 +1578,7 @@ describe("RuntimeClient", () => {
     }
   });
 
-  it("sets and clears entry passkeys through dedicated helpers", async () => {
+  it("commits TOTP and passkey mutations without follow-up saves", async () => {
     const passkey = {
       username: "alice@example.com",
       credentialId: "credential-base64url",
@@ -1591,8 +1591,7 @@ describe("RuntimeClient", () => {
     const transport = {
       send: vi
         .fn()
-        .mockResolvedValueOnce({
-          type: "entry_detail",
+        .mockResolvedValueOnce(committedEntryMutation({
           id: "entry-1",
           title: "Example",
           username: "alice",
@@ -1601,10 +1600,18 @@ describe("RuntimeClient", () => {
           notes: "demo",
           totp: null,
           passkey
-        })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
-        .mockResolvedValueOnce({
-          type: "entry_detail",
+        }))
+        .mockResolvedValueOnce(committedEntryMutation({
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          password: "secret",
+          url: "https://example.com",
+          notes: "demo",
+          totp: null,
+          passkey
+        }))
+        .mockResolvedValueOnce(committedEntryMutation({
           id: "entry-1",
           title: "Example",
           username: "alice",
@@ -1613,17 +1620,35 @@ describe("RuntimeClient", () => {
           notes: "demo",
           totp: null,
           passkey: null
-        })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+        }))
     };
 
     const client = new RuntimeClient(transport);
-    await client.setEntryPasskey("vault-1", "entry-1", passkey);
-    await client.clearEntryPasskey("vault-1", "entry-1");
+    await client.clearEntryTotp("vault-1", "entry-1", "totp-operation");
+    await client.setEntryPasskey(
+      "vault-1",
+      "entry-1",
+      passkey,
+      "set-passkey-operation"
+    );
+    await client.clearEntryPasskey(
+      "vault-1",
+      "entry-1",
+      "clear-passkey-operation"
+    );
 
     expect(transport.send).toHaveBeenNthCalledWith(1, {
       version: 2,
-      operationId: expect.any(String),
+      operationId: "totp-operation",
+      command: {
+        type: "clear_entry_totp",
+        vault_id: "vault-1",
+        entry_id: "entry-1"
+      }
+    });
+    expect(transport.send).toHaveBeenNthCalledWith(2, {
+      version: 2,
+      operationId: "set-passkey-operation",
       command: {
         type: "set_entry_passkey",
         vault_id: "vault-1",
@@ -1631,25 +1656,16 @@ describe("RuntimeClient", () => {
         passkey
       }
     });
-    expect(transport.send).toHaveBeenNthCalledWith(2, {
-      version: 2,
-      operationId: expect.any(String),
-      command: { type: "save_vault", vault_id: "vault-1" }
-    });
     expect(transport.send).toHaveBeenNthCalledWith(3, {
       version: 2,
-      operationId: expect.any(String),
+      operationId: "clear-passkey-operation",
       command: {
         type: "clear_entry_passkey",
         vault_id: "vault-1",
         entry_id: "entry-1"
       }
     });
-    expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 2,
-      operationId: expect.any(String),
-      command: { type: "save_vault", vault_id: "vault-1" }
-    });
+    expect(transport.send).toHaveBeenCalledTimes(3);
   });
 
   it("saves a vault and returns the save status", async () => {
@@ -1819,11 +1835,7 @@ describe("RuntimeClient", () => {
           protectInMemory: true
           };
         }
-        if (request.command.type === "save_vault") {
-          return { type: "save_vault_result", status: "saved" };
-        }
-        return {
-          type: "entry_detail",
+        return committedEntryMutation({
           id: "entry-1",
           title: "Example",
           username: "alice",
@@ -1832,7 +1844,7 @@ describe("RuntimeClient", () => {
           notes: "demo",
           totp: null,
           attachments: []
-        };
+        });
       })
     };
 
@@ -1878,11 +1890,6 @@ describe("RuntimeClient", () => {
     expect(transport.send).toHaveBeenNthCalledWith(3, {
       version: 2,
       operationId: expect.any(String),
-      command: { type: "save_vault", vault_id: "vault-1" }
-    });
-    expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 2,
-      operationId: expect.any(String),
       command: {
         type: "update_entry_attachment_metadata",
         vault_id: "vault-1",
@@ -1892,7 +1899,7 @@ describe("RuntimeClient", () => {
         protect_in_memory: false
       }
     });
-    expect(transport.send).toHaveBeenNthCalledWith(6, {
+    expect(transport.send).toHaveBeenNthCalledWith(4, {
       version: 2,
       operationId: expect.any(String),
       command: {
@@ -1903,7 +1910,7 @@ describe("RuntimeClient", () => {
         data_base64: "dXBkYXRlZA=="
       }
     });
-    expect(transport.send).toHaveBeenNthCalledWith(8, {
+    expect(transport.send).toHaveBeenNthCalledWith(5, {
       version: 2,
       operationId: expect.any(String),
       command: {
@@ -1913,6 +1920,7 @@ describe("RuntimeClient", () => {
         name: "backup-renamed.txt"
       }
     });
+    expect(transport.send).toHaveBeenCalledTimes(5);
   });
 
   it("reads entry history through dedicated helpers", async () => {

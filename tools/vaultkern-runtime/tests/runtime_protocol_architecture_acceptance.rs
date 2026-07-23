@@ -2,11 +2,12 @@ mod support;
 
 use support::RuntimeProtocolHarness;
 use vaultkern_core::{
-    CompositeKey, EntryCreate, KeepassCore, SaveProfile, Vault, derive_transformed_key,
-    save_kdbx_with_transformed_key,
+    CompositeKey, EntryCreate, EntryCustomFieldInput, KeepassCore, PasskeyRecord, SaveProfile,
+    TotpAlgorithm, TotpSpec, Vault, derive_transformed_key, save_kdbx_with_transformed_key,
 };
 use vaultkern_runtime_protocol::{
-    CommitStatusDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+    CommitStatusDto, EntryCustomFieldDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse,
+    SaveVaultStatusDto,
 };
 
 fn key() -> CompositeKey {
@@ -84,6 +85,90 @@ fn foreign_remote_head_bytes(base_bytes: &[u8]) -> (Vec<u8>, String) {
     )
     .expect("encode same-key foreign Remote Head");
     (bytes, entry.id)
+}
+
+fn vault_with_entry_adjacent_data_bytes() -> (Vec<u8>, String) {
+    let core = KeepassCore::new();
+    let mut vault = Vault::empty("Entry-adjacent Acceptance");
+    let root_id = vault.root.id.to_string();
+    let entry_id = core
+        .add_entry(
+            &mut vault,
+            &root_id,
+            EntryCreate {
+                title: "Adjacent account".into(),
+                username: "alice".into(),
+                password: "base-password".into(),
+                url: "https://adjacent.example".into(),
+                notes: String::new(),
+            },
+        )
+        .expect("create adjacent mutation entry")
+        .id;
+    core.set_entry_totp(
+        &mut vault,
+        &entry_id,
+        TotpSpec {
+            secret_base32: "JBSWY3DPEHPK3PXP".into(),
+            algorithm: TotpAlgorithm::Sha1,
+            digits: 6,
+            period_seconds: 30,
+            issuer: Some("VaultKern".into()),
+            account_name: Some("alice".into()),
+        },
+    )
+    .expect("seed TOTP");
+    core.upsert_entry_custom_field(
+        &mut vault,
+        &entry_id,
+        EntryCustomFieldInput {
+            key: "Environment".into(),
+            value: "staging".into(),
+            protected: true,
+        },
+    )
+    .expect("seed custom field");
+    core.set_entry_passkey(
+        &mut vault,
+        &entry_id,
+        PasskeyRecord {
+            username: "alice@example.com".into(),
+            credential_id: "Y3JlZGVudGlhbA".into(),
+            generated_user_id: None,
+            private_key_pem: String::from("acceptance-private-key").into(),
+            relying_party: "example.com".into(),
+            user_handle: Some("dXNlci0x".into()),
+            backup_eligible: true,
+            backup_state: true,
+        },
+    )
+    .expect("seed Entry passkey");
+    let bytes = core
+        .save_kdbx(&vault, &key(), SaveProfile::recommended())
+        .expect("encode entry-adjacent acceptance vault");
+    (bytes, entry_id)
+}
+
+fn expect_adjacent_commit(
+    response: RuntimeResponse,
+    expected_status: SaveVaultStatusDto,
+) -> vaultkern_runtime_protocol::EntryDetailDto {
+    let result = match response {
+        RuntimeResponse::EntryMutationResult(result) => result,
+        RuntimeResponse::Error(error) => panic!(
+            "expected committed entry-adjacent mutation, got error {}: {}",
+            error.code, error.message
+        ),
+        RuntimeResponse::EntryDetail(_) => {
+            panic!("expected committed entry-adjacent mutation, got entry_detail")
+        }
+        _ => panic!("expected committed entry-adjacent mutation, got another response type"),
+    };
+    assert_eq!(result.commit, CommitStatusDto::Committed);
+    assert_eq!(result.publication.status, expected_status);
+    result
+        .entry
+        .expect("entry-adjacent mutation returns detail")
 }
 
 #[test]
@@ -909,6 +994,302 @@ fn pending_publication_survives_lock_restart_later_commit_and_retry() {
         harness.provider_write_count(),
         writes_after_confirmation,
         "confirmed Publication clears the durable pending write"
+    );
+}
+
+#[test]
+fn entry_adjacent_protocol_intents_commit_and_publish_without_follow_up_save() {
+    let core = KeepassCore::new();
+    let (bytes, entry_id) = vault_with_entry_adjacent_data_bytes();
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+            "passkey-ceremonies".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+    let writes_before = harness.provider_write_count();
+
+    let detail = expect_adjacent_commit(
+        harness.command(RuntimeCommand::ClearEntryTotp {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    assert!(detail.totp.is_none());
+
+    let detail = expect_adjacent_commit(
+        harness.command(RuntimeCommand::AddEntryAttachment {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            name: "recovery.txt".into(),
+            data_base64: "aGVsbG8=".into(),
+            protect_in_memory: true,
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    assert!(
+        detail
+            .attachments
+            .iter()
+            .any(|attachment| attachment.name == "recovery.txt" && attachment.protect_in_memory)
+    );
+
+    let detail = expect_adjacent_commit(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Adjacent account".into(),
+            username: "alice".into(),
+            password: "base-password".into(),
+            url: "https://adjacent.example".into(),
+            notes: "custom field committed".into(),
+            totp_uri: None,
+            custom_fields: vec![EntryCustomFieldDto {
+                key: "Environment".into(),
+                value: "production".into(),
+                protected: true,
+            }],
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    assert!(detail.custom_fields.iter().any(|field| {
+        field.key == "Environment" && field.value == "production" && field.protected
+    }));
+
+    let detail = expect_adjacent_commit(
+        harness.command(RuntimeCommand::ClearEntryPasskey {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    assert!(detail.passkey.is_none());
+    assert_eq!(harness.provider_write_count(), writes_before + 4);
+
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode published adjacent mutations")
+        .vault;
+    assert!(
+        core.project_entry_totp(&published, &entry_id)
+            .expect("project published TOTP")
+            .is_none()
+    );
+    assert!(
+        core.project_entry_passkey(&published, &entry_id)
+            .expect("project published passkey")
+            .is_none()
+    );
+    assert!(
+        core.list_entry_custom_fields(&published, &entry_id)
+            .expect("project published custom fields")
+            .iter()
+            .any(|field| {
+                field.key == "Environment" && field.value == "production" && field.protected
+            })
+    );
+    assert!(
+        core.list_entry_attachments(&published, &entry_id)
+            .expect("project published attachments")
+            .iter()
+            .any(|attachment| attachment.name == "recovery.txt" && attachment.protect_in_memory)
+    );
+}
+
+#[test]
+fn entry_adjacent_pending_commits_survive_restart_and_publish_in_receive_order() {
+    let core = KeepassCore::new();
+    let (bytes, entry_id) = vault_with_entry_adjacent_data_bytes();
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+            "passkey-ceremonies".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+    let remote_before = harness.provider_snapshot();
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_adjacent_commit(
+        harness.command(RuntimeCommand::ClearEntryTotp {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_adjacent_commit(
+        harness.command(RuntimeCommand::AddEntryAttachment {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            name: "pending.txt".into(),
+            data_base64: "cGVuZGluZw==".into(),
+            protect_in_memory: true,
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_adjacent_commit(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            title: "Adjacent account".into(),
+            username: "alice".into(),
+            password: "latest-password".into(),
+            url: "https://adjacent.example".into(),
+            notes: "latest pending state".into(),
+            totp_uri: None,
+            custom_fields: vec![EntryCustomFieldDto {
+                key: "Environment".into(),
+                value: "pending-production".into(),
+                protected: true,
+            }],
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_adjacent_commit(
+        harness.command(RuntimeCommand::ClearEntryPasskey {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+    assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
+
+    harness.command(RuntimeCommand::LockSession);
+    harness.restart_resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+            "passkey-ceremonies".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            assert!(state.unlocked);
+            assert!(
+                state
+                    .source_status
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+            );
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted pending session, got {other:?}"),
+    };
+    let detail = match harness.command(RuntimeCommand::GetEntryDetail {
+        vault_id: restarted_vault_id.clone(),
+        entry_id: entry_id.clone(),
+    }) {
+        RuntimeResponse::EntryDetail(detail) => detail,
+        other => panic!("expected recovered adjacent entry, got {other:?}"),
+    };
+    assert_eq!(detail.password, "latest-password");
+    assert!(detail.totp.is_none());
+    assert!(detail.passkey.is_none());
+    assert!(detail.custom_fields.iter().any(|field| {
+        field.key == "Environment" && field.value == "pending-production" && field.protected
+    }));
+    assert!(
+        detail
+            .attachments
+            .iter()
+            .any(|attachment| attachment.name == "pending.txt" && attachment.protect_in_memory)
+    );
+
+    match harness.command(RuntimeCommand::RetryVaultSourceSync {
+        vault_id: restarted_vault_id.clone(),
+    }) {
+        RuntimeResponse::VaultSourceStatus(status) => {
+            assert_eq!(status.remote_state, "pending_sync", "{status:?}")
+        }
+        RuntimeResponse::Error(error) => {
+            panic!(
+                "retry adjacent Publication failed: {}: {}",
+                error.code, error.message
+            )
+        }
+        _ => panic!("retry adjacent Publication returned another response type"),
+    }
+    assert!(matches!(
+        harness.command(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: restarted_vault_id,
+        }),
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode retried adjacent Publication")
+        .vault;
+    let published_detail = core
+        .project_entry_detail(&published, &entry_id)
+        .expect("project retried adjacent entry");
+    assert_eq!(published_detail.password, "latest-password");
+    assert!(
+        core.project_entry_totp(&published, &entry_id)
+            .expect("project retried TOTP")
+            .is_none()
+    );
+    assert!(
+        core.project_entry_passkey(&published, &entry_id)
+            .expect("project retried passkey")
+            .is_none()
+    );
+    assert!(
+        core.list_entry_custom_fields(&published, &entry_id)
+            .expect("project retried custom fields")
+            .iter()
+            .any(|field| {
+                field.key == "Environment" && field.value == "pending-production" && field.protected
+            })
+    );
+    assert!(
+        core.list_entry_attachments(&published, &entry_id)
+            .expect("project retried attachments")
+            .iter()
+            .any(|attachment| attachment.name == "pending.txt" && attachment.protect_in_memory)
     );
 }
 

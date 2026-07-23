@@ -1125,13 +1125,11 @@ fn runtime_sets_and_clears_entry_passkey() {
             passkey: clone_test_passkey_update(&passkey),
         })
         .unwrap();
-    match updated {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.id, entry_id);
-            assert_eq!(detail.passkey.as_ref(), Some(&expected_passkey));
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(updated)
+        .entry
+        .expect("set passkey returns the committed entry");
+    assert_eq!(detail.id, entry_id);
+    assert_eq!(detail.passkey.as_ref(), Some(&expected_passkey));
 
     let detail = runtime
         .handle(RuntimeCommand::GetEntryDetail {
@@ -1163,12 +1161,10 @@ fn runtime_sets_and_clears_entry_passkey() {
             entry_id: entry_id.clone(),
         })
         .unwrap();
-    match cleared {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.passkey, None);
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(cleared)
+        .entry
+        .expect("clear passkey returns the committed entry");
+    assert_eq!(detail.passkey, None);
 
     let history = runtime
         .handle(RuntimeCommand::ListEntryHistory {
@@ -4861,15 +4857,13 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             protect_in_memory: true,
         })
         .unwrap();
-    match added {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.attachments.len(), 1);
-            assert_eq!(detail.attachments[0].name, "backup.txt");
-            assert_eq!(detail.attachments[0].size, 5);
-            assert!(detail.attachments[0].protect_in_memory);
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(added)
+        .entry
+        .expect("add attachment returns the committed entry");
+    assert_eq!(detail.attachments.len(), 1);
+    assert_eq!(detail.attachments[0].name, "backup.txt");
+    assert_eq!(detail.attachments[0].size, 5);
+    assert!(detail.attachments[0].protect_in_memory);
 
     let content = runtime
         .handle(RuntimeCommand::GetEntryAttachmentContent {
@@ -4898,16 +4892,14 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             protect_in_memory: false,
         })
         .unwrap();
-    match renamed {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.attachments.len(), 1);
-            assert_eq!(detail.attachments[0].name, "backup-renamed.txt");
-            assert!(!detail.attachments[0].protect_in_memory);
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(renamed)
+        .entry
+        .expect("rename attachment returns the committed entry");
+    assert_eq!(detail.attachments.len(), 1);
+    assert_eq!(detail.attachments[0].name, "backup-renamed.txt");
+    assert!(!detail.attachments[0].protect_in_memory);
 
-    runtime
+    let replaced = runtime
         .handle(RuntimeCommand::ReplaceEntryAttachmentContent {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
@@ -4915,6 +4907,10 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             data_base64: "dXBkYXRlZA==".into(),
         })
         .unwrap();
+    let detail = expect_committed_entry_mutation(replaced)
+        .entry
+        .expect("replace attachment content returns the committed entry");
+    assert_eq!(detail.attachments[0].size, 7);
     let replaced_content = runtime
         .handle(RuntimeCommand::GetEntryAttachmentContent {
             vault_id: handle.vault_id.clone(),
@@ -4940,12 +4936,10 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             name: "backup-renamed.txt".into(),
         })
         .unwrap();
-    match deleted {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert!(detail.attachments.is_empty());
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(deleted)
+        .entry
+        .expect("delete attachment returns the committed entry");
+    assert!(detail.attachments.is_empty());
 }
 
 #[test]

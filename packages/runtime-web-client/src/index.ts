@@ -762,13 +762,18 @@ export class RuntimeClient {
 
   async clearEntryTotp(
     vaultId: string,
-    entryId: string
+    entryId: string,
+    operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "clear_entry_totp",
-      vault_id: vaultId,
-      entry_id: entryId
-    });
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "clear_entry_totp",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      operationId,
+      true
+    );
   }
 
   async setEntryPasskey(
@@ -777,12 +782,16 @@ export class RuntimeClient {
     passkey: EntryPasskeyUpdate,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "set_entry_passkey",
-      vault_id: vaultId,
-      entry_id: entryId,
-      passkey
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "set_entry_passkey",
+        vault_id: vaultId,
+        entry_id: entryId,
+        passkey
+      },
+      operationId,
+      true
+    );
   }
 
   async clearEntryPasskey(
@@ -790,11 +799,15 @@ export class RuntimeClient {
     entryId: string,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "clear_entry_passkey",
-      vault_id: vaultId,
-      entry_id: entryId
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "clear_entry_passkey",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      operationId,
+      true
+    );
   }
 
   async deleteEntry(
@@ -865,14 +878,18 @@ export class RuntimeClient {
     input: EntryAttachmentInput,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "add_entry_attachment",
-      vault_id: vaultId,
-      entry_id: entryId,
-      name: input.name,
-      data_base64: input.dataBase64,
-      protect_in_memory: input.protectInMemory
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "add_entry_attachment",
+        vault_id: vaultId,
+        entry_id: entryId,
+        name: input.name,
+        data_base64: input.dataBase64,
+        protect_in_memory: input.protectInMemory
+      },
+      operationId,
+      true
+    );
   }
 
   async updateEntryAttachmentMetadata(
@@ -881,14 +898,18 @@ export class RuntimeClient {
     input: EntryAttachmentMetadataUpdate,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "update_entry_attachment_metadata",
-      vault_id: vaultId,
-      entry_id: entryId,
-      old_name: input.oldName,
-      new_name: input.newName,
-      protect_in_memory: input.protectInMemory
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "update_entry_attachment_metadata",
+        vault_id: vaultId,
+        entry_id: entryId,
+        old_name: input.oldName,
+        new_name: input.newName,
+        protect_in_memory: input.protectInMemory
+      },
+      operationId,
+      true
+    );
   }
 
   async replaceEntryAttachmentContent(
@@ -897,13 +918,17 @@ export class RuntimeClient {
     input: EntryAttachmentContentUpdate,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "replace_entry_attachment_content",
-      vault_id: vaultId,
-      entry_id: entryId,
-      name: input.name,
-      data_base64: input.dataBase64
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "replace_entry_attachment_content",
+        vault_id: vaultId,
+        entry_id: entryId,
+        name: input.name,
+        data_base64: input.dataBase64
+      },
+      operationId,
+      true
+    );
   }
 
   async deleteEntryAttachment(
@@ -912,12 +937,16 @@ export class RuntimeClient {
     name: string,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "delete_entry_attachment",
-      vault_id: vaultId,
-      entry_id: entryId,
-      name
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "delete_entry_attachment",
+        vault_id: vaultId,
+        entry_id: entryId,
+        name
+      },
+      operationId,
+      true
+    );
   }
 
   async listEntryHistory(

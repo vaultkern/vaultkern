@@ -5176,18 +5176,26 @@ impl Runtime {
                 plan,
             } => self.persist_autofill_mutation(transaction_id, operation_id, vault_id, plan),
             RuntimeCommand::ClearEntryTotp { vault_id, entry_id } => self
-                .clear_entry_totp(&vault_id, &entry_id)
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime.clear_entry_totp(&vault_id, &entry_id).map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::SetEntryPasskey {
                 vault_id,
                 entry_id,
                 passkey,
             } => self
-                .set_entry_passkey(&vault_id, &entry_id, passkey)
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .set_entry_passkey(&vault_id, &entry_id, passkey)
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::ClearEntryPasskey { vault_id, entry_id } => self
-                .clear_entry_passkey(&vault_id, &entry_id)
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime.clear_entry_passkey(&vault_id, &entry_id).map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::GetPasskeyUserVerificationCapability => {
                 Ok(RuntimeResponse::PasskeyUserVerificationCapability(
                     self.passkey_user_verification_capability(),
@@ -5228,8 +5236,18 @@ impl Runtime {
                 data_base64,
                 protect_in_memory,
             } => self
-                .add_entry_attachment(&vault_id, &entry_id, name, data_base64, protect_in_memory)
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .add_entry_attachment(
+                            &vault_id,
+                            &entry_id,
+                            name,
+                            data_base64,
+                            protect_in_memory,
+                        )
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::UpdateEntryAttachmentMetadata {
                 vault_id,
                 entry_id,
@@ -5237,29 +5255,41 @@ impl Runtime {
                 new_name,
                 protect_in_memory,
             } => self
-                .update_entry_attachment_metadata(
-                    &vault_id,
-                    &entry_id,
-                    &old_name,
-                    new_name,
-                    protect_in_memory,
-                )
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .update_entry_attachment_metadata(
+                            &vault_id,
+                            &entry_id,
+                            &old_name,
+                            new_name,
+                            protect_in_memory,
+                        )
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::ReplaceEntryAttachmentContent {
                 vault_id,
                 entry_id,
                 name,
                 data_base64,
             } => self
-                .replace_entry_attachment_content(&vault_id, &entry_id, &name, data_base64)
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .replace_entry_attachment_content(&vault_id, &entry_id, &name, data_base64)
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::DeleteEntryAttachment {
                 vault_id,
                 entry_id,
                 name,
             } => self
-                .delete_entry_attachment(&vault_id, &entry_id, &name)
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .delete_entry_attachment(&vault_id, &entry_id, &name)
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::SaveVault { vault_id } => self.save_vault_command(&vault_id),
             RuntimeCommand::GetDatabaseSettings { vault_id } => {
                 Ok(match self.get_database_settings(&vault_id) {
