@@ -139,6 +139,20 @@ function committedDatabaseSettings(
   };
 }
 
+function committedMutation<T>(
+  value: T,
+  status: "saved" | "merged" | "saved_to_cache" | "conflict_copy" = "saved"
+) {
+  return {
+    value,
+    saveResult: {
+      type: "save_vault_result" as const,
+      status
+    },
+    operationId: "11111111-1111-4111-8111-111111111111"
+  };
+}
+
 function createVaultSelectionMethods() {
   return {
     listRecentVaults: vi.fn(async () => []),
@@ -4163,9 +4177,9 @@ it("shows each group's own entry count instead of child count", async () => {
   expect(screen.getByRole("button", { name: /Personal/ })).toHaveTextContent("1");
 });
 
-it("edits an entry only after explicit save and confirms unsaved navigation", async () => {
+it("commits an entry edit without a follow-up save and confirms unsaved navigation", async () => {
   const saveVault = vi.fn(async () => undefined);
-  const updateEntryFields = vi.fn(async () => ({
+  const updateEntryFields = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-1",
     title: "Edited Title",
@@ -4294,11 +4308,8 @@ it("edits an entry only after explicit save and confirms unsaved navigation", as
       ]
     });
   });
-  await waitFor(() => {
-    expect(saveVault).toHaveBeenCalledWith("vault-1");
-  });
   expect(updateEntryFields).toHaveBeenCalledTimes(1);
-  expect(saveVault).toHaveBeenCalledTimes(1);
+  expect(saveVault).not.toHaveBeenCalled();
 });
 
 it("shows an animated saving indicator while entry changes are being saved", async () => {
@@ -5154,7 +5165,7 @@ it("shows remote cache info without failure copy before sync is retried", async 
   expect(screen.getByRole("button", { name: "Retry sync" })).toBeInTheDocument();
 });
 
-it("creates a new entry and deletes it after explicit confirmation", async () => {
+it("creates and deletes an entry without follow-up saves", async () => {
   const listEntries = vi
     .fn()
     .mockResolvedValueOnce([
@@ -5191,7 +5202,7 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
         groupId: "group-root"
       }
     ]);
-  const createEntry = vi.fn(async () => ({
+  const createEntry = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
     id: "entry-new",
     title: "Created",
@@ -5202,7 +5213,7 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
     totp: null,
     totpUri: null
   }));
-  const deleteEntry = vi.fn(async () => undefined);
+  const deleteEntry = vi.fn(async () => committedMutation(undefined));
   const saveVault = vi.fn(async () => undefined);
 
   const client = {
@@ -5262,9 +5273,7 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
       customFields: []
     });
   });
-  await waitFor(() => {
-    expect(saveVault).toHaveBeenCalledWith("vault-1");
-  });
+  expect(saveVault).not.toHaveBeenCalled();
 
   expect(await screen.findByRole("button", { name: "Created" })).toBeInTheDocument();
 
@@ -5275,9 +5284,7 @@ it("creates a new entry and deletes it after explicit confirmation", async () =>
   await waitFor(() => {
     expect(deleteEntry).toHaveBeenCalledWith("vault-1", "entry-new");
   });
-  await waitFor(() => {
-    expect(saveVault).toHaveBeenCalledTimes(2);
-  });
+  expect(saveVault).not.toHaveBeenCalled();
 });
 
 it("retries a failed create save without creating the entry again", async () => {

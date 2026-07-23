@@ -5,10 +5,11 @@ use vaultkern_core::{
 };
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
-    DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
-    DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
-    DatabaseSettingsUpdateDto, OptionalSettingUpdateDto, RuntimeCommand, RuntimeResponse,
-    SaveVaultResultDto, SaveVaultStatusDto,
+    CommitStatusDto, DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto,
+    DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
+    DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, EntryDetailDto,
+    OptionalSettingUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
+    SaveVaultStatusDto,
 };
 
 fn saved_response() -> RuntimeResponse {
@@ -53,6 +54,40 @@ fn create_entry_in_root(
     )
     .unwrap();
     created.id
+}
+
+fn committed_entry(response: RuntimeResponse) -> EntryDetailDto {
+    let RuntimeResponse::EntryMutationResult(result) = response else {
+        panic!("expected committed entry mutation, got {response:?}");
+    };
+    assert_eq!(result.commit, CommitStatusDto::Committed);
+    assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+    result.entry.expect("entry mutation detail")
+}
+
+fn stage_entry_update(
+    runtime: &mut Runtime,
+    vault_id: &str,
+    entry_id: &str,
+    title: &str,
+    username: &str,
+    password: &str,
+    url: &str,
+    notes: &str,
+) {
+    runtime
+        .update_entry_fields(
+            vault_id,
+            entry_id,
+            title.into(),
+            username.into(),
+            password.into(),
+            url.into(),
+            notes.into(),
+            None,
+            vec![],
+        )
+        .expect("stage the Working Copy without invoking the Runtime Protocol commit path");
 }
 
 fn fixture_path(name: &str) -> std::path::PathBuf {
@@ -228,49 +263,45 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .root
         .id;
 
-    let exact = match runtime
-        .handle(RuntimeCommand::CreateEntry {
-            vault_id: handle.vault_id.clone(),
-            parent_group_id: root_id.clone(),
-            entry_id: None,
-            title: "Exact Login".into(),
-            username: "alice".into(),
-            password: "old-secret".into(),
-            url: "https://app.example.com/login".into(),
-            notes: "created from browser v0 contract".into(),
-            totp_uri: None,
-        })
-        .expect("create exact login")
-    {
-        RuntimeResponse::EntryDetail(detail) => detail,
-        other => panic!("expected entry detail, got {other:?}"),
-    };
+    let exact = runtime
+        .create_entry(
+            &handle.vault_id,
+            &root_id,
+            None,
+            "Exact Login".into(),
+            "alice".into(),
+            "old-secret".into(),
+            "https://app.example.com/login".into(),
+            "created from browser v0 contract".into(),
+            None,
+        )
+        .expect("create exact login");
 
     runtime
-        .handle(RuntimeCommand::CreateEntry {
-            vault_id: handle.vault_id.clone(),
-            parent_group_id: root_id.clone(),
-            entry_id: None,
-            title: "Parent Login".into(),
-            username: "parent".into(),
-            password: "parent-secret".into(),
-            url: "https://example.com/login".into(),
-            notes: String::new(),
-            totp_uri: None,
-        })
+        .create_entry(
+            &handle.vault_id,
+            &root_id,
+            None,
+            "Parent Login".into(),
+            "parent".into(),
+            "parent-secret".into(),
+            "https://example.com/login".into(),
+            String::new().into(),
+            None,
+        )
         .expect("create parent login");
     runtime
-        .handle(RuntimeCommand::CreateEntry {
-            vault_id: handle.vault_id.clone(),
-            parent_group_id: root_id,
-            entry_id: None,
-            title: "Unrelated Tenant".into(),
-            username: "mallory".into(),
-            password: "tenant-secret".into(),
-            url: "https://login.bank.co.uk/login".into(),
-            notes: String::new(),
-            totp_uri: None,
-        })
+        .create_entry(
+            &handle.vault_id,
+            &root_id,
+            None,
+            "Unrelated Tenant".into(),
+            "mallory".into(),
+            "tenant-secret".into(),
+            "https://login.bank.co.uk/login".into(),
+            String::new().into(),
+            None,
+        )
         .expect("create unrelated tenant");
 
     let candidates = match runtime
@@ -283,10 +314,9 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         RuntimeResponse::FillCandidates(candidates) => candidates.entries,
         other => panic!("expected fill candidates, got {other:?}"),
     };
-    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates.len(), 1);
     assert_eq!(candidates[0].id, exact.id);
     assert_eq!(candidates[0].title, "Exact Login");
-    assert_eq!(candidates[1].title, "Parent Login");
 
     let unrelated = match runtime
         .handle(RuntimeCommand::FindFillCandidates {
@@ -301,19 +331,18 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
     assert!(unrelated.is_empty());
 
     runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: handle.vault_id.clone(),
-            entry_id: exact.id.clone(),
-            title: "Exact Login".into(),
-            username: "alice@example.com".into(),
-            password: "rotated-secret".into(),
-            url: "https://app.example.com/login".into(),
-            notes: "rotated from browser v0 contract".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
+        .update_entry_fields(
+            &handle.vault_id,
+            &exact.id,
+            "Exact Login".into(),
+            "alice@example.com".into(),
+            "rotated-secret".into(),
+            "https://app.example.com/login".into(),
+            "rotated from browser v0 contract".into(),
+            None,
+            vec![],
+        )
         .expect("update exact login");
-
     assert_eq!(
         runtime
             .handle(RuntimeCommand::SaveVault {
@@ -739,6 +768,7 @@ fn runtime_history_settings_limit_entry_history_after_updates() {
         .create_entry(
             &handle.vault_id,
             &root_id,
+            None,
             "First".into(),
             "alice".into(),
             "secret".into(),
@@ -824,6 +854,7 @@ fn runtime_history_settings_limit_total_history_size_after_updates() {
         .create_entry(
             &handle.vault_id,
             &root_id,
+            None,
             "Tiny".into(),
             "alice".into(),
             "secret".into(),
@@ -886,19 +917,16 @@ fn runtime_writes_conflict_copy_without_overwriting_external_entries() {
     runtime
         .unlock_with_password(&vault.vault_id, "demo-password")
         .unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault.vault_id.clone(),
-            entry_id: local_entry_id.clone(),
-            title: "Local Updated".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example/app".into(),
-            notes: "local edit".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault.vault_id,
+        &local_entry_id,
+        "Local Updated",
+        "alice",
+        "local-password",
+        "https://local.example/app",
+        "local edit",
+    );
 
     let mut external_vault = initial_vault.clone();
     create_entry_in_root(&core, &mut external_vault, "External", "bob", 90);
@@ -987,19 +1015,16 @@ fn runtime_conflict_copy_keeps_local_mutation_while_source_stays_external() {
     runtime
         .unlock_with_password(&vault.vault_id, "demo-password")
         .unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault.vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Local Wins".into(),
-            username: "alice".into(),
-            password: "local-secret".into(),
-            url: "https://local.example".into(),
-            notes: "local".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault.vault_id,
+        &entry_id,
+        "Local Wins",
+        "alice",
+        "local-secret",
+        "https://local.example",
+        "local",
+    );
 
     let mut external_vault = initial_vault.clone();
     core.update_entry_fields(
@@ -1097,19 +1122,7 @@ fn runtime_persists_created_entry_after_save_roundtrip() {
             totp_uri: None,
         })
         .unwrap();
-    let created_id = match created {
-        RuntimeResponse::EntryDetail(detail) => detail.id,
-        other => panic!("expected entry detail, got {other:?}"),
-    };
-
-    assert_eq!(
-        runtime
-            .handle(RuntimeCommand::SaveVault {
-                vault_id: vault.vault_id.clone(),
-            })
-            .unwrap(),
-        saved_response()
-    );
+    let created_id = committed_entry(created).id;
 
     let reopened = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
     runtime
@@ -1155,10 +1168,7 @@ fn runtime_persists_updated_and_deleted_entries_after_save_roundtrip() {
             totp_uri: None,
         })
         .unwrap();
-    let entry_id = match created {
-        RuntimeResponse::EntryDetail(detail) => detail.id,
-        other => panic!("expected entry detail, got {other:?}"),
-    };
+    let entry_id = committed_entry(created).id;
 
     runtime
         .handle(RuntimeCommand::UpdateEntryFields {
@@ -1177,14 +1187,6 @@ fn runtime_persists_updated_and_deleted_entries_after_save_roundtrip() {
             }],
         })
         .unwrap();
-    assert_eq!(
-        runtime
-            .handle(RuntimeCommand::SaveVault {
-                vault_id: vault.vault_id.clone(),
-            })
-            .unwrap(),
-        saved_response()
-    );
 
     let mut reopened_runtime = Runtime::for_tests();
     let reopened = reopened_runtime
@@ -1210,20 +1212,18 @@ fn runtime_persists_updated_and_deleted_entries_after_save_roundtrip() {
     assert_eq!(updated_detail.custom_fields[0].key, "Region");
     assert_eq!(updated_detail.custom_fields[0].value, "us");
 
-    reopened_runtime
+    let deleted = reopened_runtime
         .handle(RuntimeCommand::DeleteEntry {
             vault_id: reopened.vault_id.clone(),
             entry_id: entry_id.clone(),
         })
         .unwrap();
-    assert_eq!(
-        reopened_runtime
-            .handle(RuntimeCommand::SaveVault {
-                vault_id: reopened.vault_id.clone(),
-            })
-            .unwrap(),
-        saved_response()
-    );
+    let RuntimeResponse::EntryMutationResult(deleted) = deleted else {
+        panic!("expected committed deletion, got {deleted:?}");
+    };
+    assert_eq!(deleted.commit, CommitStatusDto::Committed);
+    assert_eq!(deleted.publication.status, SaveVaultStatusDto::Saved);
+    assert!(deleted.entry.is_none());
 
     let mut final_runtime = Runtime::for_tests();
     let final_handle = final_runtime

@@ -32,21 +32,21 @@ use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillCreateContextDto,
     AutofillCredentialDto, AutofillEntryFieldsDto, AutofillPersistConflictCodeDto,
     AutofillPersistDispositionDto, AutofillPersistDurabilityDto, AutofillPersistOutcomeDto,
-    AutofillPersistPlanDto, AutofillPersistResultDto, AutofillUpdateFieldsDto,
+    AutofillPersistPlanDto, AutofillPersistResultDto, AutofillUpdateFieldsDto, CommitStatusDto,
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
     DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
     DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
     EntryAttachmentContentDto, EntryAttachmentDto, EntryCustomFieldDto, EntryDetailDto,
     EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto,
-    EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
-    EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, HandshakeDto,
-    MergeSummaryDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
-    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
-    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
-    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto,
-    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
-    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
-    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryMutationResultDto, EntryPasskeyDto,
+    EntryPasskeyUpdateDto, EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto,
+    GroupTreeDto, HandshakeDto, MergeSummaryDto, OptionalSettingUpdateDto, PasskeyAssertionDto,
+    PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
+    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto,
+    PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto,
+    PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
+    PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
+    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
     PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
     SaveVaultResultDto, SaveVaultStatusDto, SensitiveString, VaultHandleDto, VaultReferenceDto,
     VaultReferenceListDto, VaultSourceStatusDto,
@@ -2605,27 +2605,59 @@ impl Runtime {
         })();
 
         if result.is_err() {
-            let pending_conflict_state =
-                self.vault_session.find_loaded(vault_id).and_then(|loaded| {
-                    let cache_key = remote_cache_key_for_source(&loaded.source)?;
-                    let fingerprint = loaded.baseline_fingerprint.clone();
-                    self.remote_cache
-                        .generic_pending_kind(&cache_key, &fingerprint)
-                        .ok()
-                        .filter(|kind| *kind == GenericPendingKind::ConflictCopy)
-                        .map(|_| (fingerprint, loaded.source_status.clone()))
-                });
-            if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
-                *loaded = previous;
-                if let Some((fingerprint, source_status)) = pending_conflict_state {
-                    loaded.baseline_fingerprint = fingerprint;
-                    loaded.source_status = source_status;
-                    loaded.bytes.clear();
-                }
-            }
+            self.restore_loaded_after_failed_commit(vault_id, previous);
         }
 
         result
+    }
+
+    fn commit_entry_mutation(
+        &mut self,
+        vault_id: &str,
+        mutation: impl FnOnce(&mut Self) -> Result<Option<EntryDetailDto>>,
+    ) -> Result<EntryMutationResultDto> {
+        let previous = self
+            .vault_session
+            .find_loaded(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?
+            .clone();
+
+        let result = (|| {
+            let entry = mutation(self)?;
+            let RuntimeResponse::SaveVaultResult(publication) = self.save_vault(vault_id)? else {
+                anyhow::bail!("entry mutation save returned an unexpected response");
+            };
+            Ok(EntryMutationResultDto {
+                commit: CommitStatusDto::Committed,
+                publication,
+                entry,
+            })
+        })();
+
+        if result.is_err() {
+            self.restore_loaded_after_failed_commit(vault_id, previous);
+        }
+        result
+    }
+
+    fn restore_loaded_after_failed_commit(&mut self, vault_id: &str, previous: LoadedVault) {
+        let pending_conflict_state = self.vault_session.find_loaded(vault_id).and_then(|loaded| {
+            let cache_key = remote_cache_key_for_source(&loaded.source)?;
+            let fingerprint = loaded.baseline_fingerprint.clone();
+            self.remote_cache
+                .generic_pending_kind(&cache_key, &fingerprint)
+                .ok()
+                .filter(|kind| *kind == GenericPendingKind::ConflictCopy)
+                .map(|_| (fingerprint, loaded.source_status.clone()))
+        });
+        if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
+            *loaded = previous;
+            if let Some((fingerprint, source_status)) = pending_conflict_state {
+                loaded.baseline_fingerprint = fingerprint;
+                loaded.source_status = source_status;
+                loaded.bytes.clear();
+            }
+        }
     }
 
     pub fn find_fill_candidates(&self, vault_id: &str, url: &str) -> Result<FillCandidateListDto> {
@@ -5011,18 +5043,22 @@ impl Runtime {
                 notes,
                 totp_uri,
             } => self
-                .create_entry(
-                    &vault_id,
-                    &parent_group_id,
-                    entry_id,
-                    title,
-                    username,
-                    password,
-                    url,
-                    notes,
-                    totp_uri,
-                )
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .create_entry(
+                            &vault_id,
+                            &parent_group_id,
+                            entry_id,
+                            title,
+                            username,
+                            password,
+                            url,
+                            notes,
+                            totp_uri,
+                        )
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::UpdateEntryFields {
                 vault_id,
                 entry_id,
@@ -5034,18 +5070,22 @@ impl Runtime {
                 totp_uri,
                 custom_fields,
             } => self
-                .update_entry_fields(
-                    &vault_id,
-                    &entry_id,
-                    title,
-                    username,
-                    password,
-                    url,
-                    notes,
-                    totp_uri,
-                    custom_fields,
-                )
-                .map(RuntimeResponse::EntryDetail),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime
+                        .update_entry_fields(
+                            &vault_id,
+                            &entry_id,
+                            title,
+                            username,
+                            password,
+                            url,
+                            notes,
+                            totp_uri,
+                            custom_fields,
+                        )
+                        .map(Some)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::CompareAndUpdateEntryFields {
                 vault_id,
                 entry_id,
@@ -5105,8 +5145,11 @@ impl Runtime {
                 )
                 .map(RuntimeResponse::PasskeyUserVerified),
             RuntimeCommand::DeleteEntry { vault_id, entry_id } => self
-                .delete_entry(&vault_id, &entry_id)
-                .map(|_| RuntimeResponse::Saved),
+                .commit_entry_mutation(&vault_id, |runtime| {
+                    runtime.delete_entry(&vault_id, &entry_id)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::EntryMutationResult),
             RuntimeCommand::GetEntryAttachmentContent {
                 vault_id,
                 entry_id,

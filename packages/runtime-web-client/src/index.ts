@@ -248,6 +248,13 @@ export interface CommittedMutation<T> {
   operationId: string;
 }
 
+interface EntryMutationResponse<T> {
+  type: "entry_mutation_result";
+  commit: "committed";
+  publication: Omit<SaveVaultResult, "type">;
+  entry?: T;
+}
+
 export interface EntryHistoryItem {
   index: number;
   title: string;
@@ -677,17 +684,21 @@ export class RuntimeClient {
     input: EntryCreateInput,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "create_entry",
-      vault_id: vaultId,
-      parent_group_id: input.parentGroupId,
-      title: input.title,
-      username: input.username,
-      password: input.password,
-      url: input.url,
-      notes: input.notes,
-      totp_uri: input.totpUri
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "create_entry",
+        vault_id: vaultId,
+        parent_group_id: input.parentGroupId,
+        title: input.title,
+        username: input.username,
+        password: input.password,
+        url: input.url,
+        notes: input.notes,
+        totp_uri: input.totpUri
+      },
+      operationId,
+      true
+    );
   }
 
   async updateEntryFields(
@@ -696,18 +707,22 @@ export class RuntimeClient {
     input: EntryDraft,
     operationId?: string
   ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "update_entry_fields",
-      vault_id: vaultId,
-      entry_id: entryId,
-      title: input.title,
-      username: input.username,
-      password: input.password,
-      url: input.url,
-      notes: input.notes,
-      totp_uri: input.totpUri,
-      custom_fields: input.customFields
-    }, operationId);
+    return this.sendEntryMutationCommand<EntryDetail>(
+      {
+        type: "update_entry_fields",
+        vault_id: vaultId,
+        entry_id: entryId,
+        title: input.title,
+        username: input.username,
+        password: input.password,
+        url: input.url,
+        notes: input.notes,
+        totp_uri: input.totpUri,
+        custom_fields: input.customFields
+      },
+      operationId,
+      true
+    );
   }
 
   async compareAndUpdateEntryFields(
@@ -787,11 +802,15 @@ export class RuntimeClient {
     entryId: string,
     operationId?: string
   ): Promise<CommittedMutation<void>> {
-    const result = await this.sendMutationCommand<{ type: "saved" }>(vaultId, {
-      type: "delete_entry",
-      vault_id: vaultId,
-      entry_id: entryId
-    }, operationId);
+    const result = await this.sendEntryMutationCommand<undefined>(
+      {
+        type: "delete_entry",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      operationId,
+      false
+    );
     return { ...result, value: undefined };
   }
 
@@ -990,6 +1009,58 @@ export class RuntimeClient {
       }
       throw error;
     }
+  }
+
+  private async sendEntryMutationCommand<T>(
+    command: Record<string, unknown>,
+    requestedOperationId: string | undefined,
+    requiresEntry: boolean
+  ): Promise<CommittedMutation<T>> {
+    const operationId = requestedOperationId ?? createLogicalOperationId();
+    const replayableCommand =
+      command.type === "create_entry"
+        ? { ...command, entry_id: operationId }
+        : command;
+    let response: EntryMutationResponse<T>;
+    try {
+      response = await this.sendCommand<EntryMutationResponse<T>>(
+        replayableCommand,
+        operationId
+      );
+    } catch (error) {
+      if (!isAmbiguousMutationFailure(error)) {
+        throw error;
+      }
+      try {
+        response = await this.sendCommand<EntryMutationResponse<T>>(
+          replayableCommand,
+          operationId
+        );
+      } catch (retryError) {
+        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
+      }
+    }
+    if (
+      response.type !== "entry_mutation_result" ||
+      response.commit !== "committed" ||
+      (requiresEntry && response.entry === undefined)
+    ) {
+      throw new TypeError("runtime returned an invalid committed entry mutation");
+    }
+    const value = requiresEntry
+      ? ({
+          type: "entry_detail",
+          ...(response.entry as Record<string, unknown>)
+        } as T)
+      : (undefined as T);
+    return {
+      value,
+      saveResult: {
+        type: "save_vault_result",
+        ...response.publication
+      },
+      operationId
+    };
   }
 
   private async sendMutationSave(

@@ -82,4 +82,9 @@ impl RuntimeProtocolHarness {
         self.runtime
             .queue_test_onedrive_precondition_failure(Some(remote_head));
     }
+
+    pub fn make_next_publication_outcome_unknown_and_readback_unavailable(&mut self) {
+        self.runtime
+            .queue_test_onedrive_ambiguous_write_with_unavailable_readback(false);
+    }
 }

@@ -1,21 +1,21 @@
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
     AutofillPersistDispositionDto, AutofillPersistDurabilityDto, AutofillPersistOutcomeDto,
-    AutofillPersistPlanDto, AutofillPersistResultDto, AutofillUpdateFieldsDto,
+    AutofillPersistPlanDto, AutofillPersistResultDto, AutofillUpdateFieldsDto, CommitStatusDto,
     DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
     DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
     DatabaseRecycleBinSettingsDto, DatabaseSettingsCommitResultDto, DatabaseSettingsDto,
     DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto,
-    EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto,
-    EntryPasskeyUpdateDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
-    HandshakeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, OptionalSettingUpdateDto, PROTOCOL_VERSION, PasskeyAssertionDto,
-    PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
-    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto,
-    PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto,
-    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
-    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
-    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto, EntryMutationResultDto,
+    EntryPasskeyDto, EntryPasskeyUpdateDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto,
+    GroupTreeDto, HandshakeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto,
+    OneDriveItemDto, OneDriveItemListDto, OptionalSettingUpdateDto, PROTOCOL_VERSION,
+    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
+    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
+    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
+    PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
+    PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
+    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
     PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
     RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
     VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
@@ -23,6 +23,7 @@ use vaultkern_runtime_protocol::{
 
 static_assertions::assert_not_impl_any!(RuntimeResponse: Clone);
 static_assertions::assert_not_impl_any!(EntryDetailDto: Clone);
+static_assertions::assert_not_impl_any!(EntryMutationResultDto: Clone);
 static_assertions::assert_not_impl_any!(EntryFieldsDto: Clone);
 static_assertions::assert_not_impl_any!(AutofillPersistPlanDto: Clone);
 static_assertions::assert_not_impl_any!(EntryHistoryDetailDto: Clone);
@@ -648,6 +649,29 @@ fn protocol_roundtrips_entry_detail_response_shape() {
 }
 
 #[test]
+fn protocol_roundtrips_committed_entry_mutation_state() {
+    let response = RuntimeResponse::EntryMutationResult(EntryMutationResultDto {
+        commit: CommitStatusDto::Committed,
+        publication: SaveVaultResultDto {
+            status: SaveVaultStatusDto::SavedToCache,
+            merge_summary: None,
+            conflict_copy_path: None,
+        },
+        entry: None,
+    });
+
+    let value = serde_json::to_value(&response).expect("serialize committed entry mutation");
+    assert_eq!(value["type"], "entry_mutation_result");
+    assert_eq!(value["commit"], "committed");
+    assert_eq!(value["publication"]["status"], "saved_to_cache");
+    assert!(value.get("entry").is_none());
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value).expect("deserialize committed mutation"),
+        response
+    );
+}
+
+#[test]
 fn protocol_debug_redacts_master_credentials() {
     let secret = "master-password-must-not-appear-in-debug";
     let envelope = ProtocolEnvelope::new(RuntimeCommand::EnableQuickUnlockForCurrentVault {
@@ -665,18 +689,6 @@ fn protocol_debug_redacts_master_credentials() {
 
 #[test]
 fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
-    fn fields(password: &str) -> EntryFieldsDto {
-        EntryFieldsDto {
-            title: "title".into(),
-            username: "username".into(),
-            password: password.into(),
-            url: "https://example.com".into(),
-            notes: "notes".into(),
-            totp_uri: None,
-            custom_fields: Vec::new(),
-        }
-    }
-
     let command = RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-1".into(),

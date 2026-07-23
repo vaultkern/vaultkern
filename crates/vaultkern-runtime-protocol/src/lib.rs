@@ -502,6 +502,7 @@ pub enum RuntimeResponse {
     GroupTree(GroupTreeDto),
     EntryList(EntryListDto),
     EntryDetail(EntryDetailDto),
+    EntryMutationResult(EntryMutationResultDto),
     EntryHistoryList(EntryHistoryListDto),
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
@@ -1274,6 +1275,40 @@ pub struct SaveVaultResultDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_copy_path: Option<String>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommitStatusDto {
+    Committed,
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryMutationResultDto {
+    pub commit: CommitStatusDto,
+    pub publication: SaveVaultResultDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<EntryDetailDto>,
+}
+
+impl fmt::Debug for EntryMutationResultDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntryMutationResultDto")
+            .field("commit", &self.commit)
+            .field("publication", &self.publication)
+            .field("entry", &self.entry.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+impl Zeroize for EntryMutationResultDto {
+    fn zeroize(&mut self) {
+        self.entry.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryMutationResultDto {}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -3,7 +3,7 @@ mod support;
 use support::RuntimeProtocolHarness;
 use vaultkern_core::{CompositeKey, EntryCreate, KeepassCore, SaveProfile, Vault};
 use vaultkern_runtime_protocol::{
-    PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+    CommitStatusDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
 };
 
 fn key() -> CompositeKey {
@@ -61,6 +61,7 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         RuntimeResponse::GroupTree(groups) => groups.root.id,
         _ => panic!("expected group tree"),
     };
+    let before_publication = harness.provider_snapshot();
     let created = match harness.command(RuntimeCommand::CreateEntry {
         vault_id: vault_id.clone(),
         parent_group_id: root_id.clone(),
@@ -72,36 +73,17 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         notes: String::new().into(),
         totp_uri: None,
     }) {
-        RuntimeResponse::EntryDetail(detail) => detail,
-        _ => panic!("expected created entry"),
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.commit, CommitStatusDto::Committed);
+            assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+            result.entry.expect("created entry detail")
+        }
+        _ => panic!("expected committed entry mutation"),
     };
 
-    let before_publication = harness.provider_snapshot();
-    assert!(matches!(
-        harness.command(RuntimeCommand::SaveVault {
-            vault_id: vault_id.clone(),
-        }),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Saved
-    ));
     let first_publication = harness.provider_snapshot();
     assert_ne!(first_publication.bytes, before_publication.bytes);
     assert!(first_publication.revision > before_publication.revision);
-
-    assert!(matches!(
-        harness.command(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: created.id,
-            title: "Local account".into(),
-            username: "alice".into(),
-            password: "second-password".into(),
-            url: "https://local.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        }),
-        RuntimeResponse::EntryDetail(_)
-    ));
 
     let mut remote = core
         .load_database(&first_publication.bytes, &key())
@@ -125,19 +107,47 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
     harness.reject_next_publication_as_stale(remote_bytes);
 
     assert!(matches!(
-        harness.command(RuntimeCommand::SaveVault {
+        harness.command(RuntimeCommand::UpdateEntryFields {
             vault_id: vault_id.clone(),
+            entry_id: created.id.clone(),
+            title: "Local account".into(),
+            username: "alice".into(),
+            password: "second-password".into(),
+            url: "https://local.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
         }),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::Merged
     ));
-    let entries = match harness.command(RuntimeCommand::ListEntries { vault_id }) {
+    let entries = match harness.command(RuntimeCommand::ListEntries {
+        vault_id: vault_id.clone(),
+    }) {
         RuntimeResponse::EntryList(entries) => entries.entries,
         _ => panic!("expected entry list"),
     };
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().any(|entry| entry.title == "Local account"));
     assert!(entries.iter().any(|entry| entry.title == "Remote account"));
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::DeleteEntry {
+            vault_id,
+            entry_id: created.id,
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == SaveVaultStatusDto::Saved
+                && result.entry.is_none()
+    ));
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode deletion publication")
+        .vault;
+    assert_eq!(published.root.entries.len(), 1);
+    assert_eq!(published.root.entries[0].title, "Remote account");
 }
 
 #[test]
@@ -170,25 +180,24 @@ fn local_file_flow_publishes_through_the_runtime_protocol() {
         RuntimeResponse::GroupTree(groups) => groups.root.id,
         _ => panic!("expected group tree"),
     };
-    assert!(matches!(
-        harness.command(RuntimeCommand::CreateEntry {
-            vault_id: vault_id.clone(),
-            parent_group_id: root_id,
-            entry_id: None,
-            title: "Local Provider entry".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            url: "https://local-provider.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-        }),
-        RuntimeResponse::EntryDetail(_)
-    ));
-    assert!(matches!(
-        harness.command(RuntimeCommand::SaveVault { vault_id }),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Saved
-    ));
+    let created = match harness.command(RuntimeCommand::CreateEntry {
+        vault_id: vault_id.clone(),
+        parent_group_id: root_id,
+        entry_id: None,
+        title: "Local Provider entry".into(),
+        username: "alice".into(),
+        password: "secret".into(),
+        url: "https://local-provider.example".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    }) {
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.commit, CommitStatusDto::Committed);
+            assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+            result.entry.expect("created local entry detail")
+        }
+        _ => panic!("expected committed local entry mutation"),
+    };
 
     let published = std::fs::read(path).expect("read published local Provider snapshot");
     let vault = KeepassCore::new()
@@ -200,8 +209,87 @@ fn local_file_flow_publishes_through_the_runtime_protocol() {
             .root
             .entries
             .iter()
-            .any(|entry| entry.title == "Local Provider entry")
+            .any(|entry| entry.id.to_string() == created.id)
     );
+}
+
+#[test]
+fn resident_entry_commit_can_finish_while_publication_is_pending() {
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(empty_vault_bytes());
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        _ => panic!("expected unlocked session"),
+    };
+    let root_id = match harness.command(RuntimeCommand::ListGroups {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::GroupTree(groups) => groups.root.id,
+        _ => panic!("expected group tree"),
+    };
+    let before = harness.provider_snapshot();
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+
+    let created = match harness.command(RuntimeCommand::CreateEntry {
+        vault_id: vault_id.clone(),
+        parent_group_id: root_id,
+        entry_id: None,
+        title: "Offline account".into(),
+        username: "alice".into(),
+        password: "first-password".into(),
+        url: "https://offline.example".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    }) {
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.commit, CommitStatusDto::Committed);
+            assert_eq!(result.publication.status, SaveVaultStatusDto::SavedToCache);
+            result.entry.expect("pending committed entry")
+        }
+        _ => panic!("expected pending committed entry mutation"),
+    };
+    let still_remote = harness.provider_snapshot();
+    assert_eq!(still_remote.bytes, before.bytes);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: created.id.clone(),
+            title: "Offline account updated".into(),
+            username: "alice".into(),
+            password: "second-password".into(),
+            url: "https://offline.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetEntryDetail {
+            vault_id,
+            entry_id: created.id,
+        }),
+        RuntimeResponse::EntryDetail(detail)
+            if detail.title == "Offline account updated"
+                && detail.password == "second-password"
+    ));
 }
 
 #[test]

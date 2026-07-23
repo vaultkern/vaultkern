@@ -49,6 +49,31 @@ fn create_entry(
     created.id
 }
 
+fn stage_entry_update(
+    runtime: &mut Runtime,
+    vault_id: &str,
+    entry_id: &str,
+    title: &str,
+    username: &str,
+    password: &str,
+    url: &str,
+    notes: &str,
+) {
+    runtime
+        .update_entry_fields(
+            vault_id,
+            entry_id,
+            title.into(),
+            username.into(),
+            password.into(),
+            url.into(),
+            notes.into(),
+            None,
+            vec![],
+        )
+        .expect("stage the Working Copy without invoking the Runtime Protocol commit path");
+}
+
 #[test]
 fn runtime_opens_unlocks_and_saves_onedrive_vault_reference() {
     let core = KeepassCore::new();
@@ -610,19 +635,16 @@ fn runtime_updates_remote_cache_after_successful_save() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Saved Offline Cache".into(),
-            username: "alice".into(),
-            password: "saved-password".into(),
-            url: "https://saved.example".into(),
-            notes: "saved".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Saved Offline Cache",
+        "alice",
+        "saved-password",
+        "https://saved.example",
+        "saved",
+    );
     runtime
         .handle(RuntimeCommand::SaveVault {
             vault_id: vault_id.clone(),
@@ -682,19 +704,16 @@ fn runtime_saves_remote_vault_to_pending_cache_when_remote_write_fails() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Unsaved Remote Failure".into(),
-            username: "alice".into(),
-            password: "unsaved-password".into(),
-            url: "https://unsaved.example".into(),
-            notes: "unsaved".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Unsaved Remote Failure",
+        "alice",
+        "unsaved-password",
+        "https://unsaved.example",
+        "unsaved",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
 
     let response = runtime
@@ -775,19 +794,16 @@ fn runtime_retries_pending_cache_by_uploading_local_version() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Pending Local".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://pending.example".into(),
-            notes: "pending".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Pending Local",
+        "alice",
+        "pending-password",
+        "https://pending.example",
+        "pending",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
         .handle(RuntimeCommand::SaveVault {
@@ -841,19 +857,16 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Pending Local".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://pending.example".into(),
-            notes: "pending".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Pending Local",
+        "alice",
+        "pending-password",
+        "https://pending.example",
+        "pending",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
         .handle(RuntimeCommand::SaveVault {
@@ -920,19 +933,16 @@ fn runtime_publishes_deleted_source_pending_as_conflict_copy_after_remote_kdf_ro
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "pending-password",
+        "https://account.example",
+        "",
+    );
     runtime.remove_test_onedrive_item("drive-1", "item-1");
     let response = runtime
         .handle(RuntimeCommand::SaveVault {
@@ -1061,19 +1071,16 @@ fn kdf_rotated_rebase_with_unknown_put_keeps_a_retryable_remote_base() {
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-before-unknown-put".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-before-unknown-put",
+        "https://account.example",
+        "",
+    );
 
     let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1159,19 +1166,16 @@ fn runtime_retries_generic_pending_with_fresh_three_way_patch_after_cas_failure(
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "pending-password",
+        "https://account.example",
+        "",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     let response = runtime
         .handle(RuntimeCommand::SaveVault {
@@ -1249,19 +1253,16 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://account.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "pending-password",
+        "https://account.example",
+        "keep me",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
         .handle(RuntimeCommand::SaveVault {
@@ -1434,19 +1435,16 @@ fn runtime_rebases_local_fields_onto_a_changed_onedrive_source() {
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
 
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: local_entry_id,
-            title: "Local Updated".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example/app".into(),
-            notes: "local edit".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &local_entry_id,
+        "Local Updated",
+        "alice",
+        "local-password",
+        "https://local.example/app",
+        "local edit",
+    );
 
     let mut external = core.load_database(&initial_bytes, &key()).unwrap().vault;
     create_entry(&core, &mut external, "External", "bob", 90);
@@ -1555,19 +1553,16 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
         remote_bytes
     );
 
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-after-adopt".into(),
-            url: "https://account.example".into(),
-            notes: "remote-only".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-after-adopt",
+        "https://account.example",
+        "remote-only",
+    );
 
     let mut changed_again = remote;
     core.update_entry_fields(
@@ -1729,19 +1724,16 @@ fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut raced_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1818,19 +1810,16 @@ fn retention_that_cannot_keep_the_conflict_loser_uses_a_conflict_copy() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1906,19 +1895,16 @@ fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut rotated_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -2013,19 +1999,16 @@ fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Local copy".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Local copy",
+        "alice",
+        "local-password",
+        "https://local.example",
+        "keep me",
+    );
 
     let unrelated = core
         .save_kdbx(
@@ -2076,19 +2059,16 @@ fn unrepresentable_remote_lineage_uploads_a_sibling_conflict_copy() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Local copy".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Local copy",
+        "alice",
+        "local-password",
+        "https://local.example",
+        "keep me",
+    );
 
     let unrelated = core
         .save_kdbx(
@@ -2153,19 +2133,16 @@ fn foreign_writer_with_same_root_uses_a_conflict_copy_instead_of_field_patch() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut foreign = core.load_database(&initial_bytes, &key()).unwrap().vault;
     foreign.generator = Some("KeePassXC".into());
@@ -2228,19 +2205,16 @@ fn failed_conflict_copy_upload_falls_back_to_durable_pending_state() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut foreign = core.load_database(&initial_bytes, &key()).unwrap().vault;
     foreign.generator = Some("KeePassXC".into());
@@ -2311,19 +2285,16 @@ fn failed_unrepresentable_patch_conflict_copy_also_falls_back_to_pending() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Local".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Local",
+        "alice",
+        "local-password",
+        "https://local.example",
+        "keep me",
+    );
     let unrelated = core
         .save_kdbx(
             &Vault::empty("Unrelated remote"),

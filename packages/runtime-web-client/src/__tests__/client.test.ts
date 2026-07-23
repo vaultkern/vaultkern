@@ -5,6 +5,21 @@ import {
   type PersistAutofillMutationRequest
 } from "../index";
 
+function committedEntryMutation(
+  entry: Record<string, unknown> | undefined,
+  status: "saved" | "merged" | "saved_to_cache" | "conflict_copy" = "saved"
+) {
+  return {
+    type: "entry_mutation_result",
+    commit: "committed",
+    publication: {
+      status,
+      mergeSummary: null
+    },
+    ...(entry ? { entry } : {})
+  };
+}
+
 describe("RuntimeClient", () => {
   it("does not expose the superseded conditional create command", () => {
     const client = new RuntimeClient({ send: vi.fn() });
@@ -702,20 +717,21 @@ describe("RuntimeClient", () => {
 
   it("creates an entry through the command envelope", async () => {
     const transport = {
-      send: vi.fn().mockResolvedValue({
-        type: "entry_detail",
-        id: "entry-1",
-        title: "Example",
-        username: "alice",
-        password: "secret",
-        url: "https://example.com",
-        notes: "demo",
-        totp: "287082"
-      })
+      send: vi.fn().mockResolvedValue(
+        committedEntryMutation({
+          id: "entry-1",
+          title: "Example",
+          username: "alice",
+          password: "secret",
+          url: "https://example.com",
+          notes: "demo",
+          totp: "287082"
+        })
+      )
     };
 
     const client = new RuntimeClient(transport);
-    await client.createEntry("vault-1", {
+    const result = await client.createEntry("vault-1", {
       parentGroupId: "group-root",
       title: "Example",
       username: "alice",
@@ -744,6 +760,10 @@ describe("RuntimeClient", () => {
           "otpauth://totp/Test:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test"
       }
     });
+    expect(result.value).toMatchObject({
+      type: "entry_detail",
+      id: "entry-1"
+    });
   });
 
   it("replays an ambiguous mutation once with the same operation and planned entry ids", async () => {
@@ -754,8 +774,9 @@ describe("RuntimeClient", () => {
       send: vi
         .fn()
         .mockRejectedValueOnce(disconnect)
-        .mockResolvedValueOnce({ type: "entry_detail", id: "entry-1" })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+        .mockResolvedValueOnce(
+          committedEntryMutation({ type: "entry_detail", id: "entry-1" })
+        )
     };
 
     const client = new RuntimeClient(transport);
@@ -770,7 +791,7 @@ describe("RuntimeClient", () => {
       totpUri: null
     });
 
-    expect(transport.send).toHaveBeenCalledTimes(3);
+    expect(transport.send).toHaveBeenCalledTimes(2);
     const first = transport.send.mock.calls[0]?.[0];
     const second = transport.send.mock.calls[1]?.[0];
     expect(second).toEqual(first);
@@ -782,11 +803,6 @@ describe("RuntimeClient", () => {
       }
     });
     expect(first.command.entry_id).toBe(first.operationId);
-    expect(transport.send.mock.calls[2]?.[0]).toEqual({
-      version: 2,
-      operationId: first.operationId,
-      command: { type: "save_vault", vault_id: "vault-1" }
-    });
   });
 
   it("keeps the mutation outcome unknown when an ambiguous attempt is followed by a business error", async () => {
@@ -829,20 +845,14 @@ describe("RuntimeClient", () => {
 
   it("returns the save receipt bound to the exact mutation instead of a vault-wide queue", async () => {
     const mutationResults = [
-      { type: "entry_detail", id: "entry-a" },
-      { type: "entry_detail", id: "entry-b" }
-    ];
-    const saveResults = [
-      { type: "save_vault_result", status: "saved" },
-      { type: "save_vault_result", status: "merged" }
+      committedEntryMutation({ type: "entry_detail", id: "entry-a" }),
+      committedEntryMutation(
+        { type: "entry_detail", id: "entry-b" },
+        "merged"
+      )
     ];
     const transport = {
-      send: vi.fn(async (request: { operationId?: string; command: { type: string } }) => {
-        if (request.command.type === "save_vault") {
-          return saveResults.shift();
-        }
-        return mutationResults.shift();
-      })
+      send: vi.fn(async (_message: unknown) => mutationResults.shift())
     };
     const client = new RuntimeClient(transport);
     const input = {
@@ -861,13 +871,13 @@ describe("RuntimeClient", () => {
 
     expect(first.saveResult.status).toBe("saved");
     expect(second.saveResult.status).toBe("merged");
-    expect(transport.send).toHaveBeenCalledTimes(4);
-    for (const index of [0, 2]) {
-      const mutation = transport.send.mock.calls[index]?.[0];
-      const save = transport.send.mock.calls[index + 1]?.[0];
-      expect(save.operationId).toBe(mutation.operationId);
-      expect(save.command).toEqual({ type: "save_vault", vault_id: "vault-1" });
-    }
+    expect(transport.send).toHaveBeenCalledTimes(2);
+    expect(
+      transport.send.mock.calls.map(
+        ([request]) =>
+          (request as { command: { type: string } }).command.type
+      )
+    ).toEqual(["create_entry", "create_entry"]);
   });
 
   it("lets the caller keep one logical create id across repeated ambiguous transports", async () => {
@@ -879,8 +889,12 @@ describe("RuntimeClient", () => {
         .fn()
         .mockRejectedValueOnce(timeout)
         .mockRejectedValueOnce(timeout)
-        .mockResolvedValueOnce({ type: "entry_detail", id: "entry-replayed" })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+        .mockResolvedValueOnce(
+          committedEntryMutation({
+            type: "entry_detail",
+            id: "entry-replayed"
+          })
+        )
     };
     const input = {
       parentGroupId: "group-root",
@@ -905,7 +919,7 @@ describe("RuntimeClient", () => {
     await client.createEntry("vault-1", input, operationId!);
 
     const messages = transport.send.mock.calls.map(([message]) => message);
-    expect(messages).toHaveLength(4);
+    expect(messages).toHaveLength(3);
     expect(new Set(messages.map((message) => message.operationId))).toEqual(
       new Set([operationId])
     );
@@ -916,36 +930,33 @@ describe("RuntimeClient", () => {
           .map((message) => message.command.entry_id)
       )
     ).toEqual(new Set([operationId]));
-    expect(messages[3]?.command).toEqual({
-      type: "save_vault",
-      vault_id: "vault-1"
-    });
+    expect(messages[2]?.command.type).toBe("create_entry");
   });
 
   it("updates and deletes entries through dedicated helpers", async () => {
     const transport = {
       send: vi
         .fn()
-        .mockResolvedValueOnce({
-          type: "entry_detail",
-          id: "entry-1",
-          title: "Example 2",
-          username: "alice",
-          password: "secret-2",
-          url: "https://example.com/app",
-          notes: "updated",
-          totp: null,
-          customFields: [
-            {
-              key: "RecoveryCode",
-              value: "edited-code",
-              protected: true
-            }
-          ]
-        })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
-        .mockResolvedValueOnce({ type: "saved" })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+        .mockResolvedValueOnce(
+          committedEntryMutation({
+            type: "entry_detail",
+            id: "entry-1",
+            title: "Example 2",
+            username: "alice",
+            password: "secret-2",
+            url: "https://example.com/app",
+            notes: "updated",
+            totp: null,
+            customFields: [
+              {
+                key: "RecoveryCode",
+                value: "edited-code",
+                protected: true
+              }
+            ]
+          })
+        )
+        .mockResolvedValueOnce(committedEntryMutation(undefined))
     };
 
     const client = new RuntimeClient(transport);
@@ -991,21 +1002,11 @@ describe("RuntimeClient", () => {
     expect(transport.send).toHaveBeenNthCalledWith(2, {
       version: 2,
       operationId: expect.any(String),
-      command: { type: "save_vault", vault_id: "vault-1" }
-    });
-    expect(transport.send).toHaveBeenNthCalledWith(3, {
-      version: 2,
-      operationId: expect.any(String),
       command: {
         type: "delete_entry",
         vault_id: "vault-1",
         entry_id: "entry-1"
       }
-    });
-    expect(transport.send).toHaveBeenNthCalledWith(4, {
-      version: 2,
-      operationId: expect.any(String),
-      command: { type: "save_vault", vault_id: "vault-1" }
     });
   });
 
@@ -1682,13 +1683,13 @@ describe("RuntimeClient", () => {
     });
   });
 
-  it("correlates a mutation with only its own follow-up save", async () => {
+  it("uses the publication bundled with a committed entry mutation", async () => {
     const messages: Array<Record<string, unknown>> = [];
     const transport = {
       send: vi.fn(async (message: unknown) => {
         messages.push(message as Record<string, unknown>);
         return messages.length === 1
-          ? {
+          ? committedEntryMutation({
               type: "entry_detail",
               id: "entry-1",
               title: "Example",
@@ -1698,7 +1699,7 @@ describe("RuntimeClient", () => {
               notes: "",
               totp: null,
               customFields: []
-            }
+            })
           : {
               type: "save_vault_result",
               status: "saved",
@@ -1720,23 +1721,23 @@ describe("RuntimeClient", () => {
     await client.saveVault("vault-1");
 
     expect(messages[0]?.operationId).toEqual(expect.any(String));
-    expect(messages[1]?.operationId).toBe(messages[0]?.operationId);
+    expect(messages[1]?.operationId).toBeUndefined();
   });
 
-  it("retries an ambiguous mutation save inline with the same operation id", async () => {
+  it("retries an ambiguous committed entry mutation with the same operation id", async () => {
     const timeout = Object.assign(new Error("native request timed out"), {
       code: "native_timeout"
     });
     const transport = {
       send: vi
         .fn()
-        .mockResolvedValueOnce({ type: "entry_detail", id: "entry-1" })
         .mockRejectedValueOnce(timeout)
-        .mockResolvedValueOnce({
-          type: "save_vault_result",
-          status: "conflict_copy",
-          conflictCopyPath: "vault.conflict.kdbx"
-        })
+        .mockResolvedValueOnce(
+          committedEntryMutation(
+            { type: "entry_detail", id: "entry-1" },
+            "conflict_copy"
+          )
+        )
     };
     const client = new RuntimeClient(transport);
 
@@ -1751,13 +1752,12 @@ describe("RuntimeClient", () => {
     })).resolves.toMatchObject({
       value: { id: "entry-1" },
       saveResult: {
-      status: "conflict_copy"
+        status: "conflict_copy"
       }
     });
 
     const mutationId = transport.send.mock.calls[0]?.[0].operationId;
     expect(transport.send.mock.calls[1]?.[0].operationId).toBe(mutationId);
-    expect(transport.send.mock.calls[2]?.[0].operationId).toBe(mutationId);
   });
 
   it("returns local cache save status", async () => {
