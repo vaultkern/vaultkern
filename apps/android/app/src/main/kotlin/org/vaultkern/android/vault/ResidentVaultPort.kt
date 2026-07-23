@@ -178,7 +178,7 @@ class VaultKernResidentVaultPort(
             ?: error("no unlocked vault is active")
 }
 
-private fun EntryDetailDto.closeSecrets() {
+internal fun EntryDetailDto.closeSecrets() {
     buildList {
         add(id)
         add(title)

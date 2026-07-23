@@ -1481,6 +1481,8 @@ public protocol VaultSessionProtocol: AnyObject, Sendable {
 
     func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto) throws  -> EntryDetailDto
 
+    func findFillCandidates(vaultId: String, url: String) throws  -> [EntrySummaryDto]
+
     func listEntries(vaultId: String) throws  -> [EntrySummaryDto]
 
     func listPasskeyCredentials() throws  -> [PlatformPasskeyCredential]
@@ -1598,6 +1600,16 @@ open func editEntry(vaultId: String, entryId: String, fields: EntryFieldsDto)thr
         FfiConverterString.lower(vaultId),
         FfiConverterString.lower(entryId),
         FfiConverterTypeEntryFieldsDto_lower(fields),$0
+    )
+})
+}
+
+open func findFillCandidates(vaultId: String, url: String)throws  -> [EntrySummaryDto]  {
+    return try  FfiConverterSequenceTypeEntrySummaryDto.lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsession_find_fill_candidates(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(vaultId),
+        FfiConverterString.lower(url),$0
     )
 })
 }
@@ -4891,6 +4903,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_find_fill_candidates() != 36841) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708) {

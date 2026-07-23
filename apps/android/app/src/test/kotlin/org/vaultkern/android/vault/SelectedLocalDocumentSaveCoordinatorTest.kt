@@ -11,6 +11,7 @@ import org.vaultkern.android.storage.LocalDocumentAccess
 import org.vaultkern.android.storage.LocalDocumentPublishStatus
 import org.vaultkern.android.storage.LocalDocumentSnapshot
 import org.vaultkern.android.storage.LocalDocumentWorkspace
+import org.vaultkern.android.credentials.commitPasskeyRegistrationAndPublish
 
 class SelectedLocalDocumentSaveCoordinatorTest {
     @get:Rule
@@ -76,6 +77,50 @@ class SelectedLocalDocumentSaveCoordinatorTest {
         retried.abandon()
     }
 
+    @Test
+    fun failedPasskeyCommitAbandonsTheSelectedDocumentSaveTransaction() {
+        val uri = "content://documents/local/vault.kdbx"
+        val access = CoordinatorDocumentAccess(uri, ByteArray(48) { 56 })
+        val workspace = LocalDocumentWorkspace(temporary.newFolder("failed-passkey-commit"), access)
+        val selected = workspace.select(uri, "vault.kdbx")
+        val coordinator = SelectedLocalDocumentSaveCoordinator(workspace)
+        val transaction = assertNotNullTransaction(coordinator.prepare(selected.privatePath))
+
+        org.junit.Assert.assertThrows(IllegalStateException::class.java) {
+            commitPasskeyRegistrationAndPublish(transaction) {
+                throw IllegalStateException("injected passkey commit failure")
+            }
+        }
+
+        assertEquals(LocalDocumentPublishStatus.NO_CHANGE, workspace.reconcilePending().single().status)
+        val retried = assertNotNullTransaction(coordinator.prepare(selected.privatePath))
+        retried.abandon()
+    }
+
+    @Test
+    fun providerPreflightReadFailureKeepsARecoverablePrivateSave() {
+        val uri = "content://documents/local/vault.kdbx"
+        val original = ByteArray(60) { 54 }
+        val candidate = ByteArray(92) { 55 }
+        val access = CoordinatorDocumentAccess(uri, original)
+        val root = temporary.newFolder("pending-preflight")
+        val workspace = LocalDocumentWorkspace(root, access)
+        val selected = workspace.select(uri, "vault.kdbx")
+        val transaction = assertNotNullTransaction(
+            SelectedLocalDocumentSaveCoordinator(workspace).prepare(selected.privatePath),
+        )
+        File(selected.privatePath).writeBytes(candidate)
+        access.failRead = true
+
+        val result = transaction.complete(VaultSaveResult(VaultSaveStatus.SAVED))
+
+        assertEquals(VaultSaveStatus.SAVED_TO_CACHE, result.status)
+        assertArrayEquals(original, access.bytes)
+        access.failRead = false
+        assertEquals(1, LocalDocumentWorkspace(root, access).reconcilePending().size)
+        assertArrayEquals(candidate, access.bytes)
+    }
+
     private fun assertNotNullTransaction(
         value: SelectedLocalDocumentSaveTransaction?,
     ): SelectedLocalDocumentSaveTransaction {
@@ -91,10 +136,12 @@ private class CoordinatorDocumentAccess(
     var bytes: ByteArray = initial.copyOf()
         private set
     var failReplace = false
+    var failRead = false
     private var modifiedAt = 1L
 
     override fun read(uri: String): LocalDocumentSnapshot {
         require(uri == expectedUri)
+        if (failRead) throw IllegalStateException("injected provider read failure")
         return LocalDocumentSnapshot(bytes.copyOf(), modifiedAt)
     }
 
