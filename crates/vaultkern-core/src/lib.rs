@@ -2,6 +2,10 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+pub mod vault_codec;
+pub use vault_codec::{
+    EncodedVault, KdbxVaultCodec, VAULTKERN_KDBX_GENERATOR, VaultCodec, enforce_history_limits,
+};
 pub use vaultkern_crypto::{CompositeKey, CryptoError, KdfProfile, parse_key_file_bytes};
 pub use vaultkern_kdbx::{
     Compression, ExternalKdfAlgorithm, ExternalKdfConfirmation, ExternalKdfDecision,
@@ -1237,7 +1241,9 @@ impl KeepassCore {
         composite_key: &CompositeKey,
         profile: SaveProfile,
     ) -> Result<Vec<u8>, vaultkern_kdbx::KdbxError> {
-        save_kdbx_bytes(vault, composite_key, &profile)
+        KdbxVaultCodec
+            .encode_with_composite_key(vault.clone(), composite_key, profile)
+            .map(|encoded| encoded.bytes)
     }
 
     pub fn save_kdbx_with_stable_profile(
@@ -1254,7 +1260,12 @@ impl KeepassCore {
         bytes: &[u8],
         composite_key: &CompositeKey,
     ) -> Result<Vault, vaultkern_kdbx::KdbxError> {
-        load_kdbx_bytes(bytes, composite_key)
+        KdbxVaultCodec.decode_with_policy(
+            bytes,
+            composite_key,
+            &ExternalKdfPolicy::Mobile,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
     }
 
     pub fn load_kdbx_with_policy(
@@ -1264,7 +1275,7 @@ impl KeepassCore {
         policy: &dyn KdfPolicyEvaluator,
         confirmation: ExternalKdfConfirmation,
     ) -> Result<Vault, vaultkern_kdbx::KdbxError> {
-        load_kdbx_with_policy(bytes, composite_key, policy, confirmation)
+        KdbxVaultCodec.decode_with_policy(bytes, composite_key, policy, confirmation)
     }
 
     pub fn inspect_kdbx_header(
@@ -3500,7 +3511,8 @@ impl KeepassCore {
         confirmation: ExternalKdfConfirmation,
     ) -> Result<LoadedDatabase, CoreError> {
         let header = inspect_kdbx_header(bytes)?;
-        let vault = load_kdbx_with_policy(bytes, composite_key, policy, confirmation)?;
+        let vault =
+            KdbxVaultCodec.decode_with_policy(bytes, composite_key, policy, confirmation)?;
         Ok(LoadedDatabase {
             summary: summarize_vault(&vault),
             inspection: build_inspection(header),
@@ -3529,7 +3541,8 @@ impl KeepassCore {
         confirmation: ExternalKdfConfirmation,
     ) -> Result<LoadedDatabaseView, CoreError> {
         let header = inspect_kdbx_header(bytes)?;
-        let vault = load_kdbx_with_policy(bytes, composite_key, policy, confirmation)?;
+        let vault =
+            KdbxVaultCodec.decode_with_policy(bytes, composite_key, policy, confirmation)?;
         Ok(LoadedDatabaseView {
             database: project_vault(&vault),
             inspection: build_inspection(header),

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use vaultkern_core::{
-    CompositeKey, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxError, TransformedKey, Vault,
-    derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
+    CompositeKey, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxError, KdbxVaultCodec,
+    TransformedKey, Vault, VaultCodec,
 };
 use zeroize::Zeroizing;
 
@@ -318,7 +318,7 @@ fn unlock_from_blob_with_cache_policy(
         }
     };
 
-    match load_kdbx_with_transformed_key(file_bytes, blob.cached_transformed_key()) {
+    match KdbxVaultCodec.decode(file_bytes, blob.cached_transformed_key()) {
         Ok(vault) => {
             let credential_shape = blob.master_credential().shape();
             let (_, transformed_key) = blob.into_parts();
@@ -338,13 +338,13 @@ fn unlock_from_blob_with_cache_policy(
         return Ok(UnlockAttempt::OpenAppRequired);
     }
 
-    let refreshed = derive_transformed_key_with_policy(
+    let refreshed = KdbxVaultCodec.derive_key_with_policy(
         file_bytes,
         &blob.master_credential().to_composite_key(),
         policy,
         confirmation,
     )?;
-    let vault = match load_kdbx_with_transformed_key(file_bytes, &refreshed) {
+    let vault = match KdbxVaultCodec.decode(file_bytes, &refreshed) {
         Ok(vault) => vault,
         Err(KdbxError::HeaderHmacMismatch) => {
             if refresh_cached_transformed_key {

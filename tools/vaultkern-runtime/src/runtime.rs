@@ -21,12 +21,12 @@ use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomDataInput, EntryCustomFieldInput,
     EntryTimesUpdate, EntryUpdate, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher,
-    KdbxError, KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile,
-    ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, TotpSpec, TransformedKey, Vault,
-    VaultBinTemplateMetadataUpdate, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate,
-    VaultMetadataUpdate, derive_transformed_key_with_policy, load_kdbx_with_transformed_key,
-    load_kdbx_with_transformed_key_diagnostic, parse_key_file_bytes, required_version,
-    retained_or_recommended_save_kdf, save_kdbx_with_transformed_key, three_way_field_patch,
+    KdbxError, KdbxVaultCodec, KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile,
+    ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, TotpSpec, TransformedKey,
+    VAULTKERN_KDBX_GENERATOR, Vault, VaultBinTemplateMetadataUpdate, VaultCodec,
+    VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate, VaultMetadataUpdate,
+    enforce_history_limits, parse_key_file_bytes, retained_or_recommended_save_kdf,
+    three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillCreateContextDto,
@@ -103,7 +103,6 @@ use crate::unlock::{
 };
 use crate::vault_reference_store::{PendingVaultCleanup, StoredVaultSource, VaultReferenceStore};
 
-const VAULTKERN_KDBX_GENERATOR: &str = "VaultKern";
 const PLATFORM_PASSKEY_RP_NAME_KEY: &str = "VaultKern.PlatformPasskey.RelyingPartyName";
 const PLATFORM_PASSKEY_USER_DISPLAY_NAME_KEY: &str = "VaultKern.PlatformPasskey.UserDisplayName";
 const AUTOSAVE_DELAY_SECONDS_KEY: &str = "VaultKern.AutosaveDelaySeconds";
@@ -524,7 +523,9 @@ impl Runtime {
         bytes: &[u8],
         key: &TransformedKey,
     ) -> std::result::Result<SessionLoadedDatabase, KdbxError> {
-        load_kdbx_with_transformed_key(bytes, key).map(|vault| SessionLoadedDatabase { vault })
+        KdbxVaultCodec
+            .decode(bytes, key)
+            .map(|vault| SessionLoadedDatabase { vault })
     }
 
     fn inspected_save_profile(&self, bytes: &[u8]) -> Result<SaveProfile> {
@@ -1570,12 +1571,11 @@ impl Runtime {
                     .core
                     .save_kdbx(&legacy, &key, migration_profile.clone())
                     .with_context(|| format!("failed to migrate legacy vault: {vault_id}"))?;
-                let transformed_key =
-                    derive_transformed_key_with_policy(&migrated, &key, &policy, confirmation)
-                        .with_context(|| {
-                            format!("failed to derive migrated vault key: {vault_id}")
-                        })?;
-                let vault = load_kdbx_with_transformed_key_diagnostic(&migrated, &transformed_key)
+                let transformed_key = KdbxVaultCodec
+                    .derive_key_with_policy(&migrated, &key, &policy, confirmation)
+                    .with_context(|| format!("failed to derive migrated vault key: {vault_id}"))?;
+                let vault = KdbxVaultCodec
+                    .decode_diagnostic(&migrated, &transformed_key)
                     .with_context(|| format!("failed to load migrated vault: {vault_id}"))?;
                 let name = vault.name.clone();
                 (
@@ -1589,12 +1589,12 @@ impl Runtime {
                     Some(migrated),
                 )
             } else {
-                let transformed_key =
-                    derive_transformed_key_with_policy(&loaded.bytes, &key, &policy, confirmation)
-                        .with_context(|| format!("failed to derive vault key: {vault_id}"))?;
-                let vault =
-                    load_kdbx_with_transformed_key_diagnostic(&loaded.bytes, &transformed_key)
-                        .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
+                let transformed_key = KdbxVaultCodec
+                    .derive_key_with_policy(&loaded.bytes, &key, &policy, confirmation)
+                    .with_context(|| format!("failed to derive vault key: {vault_id}"))?;
+                let vault = KdbxVaultCodec
+                    .decode_diagnostic(&loaded.bytes, &transformed_key)
+                    .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
                 let name = vault.name.clone();
                 (
                     vault,
@@ -1843,13 +1843,14 @@ impl Runtime {
                 .context("synced base is unavailable for quick unlock enrollment")?,
         };
         let (policy, _) = self.external_open_kdf_policy();
-        let transformed_key = derive_transformed_key_with_policy(
+        let transformed_key = KdbxVaultCodec.derive_key_with_policy(
             &file_bytes,
             &master_credential.to_composite_key(),
             &policy,
             confirmation,
         )?;
-        load_kdbx_with_transformed_key(&file_bytes, &transformed_key)
+        KdbxVaultCodec
+            .decode(&file_bytes, &transformed_key)
             .context("quick unlock enrollment credentials do not unlock the vault")?;
         let storage_key = quick_unlock_storage_key(&current_vault_ref_id);
         enroll_unlock_blob(
@@ -2252,7 +2253,7 @@ impl Runtime {
         };
         let candidate = MasterCredential::new(Some(password.as_bytes()), None)?;
         let (policy, confirmation) = self.external_open_kdf_policy();
-        let candidate_key = derive_transformed_key_with_policy(
+        let candidate_key = KdbxVaultCodec.derive_key_with_policy(
             &base,
             &candidate.to_composite_key(),
             &policy,
@@ -10449,80 +10450,17 @@ fn history_matches_passkey_registration_rollback(
 fn save_kdbx_with_history_limits_transformed(
     vault: &mut Vault,
     transformed_key: &TransformedKey,
-    mut save_profile: SaveProfile,
+    save_profile: SaveProfile,
 ) -> std::result::Result<Vec<u8>, KdbxError> {
-    vault.generator = Some(VAULTKERN_KDBX_GENERATOR.into());
-    if required_version(vault) == KdbxVersion::V4_1 {
-        save_profile.version = KdbxVersion::V4_1;
-    }
-
-    let has_history_limits = vault.history_max_items.is_some() || vault.history_max_size.is_some();
-    let mut history_snapshots =
-        has_history_limits.then(|| clone_entry_histories(&vault.root).into_iter());
-    if has_history_limits {
-        enforce_history_limits(vault);
-    }
-    let result = save_kdbx_with_transformed_key(vault, transformed_key, &save_profile);
-    if let Some(history_snapshots) = &mut history_snapshots {
-        restore_entry_histories(&mut vault.root, history_snapshots);
-    }
-    let bytes = result?;
-    let header = vaultkern_core::KdbxHeader::decode(&bytes)?;
-    vault.kdf_parameters = Some(header.kdf_parameters.encode()?);
-    Ok(bytes)
+    let encoded = KdbxVaultCodec.encode(vault.clone(), transformed_key, save_profile)?;
+    *vault = encoded.vault;
+    Ok(encoded.bytes)
 }
 
 fn has_vaultkern_sync_lineage(base: &Vault, remote: &Vault) -> bool {
     base.root.id == remote.root.id
         && base.generator.as_deref() == Some(VAULTKERN_KDBX_GENERATOR)
         && remote.generator.as_deref() == Some(VAULTKERN_KDBX_GENERATOR)
-}
-
-fn clone_entry_histories(group: &vaultkern_core::Group) -> Vec<Vec<Entry>> {
-    let mut snapshots = Vec::new();
-    collect_entry_histories(group, &mut snapshots);
-    snapshots
-}
-
-fn collect_entry_histories(group: &vaultkern_core::Group, snapshots: &mut Vec<Vec<Entry>>) {
-    for entry in &group.entries {
-        snapshots.push(entry.history.clone());
-    }
-
-    for child in &group.children {
-        collect_entry_histories(child, snapshots);
-    }
-}
-
-fn restore_entry_histories(
-    group: &mut vaultkern_core::Group,
-    snapshots: &mut std::vec::IntoIter<Vec<Entry>>,
-) {
-    for entry in &mut group.entries {
-        if let Some(history) = snapshots.next() {
-            entry.history = history;
-        }
-    }
-
-    for child in &mut group.children {
-        restore_entry_histories(child, snapshots);
-    }
-}
-
-fn enforce_history_limits(vault: &mut Vault) {
-    if let Some(max_items) = vault
-        .history_max_items
-        .and_then(|value| usize::try_from(value).ok())
-    {
-        enforce_history_item_limit(&mut vault.root, max_items);
-    }
-
-    if let Some(max_size) = vault
-        .history_max_size
-        .and_then(|value| usize::try_from(value).ok())
-    {
-        enforce_history_size_limit(vault, max_size);
-    }
 }
 
 pub(crate) fn ensure_patch_conflict_history_is_recoverable(
@@ -10562,120 +10500,6 @@ fn entries_by_id(group: &vaultkern_core::Group) -> BTreeMap<Uuid, &Entry> {
     let mut entries = BTreeMap::new();
     collect(group, &mut entries);
     entries
-}
-
-fn enforce_history_item_limit(group: &mut vaultkern_core::Group, max_items: usize) {
-    for entry in &mut group.entries {
-        while entry.history.len() > max_items {
-            entry.history.remove(0);
-        }
-    }
-
-    for child in &mut group.children {
-        enforce_history_item_limit(child, max_items);
-    }
-}
-
-fn enforce_history_size_limit(vault: &mut Vault, max_size: usize) {
-    while total_history_size(&vault.root) > max_size {
-        if !remove_oldest_history_item(&mut vault.root) {
-            break;
-        }
-    }
-}
-
-fn total_history_size(group: &vaultkern_core::Group) -> usize {
-    let entry_size = group
-        .entries
-        .iter()
-        .flat_map(|entry| entry.history.iter())
-        .map(estimated_entry_size)
-        .sum::<usize>();
-    let child_size = group.children.iter().map(total_history_size).sum::<usize>();
-    entry_size + child_size
-}
-
-fn remove_oldest_history_item(group: &mut vaultkern_core::Group) -> bool {
-    let Some(path) = oldest_history_path(group) else {
-        return false;
-    };
-    remove_history_item_at_path(group, &path)
-}
-
-fn oldest_history_path(group: &vaultkern_core::Group) -> Option<Vec<usize>> {
-    let mut oldest: Option<(u64, Vec<usize>)> = None;
-    collect_oldest_history_path(group, &mut Vec::new(), &mut oldest);
-    oldest.map(|(_, path)| path)
-}
-
-fn collect_oldest_history_path(
-    group: &vaultkern_core::Group,
-    group_path: &mut Vec<usize>,
-    oldest: &mut Option<(u64, Vec<usize>)>,
-) {
-    for (entry_index, entry) in group.entries.iter().enumerate() {
-        if let Some(history) = entry.history.first() {
-            let mut path = group_path.clone();
-            path.push(entry_index);
-            let modified_at = history.modified_at;
-            if oldest
-                .as_ref()
-                .map(|(oldest_modified_at, _)| modified_at < *oldest_modified_at)
-                .unwrap_or(true)
-            {
-                *oldest = Some((modified_at, path));
-            }
-        }
-    }
-
-    for (child_index, child) in group.children.iter().enumerate() {
-        group_path.push(child_index);
-        collect_oldest_history_path(child, group_path, oldest);
-        group_path.pop();
-    }
-}
-
-fn remove_history_item_at_path(group: &mut vaultkern_core::Group, path: &[usize]) -> bool {
-    if path.len() == 1 {
-        return group
-            .entries
-            .get_mut(path[0])
-            .and_then(|entry| {
-                if entry.history.is_empty() {
-                    None
-                } else {
-                    Some(entry.history.remove(0))
-                }
-            })
-            .is_some();
-    }
-
-    let Some((child_index, rest)) = path.split_first() else {
-        return false;
-    };
-    group
-        .children
-        .get_mut(*child_index)
-        .map(|child| remove_history_item_at_path(child, rest))
-        .unwrap_or(false)
-}
-
-fn estimated_entry_size(entry: &vaultkern_core::Entry) -> usize {
-    entry.title.len()
-        + entry.username.len()
-        + entry.password.len()
-        + entry.url.len()
-        + entry.notes.len()
-        + entry
-            .attributes
-            .iter()
-            .map(|(key, field)| key.len() + field.value.len())
-            .sum::<usize>()
-        + entry
-            .attachments
-            .iter()
-            .map(|(name, attachment)| name.len() + attachment.data.len())
-            .sum::<usize>()
 }
 
 fn database_settings_dto(
@@ -11899,15 +11723,17 @@ mod tests {
         let original = core
             .save_kdbx(&Vault::empty("minimum version"), &key, profile.clone())
             .expect("save initial vault");
-        let transformed = derive_transformed_key_with_policy(
-            &original,
-            &key,
-            &ExternalKdfPolicy::Desktop,
-            ExternalKdfConfirmation::Unconfirmed,
-        )
-        .expect("derive session key");
-        let mut vault =
-            load_kdbx_with_transformed_key(&original, &transformed).expect("load initial vault");
+        let transformed = KdbxVaultCodec
+            .derive_key_with_policy(
+                &original,
+                &key,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Unconfirmed,
+            )
+            .expect("derive session key");
+        let mut vault = KdbxVaultCodec
+            .decode(&original, &transformed)
+            .expect("load initial vault");
         let mut entry = Entry::new("excluded");
         entry.exclude_from_reports = true;
         vault.root.entries.push(entry);
@@ -11922,8 +11748,9 @@ mod tests {
         )
         .expect("runtime save should promote the file version");
         let header = vaultkern_core::inspect_kdbx_header(&bytes).expect("inspect saved header");
-        let loaded =
-            load_kdbx_with_transformed_key(&bytes, &transformed).expect("reload promoted vault");
+        let loaded = KdbxVaultCodec
+            .decode(&bytes, &transformed)
+            .expect("reload promoted vault");
 
         assert_eq!(header.version, KdbxVersion::V4_1);
         assert!(loaded.root.entries[0].exclude_from_reports);
@@ -11946,14 +11773,15 @@ mod tests {
                 },
             )
             .unwrap();
-        let transformed = derive_transformed_key_with_policy(
-            &original,
-            &key,
-            &ExternalKdfPolicy::Desktop,
-            ExternalKdfConfirmation::Unconfirmed,
-        )
-        .unwrap();
-        let mut vault = load_kdbx_with_transformed_key(&original, &transformed).unwrap();
+        let transformed = KdbxVaultCodec
+            .derive_key_with_policy(
+                &original,
+                &key,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Unconfirmed,
+            )
+            .unwrap();
+        let mut vault = KdbxVaultCodec.decode(&original, &transformed).unwrap();
         vault.description = Some("edited without retaining the password".into());
 
         let saved = save_kdbx_with_history_limits_transformed(
@@ -11967,7 +11795,7 @@ mod tests {
             },
         )
         .unwrap();
-        let reloaded = load_kdbx_with_transformed_key(&saved, &transformed).unwrap();
+        let reloaded = KdbxVaultCodec.decode(&saved, &transformed).unwrap();
         let original_header = vaultkern_core::KdbxHeader::decode(&original).unwrap();
         let saved_header = vaultkern_core::KdbxHeader::decode(&saved).unwrap();
 
@@ -12293,7 +12121,7 @@ mod tests {
             runtime.vault_session.find_loaded(&vault_id).unwrap(),
         )
         .unwrap();
-        let remote_vault = load_kdbx_with_transformed_key(&remote, &transformed).unwrap();
+        let remote_vault = KdbxVaultCodec.decode(&remote, &transformed).unwrap();
         assert_eq!(autosave_delay_seconds(&remote_vault), Some(37));
     }
 
@@ -12735,7 +12563,7 @@ mod tests {
         let remote = runtime
             .read_test_onedrive_item_bytes("drive-1", "item-1")
             .unwrap();
-        let mut foreign = load_kdbx_with_transformed_key(&remote, &transformed).unwrap();
+        let mut foreign = KdbxVaultCodec.decode(&remote, &transformed).unwrap();
         foreign.root.id = Uuid::new_v4();
         let foreign = save_kdbx_with_history_limits_transformed(
             &mut foreign,
@@ -13169,30 +12997,6 @@ mod tests {
         fn delete(&self, _key: &str) -> Result<()> {
             Ok(())
         }
-    }
-
-    #[test]
-    fn history_snapshot_restore_preserves_duplicate_entry_histories_by_position() {
-        let duplicate_id = Uuid::new_v4();
-        let mut group = vaultkern_core::Group::new("Root");
-
-        let mut first = Entry::new("First");
-        first.id = duplicate_id;
-        first.history.push(Entry::new("First old"));
-        let mut second = Entry::new("Second");
-        second.id = duplicate_id;
-        second.history.push(Entry::new("Second old"));
-        group.entries.push(first);
-        group.entries.push(second);
-
-        let mut snapshots = clone_entry_histories(&group).into_iter();
-        group.entries[0].history.clear();
-        group.entries[1].history.clear();
-
-        restore_entry_histories(&mut group, &mut snapshots);
-
-        assert_eq!(group.entries[0].history[0].title, "First old");
-        assert_eq!(group.entries[1].history[0].title, "Second old");
     }
 
     #[derive(Default)]
@@ -14536,13 +14340,14 @@ mod tests {
         let base_bytes = core
             .save_kdbx(&base, &key, SaveProfile::recommended())
             .unwrap();
-        let transformed_key = derive_transformed_key_with_policy(
-            &base_bytes,
-            &key,
-            &ExternalKdfPolicy::Desktop,
-            ExternalKdfConfirmation::Unconfirmed,
-        )
-        .unwrap();
+        let transformed_key = KdbxVaultCodec
+            .derive_key_with_policy(
+                &base_bytes,
+                &key,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Unconfirmed,
+            )
+            .unwrap();
 
         let remote_passkey = create_platform_registration_with_credential_id(
             PlatformPasskeyRegistrationRequest {
@@ -14556,7 +14361,9 @@ mod tests {
         )
         .unwrap()
         .passkey;
-        let mut remote = load_kdbx_with_transformed_key(&base_bytes, &transformed_key).unwrap();
+        let mut remote = KdbxVaultCodec
+            .decode(&base_bytes, &transformed_key)
+            .unwrap();
         core.set_entry_passkey(&mut remote, &entry_id, remote_passkey)
             .unwrap();
         remote.root.entries[0].modified_at = 300;
@@ -17033,7 +16840,7 @@ mod tests {
             runtime.vault_session.find_loaded(&vault_id).unwrap(),
         )
         .unwrap();
-        let loaded_remote = load_kdbx_with_transformed_key(&remote, &transformed).unwrap();
+        let loaded_remote = KdbxVaultCodec.decode(&remote, &transformed).unwrap();
         assert_eq!(
             entry_fields_for_vault(&runtime.core, &loaded_remote, &entry.id).unwrap(),
             desired_fields
@@ -18077,13 +17884,14 @@ mod tests {
             .unwrap();
 
         let stale_session_key = Arc::new(
-            derive_transformed_key_with_policy(
-                &remote,
-                &key,
-                &ExternalKdfPolicy::Desktop,
-                ExternalKdfConfirmation::Unconfirmed,
-            )
-            .unwrap(),
+            KdbxVaultCodec
+                .derive_key_with_policy(
+                    &remote,
+                    &key,
+                    &ExternalKdfPolicy::Desktop,
+                    ExternalKdfConfirmation::Unconfirmed,
+                )
+                .unwrap(),
         );
         let chain = runtime
             .remote_cache
@@ -19403,7 +19211,7 @@ mod tests {
             runtime.vault_session.find_loaded(&vault_id).unwrap(),
         )
         .unwrap();
-        let mut remote_vault = load_kdbx_with_transformed_key(&remote, &transformed).unwrap();
+        let mut remote_vault = KdbxVaultCodec.decode(&remote, &transformed).unwrap();
         let changed_remote = save_kdbx_with_history_limits_transformed(
             &mut remote_vault,
             &transformed,
@@ -19470,7 +19278,7 @@ mod tests {
             runtime.vault_session.find_loaded(&vault_id).unwrap(),
         )
         .unwrap();
-        let base = load_kdbx_with_transformed_key(&base_bytes, &transformed).unwrap();
+        let base = KdbxVaultCodec.decode(&base_bytes, &transformed).unwrap();
         let base_username = entry.username.clone();
         let remote_generation = |username: &str, modified_at: u64| {
             let mut vault = base.clone();
@@ -19579,7 +19387,7 @@ mod tests {
         let main_bytes = runtime
             .read_test_onedrive_item_bytes("drive-1", "item-1")
             .unwrap();
-        let main = load_kdbx_with_transformed_key(&main_bytes, &transformed).unwrap();
+        let main = KdbxVaultCodec.decode(&main_bytes, &transformed).unwrap();
         let main_entry = main
             .root
             .entries
@@ -19604,7 +19412,9 @@ mod tests {
         let conflict_bytes = runtime
             .read_test_onedrive_item_bytes(&conflicts[0].drive_id, &conflicts[0].item_id)
             .unwrap();
-        let conflict = load_kdbx_with_transformed_key(&conflict_bytes, &transformed).unwrap();
+        let conflict = KdbxVaultCodec
+            .decode(&conflict_bytes, &transformed)
+            .unwrap();
         let conflict_entry = conflict
             .root
             .entries
