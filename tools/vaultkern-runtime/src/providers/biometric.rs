@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::Result;
 
 #[allow(dead_code)]
@@ -5,6 +7,17 @@ pub trait BiometricProvider: Send {
     fn set_parent_window_handle(&mut self, _parent_window: Option<usize>) {}
     fn supports_quick_unlock(&self) -> bool;
     fn authorize(&self, reason: &str) -> Result<()>;
+
+    fn authorize_cancellable(&self, reason: &str, cancelled: &AtomicBool) -> Result<()> {
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("biometric authorization was cancelled");
+        }
+        self.authorize(reason)?;
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("biometric authorization was cancelled");
+        }
+        Ok(())
+    }
 }
 
 pub struct UnsupportedBiometricProvider;
@@ -43,10 +56,15 @@ impl BiometricProvider for WindowsHelloBiometricProvider {
     }
 
     fn authorize(&self, reason: &str) -> Result<()> {
+        self.authorize_cancellable(reason, &AtomicBool::new(false))
+    }
+
+    fn authorize_cancellable(&self, reason: &str, cancelled: &AtomicBool) -> Result<()> {
         use windows::Security::Credentials::UI::{
             UserConsentVerificationResult, UserConsentVerifier,
         };
         use windows::core::HSTRING;
+        use windows_future::AsyncStatus;
 
         let reason = HSTRING::from(reason);
         let operation = if let Some(parent_window) = self.parent_window {
@@ -64,7 +82,23 @@ impl BiometricProvider for WindowsHelloBiometricProvider {
         } else {
             UserConsentVerifier::RequestVerificationAsync(&reason)?
         };
-        let result = operation.join()?;
+        let result = loop {
+            if cancelled.load(Ordering::Acquire) {
+                let _ = operation.Cancel();
+                anyhow::bail!("biometric authorization was cancelled");
+            }
+            let status = operation.Status()?;
+            if status == AsyncStatus::Completed || status == AsyncStatus::Error {
+                break operation.GetResults()?;
+            }
+            if status == AsyncStatus::Canceled {
+                anyhow::bail!("biometric authorization was cancelled");
+            }
+            if status != AsyncStatus::Started {
+                anyhow::bail!("biometric authorization entered an unknown async state");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
         if result == UserConsentVerificationResult::Verified {
             Ok(())
         } else {

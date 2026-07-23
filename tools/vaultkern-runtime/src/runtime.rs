@@ -2084,6 +2084,28 @@ impl Runtime {
         method: PasskeyUserVerificationMethodDto,
         password: Option<&str>,
     ) -> Result<PasskeyUserVerifiedDto> {
+        self.verify_passkey_user_cancellable(
+            ceremony_token,
+            expected_phase,
+            vault_id,
+            method,
+            password,
+            &std::sync::atomic::AtomicBool::new(false),
+        )
+    }
+
+    fn verify_passkey_user_cancellable(
+        &mut self,
+        ceremony_token: &str,
+        expected_phase: PasskeyCeremonyPhaseDto,
+        vault_id: &str,
+        method: PasskeyUserVerificationMethodDto,
+        password: Option<&str>,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<PasskeyUserVerifiedDto> {
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
+        }
         if !matches!(
             expected_phase,
             PasskeyCeremonyPhaseDto::UserAuthorization | PasskeyCeremonyPhaseDto::UserSelection
@@ -2113,8 +2135,12 @@ impl Runtime {
                 self.verify_passkey_user_with_master_password(vault_id, password)?;
             }
             PasskeyUserVerificationMethodDto::QuickUnlock => {
-                self.verify_passkey_user_with_quick_unlock(vault_id)?;
+                self.verify_passkey_user_with_quick_unlock_cancellable(vault_id, cancelled)?;
             }
+        }
+
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
         }
 
         let verified_at_epoch_ms = self.current_unix_time_ms();
@@ -2200,7 +2226,11 @@ impl Runtime {
         Ok(())
     }
 
-    fn verify_passkey_user_with_quick_unlock(&self, vault_id: &str) -> Result<()> {
+    fn verify_passkey_user_with_quick_unlock_cancellable(
+        &self,
+        vault_id: &str,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<()> {
         self.ensure_quick_unlock_policy_enabled()?;
         if !self.biometric.supports_quick_unlock() {
             anyhow::bail!("passkey quick unlock verification is unavailable");
@@ -2220,7 +2250,13 @@ impl Runtime {
         if !self.secure_storage.contains(&storage_key).unwrap_or(false) {
             anyhow::bail!("quick unlock is not enabled for the current vault");
         }
-        self.biometric.authorize("Verify user for passkey")?;
+        let authorization = self
+            .biometric
+            .authorize_cancellable("Verify user for passkey", cancelled);
+        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
+        }
+        authorization?;
         self.ensure_quick_unlock_policy_enabled()?;
         Ok(())
     }
@@ -4711,8 +4747,8 @@ impl Runtime {
         command: RuntimeCommand,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<RuntimeResponse> {
-        self.authorize_browser_command(&command, cancelled)?;
-        self.handle(command)
+        self.handle_browser_command_cancellable_with_quick_unlock_handoff(command, cancelled)
+            .map(|(response, _)| response)
     }
 
     pub fn handle_browser_command_cancellable_with_quick_unlock_handoff(
@@ -4724,7 +4760,7 @@ impl Runtime {
         Option<QuickUnlockReconciliationCredentials>,
     )> {
         self.authorize_browser_command(&command, cancelled)?;
-        self.handle_with_quick_unlock_handoff(command)
+        self.handle_with_quick_unlock_handoff_cancellable(command, cancelled)
     }
 
     fn authorize_browser_command(
@@ -4736,9 +4772,14 @@ impl Runtime {
             anyhow::bail!("browser request was cancelled");
         }
         if browser_command_authorization(command) == BrowserCommandAuthorization::FreshInteractive {
-            self.biometric
-                .authorize("Allow browser access to VaultKern secrets or security settings")
-                .context("fresh browser request verification failed")?;
+            let authorization = self.biometric.authorize_cancellable(
+                "Allow browser access to VaultKern secrets or security settings",
+                cancelled,
+            );
+            if cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                anyhow::bail!("browser request was cancelled");
+            }
+            authorization.context("fresh browser request verification failed")?;
         }
         if cancelled.load(std::sync::atomic::Ordering::Acquire) {
             anyhow::bail!("browser request was cancelled");
@@ -4770,6 +4811,38 @@ impl Runtime {
     )> {
         self.pending_quick_unlock_enrollment = None;
         let response = self.handle_inner(command);
+        let credentials = self.pending_quick_unlock_enrollment.take();
+        response.map(|response| (response, credentials.map(|pending| pending.credentials)))
+    }
+
+    fn handle_with_quick_unlock_handoff_cancellable(
+        &mut self,
+        command: RuntimeCommand,
+        cancelled: &std::sync::atomic::AtomicBool,
+    ) -> Result<(
+        RuntimeResponse,
+        Option<QuickUnlockReconciliationCredentials>,
+    )> {
+        self.pending_quick_unlock_enrollment = None;
+        let response = match command {
+            RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                method,
+                password,
+            } => self
+                .verify_passkey_user_cancellable(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    method,
+                    password.as_deref(),
+                    cancelled,
+                )
+                .map(RuntimeResponse::PasskeyUserVerified),
+            command => self.handle_inner(command),
+        };
         let credentials = self.pending_quick_unlock_enrollment.take();
         response.map(|response| (response, credentials.map(|pending| pending.credentials)))
     }
@@ -11571,7 +11644,7 @@ mod tests {
     use zeroize::Zeroizing;
 
     #[test]
-    fn browser_secret_reads_and_policy_mutations_require_fresh_verification() {
+    fn browser_authorization_matches_the_resident_autofill_contract() {
         assert!(browser_command_requires_fresh_verification(
             &RuntimeCommand::GetEntryDetail {
                 vault_id: "vault".into(),
@@ -11582,6 +11655,20 @@ mod tests {
             &RuntimeCommand::UpdateDatabaseSettings {
                 vault_id: "vault".into(),
                 update: DatabaseSettingsUpdateDto::default(),
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::GetAutofillCredential {
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
+                url: "https://example.com/login".into(),
+            }
+        ));
+        assert!(!browser_command_requires_fresh_verification(
+            &RuntimeCommand::GetAutofillEntryFields {
+                vault_id: "vault".into(),
+                entry_id: "entry".into(),
+                url: "https://example.com/login".into(),
             }
         ));
         assert!(!browser_command_requires_fresh_verification(
@@ -11677,6 +11764,73 @@ mod tests {
             .expect_err("cancellation during verification must stop command dispatch");
 
         assert!(error.to_string().contains("cancelled"));
+    }
+
+    #[test]
+    fn browser_cancellation_interrupts_an_in_progress_biometric_verification() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let mut runtime = Runtime::for_tests();
+        runtime.biometric = Box::new(WaitingCancellableBiometricProvider {
+            started: started_tx,
+        });
+        let request_cancelled = cancelled.clone();
+
+        std::thread::spawn(move || {
+            let result = runtime.handle_browser_command_cancellable(
+                RuntimeCommand::GetEntryDetail {
+                    vault_id: "missing-vault".into(),
+                    entry_id: "missing-entry".into(),
+                },
+                request_cancelled.as_ref(),
+            );
+            let _ = result_tx.send(result.map_err(|error| error.to_string()));
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("biometric verification started");
+        cancelled.store(true, Ordering::Release);
+        let error = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancellation must release the runtime worker")
+            .expect_err("cancelled verification must not dispatch the command");
+        assert!(error.contains("browser request was cancelled"), "{error}");
+    }
+
+    #[test]
+    fn browser_cancellation_interrupts_passkey_user_verification_too() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let mut runtime = Runtime::for_tests_with_quick_unlock();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        runtime
+            .enroll_quick_unlock_for_current_vault(Some("demo-password"), None)
+            .expect("enroll quick unlock");
+        runtime.biometric = Box::new(WaitingCancellableBiometricProvider {
+            started: started_tx,
+        });
+        let request_cancelled = cancelled.clone();
+
+        std::thread::spawn(move || {
+            let result = runtime.verify_passkey_user_with_quick_unlock_cancellable(
+                &opened.vault_id,
+                request_cancelled.as_ref(),
+            );
+            let _ = result_tx.send(result.map_err(|error| error.to_string()));
+        });
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("passkey verification started");
+        cancelled.store(true, Ordering::Release);
+        let error = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("cancellation must release passkey verification")
+            .expect_err("cancelled passkey verification must not succeed");
+        assert!(error.contains("browser request was cancelled"), "{error}");
     }
 
     #[test]
@@ -13106,6 +13260,30 @@ mod tests {
             self.cancelled
                 .store(true, std::sync::atomic::Ordering::Release);
             Ok(())
+        }
+    }
+
+    struct WaitingCancellableBiometricProvider {
+        started: std::sync::mpsc::SyncSender<()>,
+    }
+
+    impl BiometricProvider for WaitingCancellableBiometricProvider {
+        fn supports_quick_unlock(&self) -> bool {
+            true
+        }
+
+        fn authorize(&self, _reason: &str) -> Result<()> {
+            panic!("browser verification must use the cancellable provider entrypoint")
+        }
+
+        fn authorize_cancellable(&self, _reason: &str, cancelled: &AtomicBool) -> Result<()> {
+            self.started
+                .send(())
+                .expect("publish biometric verification start");
+            while !cancelled.load(Ordering::Acquire) {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            anyhow::bail!("browser request was cancelled")
         }
     }
 

@@ -415,10 +415,10 @@ fn merge_custom_data_fields(
     let remote_units = custom_data_units(remote, remote_blocks);
     let mut merged_units = BTreeMap::new();
     for key in union_keys3(&base_units, &local_units, &remote_units) {
-        if let Some(unit) = merge_value(
-            &base_units.get(&key).cloned(),
-            &local_units.get(&key).cloned(),
-            &remote_units.get(&key).cloned(),
+        if let Some(unit) = merge_custom_data_unit(
+            base_units.get(&key),
+            local_units.get(&key),
+            remote_units.get(&key),
             prefer_local,
             state,
         ) {
@@ -446,6 +446,49 @@ fn merge_custom_data_fields(
         None,
     );
     apply_custom_data_last_modified(merged_blocks, &merged_units);
+    merged
+}
+
+fn merge_custom_data_unit(
+    base: Option<&CustomDataUnit>,
+    local: Option<&CustomDataUnit>,
+    remote: Option<&CustomDataUnit>,
+    prefer_local: bool,
+    state: &mut FieldMerge,
+) -> Option<CustomDataUnit> {
+    let base_value = base.map(|unit| unit.value.clone());
+    let local_value = local.map(|unit| unit.value.clone());
+    let remote_value = remote.map(|unit| unit.value.clone());
+    let selected_value = merge_value(
+        &base_value,
+        &local_value,
+        &remote_value,
+        prefer_local,
+        state,
+    );
+    let merged = selected_value.map(|value| {
+        let local_timestamp = local
+            .filter(|unit| unit.value == value)
+            .map(|unit| unit.last_modified);
+        let remote_timestamp = remote
+            .filter(|unit| unit.value == value)
+            .map(|unit| unit.last_modified);
+        let last_modified = match (local_timestamp, remote_timestamp) {
+            (Some(local), Some(remote)) => local.max(remote),
+            (Some(local), None) => local,
+            (None, Some(remote)) => remote,
+            (None, None) => base
+                .filter(|unit| unit.value == value)
+                .and_then(|unit| unit.last_modified),
+        };
+        CustomDataUnit {
+            value,
+            last_modified,
+        }
+    });
+    if merged.as_ref() != remote {
+        state.changed_from_remote = true;
+    }
     merged
 }
 

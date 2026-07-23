@@ -163,6 +163,75 @@ fn disjoint_group_and_entry_custom_data_changes_merge_with_item_fidelity() {
 }
 
 #[test]
+fn identical_meta_custom_data_values_merge_the_latest_item_timestamp_without_conflict() {
+    let mut base = Vault::empty("Shared");
+    seed_meta_custom_data(&mut base, "shared", "base", 10);
+
+    let mut local = base.clone();
+    seed_meta_custom_data(&mut local, "shared", "converged", 20);
+    let mut remote = base.clone();
+    seed_meta_custom_data(&mut remote, "shared", "converged", 30);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    assert_eq!(patched.vault.meta_custom_data["shared"], "converged");
+    assert_eq!(
+        custom_data_item(&patched.vault.meta_custom_data_blocks, "shared").last_modified,
+        Some(30)
+    );
+}
+
+#[test]
+fn identical_group_custom_data_values_merge_the_latest_item_timestamp_without_conflict() {
+    let mut base = Vault::empty("Shared");
+    let mut group = Group::new("Group");
+    seed_group_custom_data(&mut group, "shared", "base", 10);
+    base.root.children.push(group);
+
+    let mut local = base.clone();
+    seed_group_custom_data(&mut local.root.children[0], "shared", "converged", 20);
+    let mut remote = base.clone();
+    seed_group_custom_data(&mut remote.root.children[0], "shared", "converged", 30);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let merged = &patched.vault.root.children[0];
+    assert_eq!(merged.custom_data["shared"], "converged");
+    assert_eq!(
+        custom_data_item(&merged.custom_data_blocks, "shared").last_modified,
+        Some(30)
+    );
+}
+
+#[test]
+fn identical_entry_custom_data_values_do_not_create_losing_history() {
+    let (mut base, entry_id) = base_vault();
+    seed_entry_custom_data(
+        entry_mut(&mut base.root, entry_id).unwrap(),
+        "shared",
+        "base",
+        10,
+    );
+
+    let mut local = base.clone();
+    let local_entry = entry_mut(&mut local.root, entry_id).unwrap();
+    seed_entry_custom_data(local_entry, "shared", "converged", 20);
+    local_entry.modified_at = 20;
+    let mut remote = base.clone();
+    let remote_entry = entry_mut(&mut remote.root, entry_id).unwrap();
+    seed_entry_custom_data(remote_entry, "shared", "converged", 30);
+    remote_entry.modified_at = 30;
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let merged = entry(&patched.vault.root, entry_id).unwrap();
+    assert_eq!(merged.custom_data["shared"], "converged");
+    assert_eq!(
+        custom_data_item(&merged.custom_data_blocks, "shared").last_modified,
+        Some(30)
+    );
+    assert!(merged.history.is_empty());
+    assert_eq!(patched.report.history_snapshots_added, 0);
+}
+
+#[test]
 fn custom_data_rebase_preserves_one_sided_layout_but_rejects_two_layout_rewrites() {
     let mut base = Vault::empty("Shared");
     seed_meta_custom_data(&mut base, "first", "1", 10);
