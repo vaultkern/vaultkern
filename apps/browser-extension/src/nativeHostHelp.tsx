@@ -16,11 +16,11 @@ function chromeRegistryPath() {
 }
 
 function windowsRuntimePath() {
-  return `%LOCALAPPDATA%\\vaultkern-runtime\\vaultkern-runtime.exe`;
+  return `%ProgramFiles%\\VaultKern\\Browser Integration\\vaultkern-runtime.exe`;
 }
 
 function windowsManifestPath(browser: "chrome" | "edge") {
-  return `%LOCALAPPDATA%\\vaultkern-runtime\\com.vaultkern.runtime.${browser}.json`;
+  return `%ProgramFiles%\\VaultKern\\Browser Integration\\com.vaultkern.runtime.${browser}.json`;
 }
 
 function isErrorCode(error: unknown, code: string) {
@@ -33,6 +33,38 @@ function isErrorCode(error: unknown, code: string) {
 }
 
 export function renderNativeHostHelp(error: unknown) {
+  if (isErrorCode(error, "resident_unavailable")) {
+    return (
+      <div>
+        <h2>Open the VaultKern Windows app</h2>
+        <p>
+          The native host could not start VaultKern automatically. Open or
+          restart the Windows app, then reopen the popup and retry the
+          operation.
+        </p>
+      </div>
+    );
+  }
+
+  if (
+    isErrorCode(error, "resident_authentication_failed") ||
+    isErrorCode(error, "resident_connection_failed")
+  ) {
+    return (
+      <div>
+        <h2>Repair the VaultKern resident connection</h2>
+        <ol>
+          <li>Close and restart the VaultKern Windows app.</li>
+          <li>Reload the browser extension, then retry the operation.</li>
+          <li>
+            If it still fails, update or repair the app and native host
+            together so they use matching versions.
+          </li>
+        </ol>
+      </div>
+    );
+  }
+
   if (
     isErrorCode(error, "native_host_missing") ||
     isErrorCode(error, "native_permission_denied")
@@ -70,8 +102,8 @@ export function renderNativeHostHelp(error: unknown) {
             .
           </li>
           <li>
-            Open <code>chrome://extensions</code>, reload the extension, and try
-            unlocking again.
+            Open <code>chrome://extensions</code>, reload the extension, and
+            reopen the popup.
           </li>
         </ol>
       </div>
@@ -96,7 +128,7 @@ export function renderNativeHostHelp(error: unknown) {
             host manifest.
           </li>
           <li>Open <code>chrome://extensions</code> and reload the extension.</li>
-          <li>Try unlocking again after the host reconnects.</li>
+          <li>Retry the operation after the host reconnects.</li>
         </ol>
       </div>
     );

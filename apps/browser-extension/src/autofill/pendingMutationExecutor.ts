@@ -6,7 +6,7 @@ import type {
 import {
   isValidPendingAutofillToken,
   isValidPendingAutofillVaultId,
-  pendingAutofillPlanFromUnknown,
+  pendingAutofillPlanInputFromUnknown,
   type PendingAutofillExecutableTransaction
 } from "./pendingSubmission";
 
@@ -59,7 +59,7 @@ export async function executePendingAutofillPersist(
   ) {
     throw new TypeError("pending autofill request binding is invalid");
   }
-  const plan = pendingAutofillPlanFromUnknown(transaction.plan);
+  const plan = pendingAutofillPlanInputFromUnknown(transaction.plan);
   if (!plan) {
     throw new TypeError("pending autofill plan contains an invalid UUID or field");
   }

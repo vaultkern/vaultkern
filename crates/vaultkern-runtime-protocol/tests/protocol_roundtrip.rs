@@ -1,24 +1,24 @@
 use vaultkern_runtime_protocol::{
     AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
     AutofillPersistDispositionDto, AutofillPersistDurabilityDto, AutofillPersistOutcomeDto,
-    AutofillPersistPlanDto, AutofillPersistResultDto, DatabaseCredentialsUpdateDto,
-    DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
-    DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
-    DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
-    EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto, EntryHistoryDetailDto,
-    EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
-    EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto, HandshakeDto,
-    MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
-    OneDriveItemListDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
-    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
-    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
-    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto,
-    PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto,
-    PasskeyFrameKindDto, PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto,
-    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto,
-    PasskeyUserVerifiedDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto, SessionStateDto, VaultHandleDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    AutofillPersistPlanDto, AutofillPersistResultDto, AutofillUpdateFieldsDto,
+    DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
+    DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
+    DatabaseRecycleBinSettingsDto, DatabaseSettingsCommitResultDto, DatabaseSettingsDto,
+    DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto,
+    EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto, EntryPasskeyDto,
+    EntryPasskeyUpdateDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
+    HandshakeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
+    OneDriveItemListDto, OptionalSettingUpdateDto, PROTOCOL_VERSION, PasskeyAssertionDto,
+    PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
+    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto,
+    PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto,
+    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
+    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
+    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
+    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
+    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 static_assertions::assert_not_impl_any!(RuntimeResponse: Clone);
@@ -30,10 +30,23 @@ static_assertions::assert_not_impl_any!(vaultkern_runtime_protocol::EntryCustomF
 static_assertions::assert_not_impl_any!(EntryAttachmentContentDto: Clone);
 static_assertions::assert_not_impl_any!(EntryPasskeyDto: Clone);
 
+fn autofill_update_fields(password: &str) -> AutofillUpdateFieldsDto {
+    AutofillUpdateFieldsDto {
+        username: "username".into(),
+        password: password.into(),
+        url: "https://example.com".into(),
+    }
+}
+
+#[test]
+fn narrowed_browser_autofill_dtos_start_a_new_protocol_major() {
+    assert_eq!(PROTOCOL_VERSION, 2);
+}
+
 #[test]
 fn protocol_roundtrips_the_version_and_capability_handshake() {
     let envelope = ProtocolEnvelope::new(RuntimeCommand::Handshake {
-        protocol_version: 1,
+        protocol_version: 2,
         capabilities: vec!["runtime-core".into(), "browser-extension".into()],
     });
     let decoded: ProtocolEnvelope =
@@ -41,13 +54,29 @@ fn protocol_roundtrips_the_version_and_capability_handshake() {
     assert_eq!(decoded, envelope);
 
     let response = RuntimeResponse::Handshake(HandshakeDto {
-        protocol_version: 1,
+        protocol_version: 2,
         capabilities: vec!["runtime-core".into()],
     });
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["type"], "handshake");
-    assert_eq!(json["protocolVersion"], 1);
+    assert_eq!(json["protocolVersion"], PROTOCOL_VERSION);
     assert_eq!(json["capabilities"], serde_json::json!(["runtime-core"]));
+}
+
+#[test]
+fn protocol_envelope_preserves_a_logical_operation_id() {
+    let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
+        "version": 2,
+        "operationId": "client-a-save-1",
+        "command": {
+            "type": "save_vault",
+            "vault_id": "vault-1"
+        }
+    }))
+    .unwrap();
+
+    let encoded = serde_json::to_value(envelope).unwrap();
+    assert_eq!(encoded["operationId"], "client-a-save-1");
 }
 
 #[test]
@@ -58,7 +87,7 @@ fn protocol_envelope_serializes_open_local_vault_command() {
 
     let json = serde_json::to_string(&envelope).unwrap();
 
-    assert!(json.contains("\"version\":1"));
+    assert!(json.contains("\"version\":2"));
     assert!(json.contains("\"open_local_vault\""));
     assert!(json.contains("/tmp/demo.kdbx"));
 }
@@ -90,7 +119,7 @@ fn database_optional_setting_updates_distinguish_unchanged_clear_and_set() {
 #[test]
 fn protocol_rejects_the_superseded_conditional_create_command() {
     let json = r#"{
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "create_entry_if_matching_entry_ids",
             "vault_id": "vault-1",
@@ -651,6 +680,7 @@ fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
     let command = RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-1".into(),
+        entry_id: None,
         title: "title".into(),
         username: "username".into(),
         password: "command-password-secret".into(),
@@ -660,8 +690,8 @@ fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
     };
     let plan = AutofillPersistPlanDto::Update {
         entry_id: "entry-1".into(),
-        expected_fields: fields("expected-fields-secret"),
-        desired_fields: fields("desired-fields-secret"),
+        expected_fields: autofill_update_fields("expected-fields-secret"),
+        desired_fields: autofill_update_fields("desired-fields-secret"),
     };
     let custom_field = vaultkern_runtime_protocol::EntryCustomFieldDto {
         key: "RecoveryCode".into(),
@@ -801,8 +831,8 @@ fn protocol_secret_dtos_explicitly_zeroize_owned_buffers() {
     };
     let mut plan = AutofillPersistPlanDto::Update {
         entry_id: "entry-1".into(),
-        expected_fields: fields("expected-secret"),
-        desired_fields: fields("desired-secret"),
+        expected_fields: autofill_update_fields("expected-secret"),
+        desired_fields: autofill_update_fields("desired-secret"),
     };
 
     detail.zeroize();
@@ -825,9 +855,11 @@ fn protocol_secret_dtos_explicitly_zeroize_owned_buffers() {
         panic!("expected update plan");
     };
     assert!(expected_fields.password.is_empty());
-    assert!(expected_fields.custom_fields.is_empty());
+    assert!(expected_fields.username.is_empty());
+    assert!(expected_fields.url.is_empty());
     assert!(desired_fields.password.is_empty());
-    assert!(desired_fields.custom_fields.is_empty());
+    assert!(desired_fields.username.is_empty());
+    assert!(desired_fields.url.is_empty());
 }
 
 #[test]
@@ -1117,6 +1149,7 @@ fn protocol_roundtrips_entry_mutation_commands() {
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-root".into(),
+        entry_id: Some("11111111-1111-4111-8111-111111111111".into()),
         title: "Example".into(),
         username: "alice".into(),
         password: "secret".into(),
@@ -1166,7 +1199,7 @@ fn protocol_roundtrips_entry_mutation_commands() {
 #[test]
 fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
     let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "compare_and_update_entry_fields",
             "vault_id": "vault-1",
@@ -1225,8 +1258,8 @@ fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() 
         vault_id: "vault-1".into(),
         plan: AutofillPersistPlanDto::Update {
             entry_id: "entry-1".into(),
-            expected_fields: fields("old-secret"),
-            desired_fields: fields("new-secret"),
+            expected_fields: autofill_update_fields("old-secret"),
+            desired_fields: autofill_update_fields("new-secret"),
         },
     });
     let create = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
@@ -1471,7 +1504,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
     );
 
     let legacy_assertion_json = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "create_passkey_assertion",
             "ceremony_token": "ceremony-token-1",
@@ -1521,7 +1554,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
     );
 
     let missing_token_assertion_json = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "create_passkey_assertion",
             "vault_id": "vault-1",
@@ -1630,7 +1663,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
         commit
     );
     let missing_token_commit_json = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "commit_passkey_registration",
             "vault_id": "vault-1",
@@ -1641,7 +1674,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
     assert!(serde_json::from_value::<ProtocolEnvelope>(missing_token_commit_json).is_err());
 
     let missing_token_registration_json = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "create_passkey_registration",
             "vault_id": "vault-1",
@@ -1686,7 +1719,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
 #[test]
 fn protocol_rejects_legacy_passkey_rollback_command() {
     let legacy_rollback_json = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "rollback_passkey_registration",
             "ceremony_token": "ceremony-token-1",
@@ -1822,7 +1855,7 @@ fn protocol_roundtrips_passkey_credential_status_batch_command_and_response() {
 #[test]
 fn protocol_rejects_passkey_credential_status_without_relying_party() {
     let command_json = serde_json::json!({
-        "version": 1,
+        "version": 2,
         "command": {
             "type": "passkey_credential_status",
             "ceremony_token": "token-1",

@@ -7,6 +7,8 @@
     "core:default",
     "allow-runtime-send",
     "allow-load-desktop-settings",
+    "allow-load-desktop-reconciliation-error",
+    "allow-take-pending-resident-route",
     "allow-save-desktop-settings",
     "allow-queue-quick-unlock-enrollment"
   ]

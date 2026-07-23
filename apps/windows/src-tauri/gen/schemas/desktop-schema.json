@@ -177,6 +177,78 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Enables the load_desktop_reconciliation_error command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-desktop-reconciliation-error",
+          "markdownDescription": "Enables the load_desktop_reconciliation_error command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the load_desktop_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-load-desktop-settings",
+          "markdownDescription": "Enables the load_desktop_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the queue_quick_unlock_enrollment command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-queue-quick-unlock-enrollment",
+          "markdownDescription": "Enables the queue_quick_unlock_enrollment command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the runtime_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-runtime-send",
+          "markdownDescription": "Enables the runtime_send command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the save_desktop_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-save-desktop-settings",
+          "markdownDescription": "Enables the save_desktop_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the take_pending_resident_route command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-take-pending-resident-route",
+          "markdownDescription": "Enables the take_pending_resident_route command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_desktop_reconciliation_error command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-desktop-reconciliation-error",
+          "markdownDescription": "Denies the load_desktop_reconciliation_error command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the load_desktop_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-load-desktop-settings",
+          "markdownDescription": "Denies the load_desktop_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the queue_quick_unlock_enrollment command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-queue-quick-unlock-enrollment",
+          "markdownDescription": "Denies the queue_quick_unlock_enrollment command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the runtime_send command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-runtime-send",
+          "markdownDescription": "Denies the runtime_send command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the save_desktop_settings command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-save-desktop-settings",
+          "markdownDescription": "Denies the save_desktop_settings command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the take_pending_resident_route command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-take-pending-resident-route",
+          "markdownDescription": "Denies the take_pending_resident_route command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

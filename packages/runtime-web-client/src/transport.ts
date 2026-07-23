@@ -10,7 +10,7 @@ export interface RuntimeHandshake {
   capabilities: string[];
 }
 
-export const RUNTIME_PROTOCOL_VERSION = 1;
+export const RUNTIME_PROTOCOL_VERSION = 2;
 
 export function createNegotiatedRuntimeTransport(
   transport: RuntimeTransport,
@@ -82,7 +82,9 @@ async function negotiateRuntimeTransport(
     }
   });
   if (isRuntimeError(response)) {
-    throw new Error(`${response.code}: ${response.message}`);
+    const error = new Error(response.message) as Error & { code: string };
+    error.code = response.code;
+    throw error;
   }
   if (
     typeof response !== "object" ||

@@ -232,6 +232,7 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id.clone(),
+            entry_id: None,
             title: "Exact Login".into(),
             username: "alice".into(),
             password: "old-secret".into(),
@@ -249,6 +250,7 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id.clone(),
+            entry_id: None,
             title: "Parent Login".into(),
             username: "parent".into(),
             password: "parent-secret".into(),
@@ -261,6 +263,7 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Unrelated Tenant".into(),
             username: "mallory".into(),
             password: "tenant-secret".into(),
@@ -1085,6 +1088,7 @@ fn runtime_persists_created_entry_after_save_roundtrip() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: vault.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Created".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -1142,6 +1146,7 @@ fn runtime_persists_updated_and_deleted_entries_after_save_roundtrip() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: vault.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Created".into(),
             username: "alice".into(),
             password: "secret".into(),

@@ -15,8 +15,7 @@ const ENTRY_ID = "00000000-0000-4000-8000-000000000501";
 const RUNTIME_CAPABILITIES = [
   "runtime-core",
   "browser-extension",
-  "database-settings",
-  "one-drive",
+  "browser-autofill",
   "passkey-ceremonies"
 ];
 
@@ -32,12 +31,20 @@ function fields(password = "new-secret") {
   };
 }
 
-function updatePlan(notes = "") {
+function updateFields(password = "new-secret", username = "alice") {
+  return {
+    username,
+    password,
+    url: "https://example.com/login"
+  };
+}
+
+function updatePlan(expectedUsername = "alice") {
   return {
     mode: "update" as const,
     entryId: ENTRY_ID,
-    expectedFields: { ...fields("old-secret"), notes },
-    desiredFields: fields()
+    expectedFields: updateFields("old-secret", expectedUsername),
+    desiredFields: updateFields()
   };
 }
 
@@ -83,10 +90,38 @@ function nativePort() {
     postMessage: vi.fn((message: unknown) => {
       posted.push(message);
       const command = (message as { command?: { type?: unknown } })?.command;
+      if (command?.type === "handshake") {
+        const requestId = (message as { requestId?: string }).requestId;
+        queueMicrotask(() =>
+          emit(
+            {
+              type: "handshake",
+              protocolVersion: 2,
+              capabilities: RUNTIME_CAPABILITIES
+            },
+            requestId
+          )
+        );
+      }
       if (command?.type === "list_recent_vaults") {
         const requestId = (message as { requestId?: string }).requestId;
         queueMicrotask(() =>
           emit({ type: "vault_reference_list", vaults: [] }, requestId)
+        );
+      }
+      if (command?.type === "get_browser_integration_settings") {
+        const requestId = (message as { requestId?: string }).requestId;
+        queueMicrotask(() =>
+          emit(
+            {
+              type: "browser_integration_settings",
+              language: "en",
+              clearClipboardSeconds: 30,
+              autofillOnPageLoadEnabled: false,
+              browserPasskeyProxyEnabled: false
+            },
+            requestId
+          )
         );
       }
     }),
@@ -193,20 +228,6 @@ async function setup(options: {
   };
   await import("../background");
   await flush();
-
-  const handshake = commandCalls(port, "handshake").at(-1)?.[0] as
-    | { requestId?: string }
-    | undefined;
-  expect(handshake?.requestId).toEqual(expect.any(String));
-  port.emit(
-    {
-      type: "handshake",
-      protocolVersion: 1,
-      capabilities: RUNTIME_CAPABILITIES
-    },
-    handshake?.requestId
-  );
-  await flush();
   return { listeners, port, session, alarms };
 }
 
@@ -278,7 +299,7 @@ describe("background atomic pending autofill V2", () => {
     const handled = listeners.some((listener) =>
       listener(
         {
-          version: 1,
+          version: 2,
           command: { type: "get_session_state" }
         },
         trustedContentSender(),
@@ -291,22 +312,15 @@ describe("background atomic pending autofill V2", () => {
     expect(commandCalls(port, "get_session_state")).toHaveLength(0);
   });
 
-  it("allows generic native commands from an extension page hosted in a tab", async () => {
+  it("allows generic native commands from the popup extension page", async () => {
     const { listeners, port } = await setup();
     const request = send(
       listeners,
       {
-        version: 1,
+        version: 2,
         command: { type: "get_session_state" }
       },
-      {
-        id: EXTENSION_ID,
-        url: `chrome-extension://${EXTENSION_ID}/manager.html`,
-        tab: {
-          id: 11,
-          url: `chrome-extension://${EXTENSION_ID}/manager.html`
-        }
-      }
+      trustedSender()
     );
     await vi.waitFor(() =>
       expect(commandCalls(port, "get_session_state")).toHaveLength(1)
@@ -682,7 +696,7 @@ describe("background atomic pending autofill V2", () => {
     };
 
     const unlock = send(listeners, {
-      version: 1,
+      version: 2,
       command: { type: "get_session_state" }
     });
     await vi.waitFor(() =>

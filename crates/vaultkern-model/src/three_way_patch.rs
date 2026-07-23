@@ -103,6 +103,12 @@ struct PasskeyUnit {
     attributes: BTreeMap<String, CustomField>,
 }
 
+#[derive(Clone, PartialEq, Eq)]
+struct CustomDataUnit {
+    value: String,
+    last_modified: Option<i64>,
+}
+
 /// Applies this device's `diff(base, local)` to the current remote head.
 ///
 /// This is deliberately a model-only operation. Callers must serialize and
@@ -159,7 +165,7 @@ pub fn three_way_field_patch(
     )?;
     reconcile_entry_sibling_orders(&base_flat, &local_flat, &remote_flat, &mut entries)?;
     let root = rebuild_tree(base_flat.root_id, &groups, &entries, &mut BTreeSet::new())?;
-    let mut vault = merge_meta(base, local, remote, &mut report)?;
+    let mut vault = merge_meta(base, local, remote)?;
     vault
         .deleted_objects
         .retain(|deleted| !groups.contains_key(&deleted.id) && !entries.contains_key(&deleted.id));
@@ -218,13 +224,14 @@ fn ensure_fidelity_conflicts_representable(
         None,
         "opaque XML",
     )?;
-    ensure_fidelity_field(
+    ensure_custom_data_rebase_representable(
+        &base.meta_custom_data,
         &base.meta_custom_data_blocks,
+        &local.meta_custom_data,
         &local.meta_custom_data_blocks,
         &remote.meta_custom_data_blocks,
         "meta",
         None,
-        "CustomData fidelity",
     )?;
 
     for (id, base_entry) in &base_flat.entries {
@@ -241,13 +248,14 @@ fn ensure_fidelity_conflicts_representable(
             Some(*id),
             "opaque XML",
         )?;
-        ensure_fidelity_field(
+        ensure_custom_data_rebase_representable(
+            &base_entry.value.custom_data,
             &base_entry.value.custom_data_blocks,
+            &local_entry.value.custom_data,
             &local_entry.value.custom_data_blocks,
             &remote_entry.value.custom_data_blocks,
             "entry",
             Some(*id),
-            "CustomData fidelity",
         )?;
     }
     for (id, base_group) in &base_flat.groups {
@@ -264,16 +272,224 @@ fn ensure_fidelity_conflicts_representable(
             Some(*id),
             "opaque XML",
         )?;
-        ensure_fidelity_field(
+        ensure_custom_data_rebase_representable(
+            &base_group.value.custom_data,
             &base_group.value.custom_data_blocks,
+            &local_group.value.custom_data,
             &local_group.value.custom_data_blocks,
             &remote_group.value.custom_data_blocks,
             "group",
             Some(*id),
-            "CustomData fidelity",
         )?;
     }
     Ok(())
+}
+
+fn ensure_custom_data_rebase_representable(
+    base: &BTreeMap<String, String>,
+    base_blocks: &[CustomDataBlock],
+    local: &BTreeMap<String, String>,
+    local_blocks: &[CustomDataBlock],
+    remote_blocks: &[CustomDataBlock],
+    object: &'static str,
+    id: Option<Uuid>,
+) -> Result<(), ThreeWayPatchError> {
+    if local_blocks == base_blocks
+        || remote_blocks == base_blocks
+        || local_blocks == remote_blocks
+        || custom_data_blocks_are_replayable(base, base_blocks, local, local_blocks)
+    {
+        return Ok(());
+    }
+    Err(ThreeWayPatchError::FidelityConflict {
+        object,
+        id,
+        field: "CustomData fidelity",
+    })
+}
+
+fn custom_data_blocks_are_replayable(
+    base: &BTreeMap<String, String>,
+    base_blocks: &[CustomDataBlock],
+    local: &BTreeMap<String, String>,
+    local_blocks: &[CustomDataBlock],
+) -> bool {
+    let local_units = custom_data_units(local, local_blocks);
+    let mut expected = base_blocks.to_vec();
+    let mut opaque_xml = Vec::new();
+    let mut node_order = Vec::new();
+    let mut applied = local
+        .iter()
+        .filter(|(key, _)| base.contains_key(*key))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    reconcile_custom_data_blocks(
+        &mut expected,
+        &mut opaque_xml,
+        &mut node_order,
+        &applied,
+        None,
+    );
+    apply_custom_data_last_modified(&mut expected, &local_units);
+
+    let mut added = BTreeSet::new();
+    for block in local_blocks {
+        for item in &block.items {
+            if base.contains_key(&item.key) || !local.contains_key(&item.key) {
+                continue;
+            }
+            if !added.insert(item.key.clone()) {
+                return false;
+            }
+            applied.insert(item.key.clone(), item.value.clone());
+            reconcile_custom_data_blocks(
+                &mut expected,
+                &mut opaque_xml,
+                &mut node_order,
+                &applied,
+                Some((&item.key, item.last_modified)),
+            );
+        }
+    }
+    apply_custom_data_last_modified(&mut expected, &local_units);
+    expected == local_blocks
+}
+
+fn custom_data_units(
+    values: &BTreeMap<String, String>,
+    blocks: &[CustomDataBlock],
+) -> BTreeMap<String, CustomDataUnit> {
+    let mut last_modified = BTreeMap::new();
+    for block in blocks {
+        for item in &block.items {
+            last_modified.insert(item.key.clone(), item.last_modified);
+        }
+    }
+    values
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                CustomDataUnit {
+                    value: value.clone(),
+                    last_modified: last_modified.get(key).copied().flatten(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn apply_custom_data_last_modified(
+    blocks: &mut [CustomDataBlock],
+    units: &BTreeMap<String, CustomDataUnit>,
+) {
+    let mut last_positions = BTreeMap::new();
+    for (block_index, block) in blocks.iter().enumerate() {
+        for (item_index, item) in block.items.iter().enumerate() {
+            last_positions.insert(item.key.clone(), (block_index, item_index));
+        }
+    }
+    for (key, (block_index, item_index)) in last_positions {
+        if let Some(unit) = units.get(&key) {
+            blocks[block_index].items[item_index].last_modified = unit.last_modified;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_custom_data_fields(
+    base: &BTreeMap<String, String>,
+    base_blocks: &[CustomDataBlock],
+    local: &BTreeMap<String, String>,
+    local_blocks: &[CustomDataBlock],
+    remote: &BTreeMap<String, String>,
+    remote_blocks: &[CustomDataBlock],
+    prefer_local: bool,
+    state: &mut FieldMerge,
+    merged_blocks: &mut Vec<CustomDataBlock>,
+    merged_opaque_xml: &mut [OpaqueXmlFragment],
+    merged_node_order: &mut Vec<String>,
+) -> BTreeMap<String, String> {
+    let base_units = custom_data_units(base, base_blocks);
+    let local_units = custom_data_units(local, local_blocks);
+    let remote_units = custom_data_units(remote, remote_blocks);
+    let mut merged_units = BTreeMap::new();
+    for key in union_keys3(&base_units, &local_units, &remote_units) {
+        if let Some(unit) = merge_custom_data_unit(
+            base_units.get(&key),
+            local_units.get(&key),
+            remote_units.get(&key),
+            prefer_local,
+            state,
+        ) {
+            merged_units.insert(key, unit);
+        }
+    }
+
+    let local_fidelity_only = local_blocks != base_blocks
+        && remote_blocks == base_blocks
+        && !custom_data_blocks_are_replayable(base, base_blocks, local, local_blocks);
+    if local_fidelity_only {
+        *merged_blocks = local_blocks.to_vec();
+    } else {
+        *merged_blocks = remote_blocks.to_vec();
+    }
+    let merged = merged_units
+        .iter()
+        .map(|(key, unit)| (key.clone(), unit.value.clone()))
+        .collect::<BTreeMap<_, _>>();
+    reconcile_custom_data_blocks(
+        merged_blocks,
+        merged_opaque_xml,
+        merged_node_order,
+        &merged,
+        None,
+    );
+    apply_custom_data_last_modified(merged_blocks, &merged_units);
+    merged
+}
+
+fn merge_custom_data_unit(
+    base: Option<&CustomDataUnit>,
+    local: Option<&CustomDataUnit>,
+    remote: Option<&CustomDataUnit>,
+    prefer_local: bool,
+    state: &mut FieldMerge,
+) -> Option<CustomDataUnit> {
+    let base_value = base.map(|unit| unit.value.clone());
+    let local_value = local.map(|unit| unit.value.clone());
+    let remote_value = remote.map(|unit| unit.value.clone());
+    let selected_value = merge_value(
+        &base_value,
+        &local_value,
+        &remote_value,
+        prefer_local,
+        state,
+    );
+    let merged = selected_value.map(|value| {
+        let local_timestamp = local
+            .filter(|unit| unit.value == value)
+            .map(|unit| unit.last_modified);
+        let remote_timestamp = remote
+            .filter(|unit| unit.value == value)
+            .map(|unit| unit.last_modified);
+        let last_modified = match (local_timestamp, remote_timestamp) {
+            (Some(local), Some(remote)) => local.max(remote),
+            (Some(local), None) => local,
+            (None, Some(remote)) => remote,
+            (None, None) => base
+                .filter(|unit| unit.value == value)
+                .and_then(|unit| unit.last_modified),
+        };
+        CustomDataUnit {
+            value,
+            last_modified,
+        }
+    });
+    if merged.as_ref() != remote {
+        state.changed_from_remote = true;
+    }
+    merged
 }
 
 fn ensure_fidelity_field<T: Eq>(
@@ -900,7 +1116,6 @@ fn merge_entry(
     field!(exclude_from_reports);
     field!(raw_state);
     field!(opaque_xml);
-    field!(custom_data_blocks);
 
     merged.field_protection.protect_title = merge_value(
         &base.field_protection.protect_title,
@@ -984,21 +1199,20 @@ fn merge_entry(
         &mut state,
         |_| true,
     ));
-    merged.custom_data = merge_keyed_map_filtered(
+    let custom_data = merge_custom_data_fields(
         &base.custom_data,
+        &base.custom_data_blocks,
         &local.custom_data,
+        &local.custom_data_blocks,
         &remote.custom_data,
+        &remote.custom_data_blocks,
         prefer_local,
         &mut state,
-        |_| true,
-    );
-    reconcile_custom_data_blocks(
         &mut merged.custom_data_blocks,
         &mut merged.opaque_xml,
         &mut merged.raw_state.node_order,
-        &merged.custom_data,
-        None,
     );
+    merged.custom_data = custom_data;
 
     merged.history = history_union(&base.history, &local.history, &remote.history);
     merged.modified_at = local.modified_at.max(remote.modified_at);
@@ -1039,14 +1253,19 @@ fn merge_group_fields(
     field!(title);
     field!(notes);
     field!(tags);
-    field!(times);
+    merged.times = merge_group_times(
+        &base.times,
+        &local.times,
+        &remote.times,
+        prefer_local,
+        &mut state,
+    );
     field!(flags);
     field!(default_auto_type_sequence);
     field!(last_top_visible_entry);
     field!(previous_parent);
     field!(raw_state);
     field!(opaque_xml);
-    field!(custom_data_blocks);
     let (icon_id, custom_icon_id) = merge_value(
         &(base.icon_id, base.custom_icon_id),
         &(local.icon_id, local.custom_icon_id),
@@ -1056,21 +1275,20 @@ fn merge_group_fields(
     );
     merged.icon_id = icon_id;
     merged.custom_icon_id = custom_icon_id;
-    merged.custom_data = merge_keyed_map_filtered(
+    let custom_data = merge_custom_data_fields(
         &base.custom_data,
+        &base.custom_data_blocks,
         &local.custom_data,
+        &local.custom_data_blocks,
         &remote.custom_data,
+        &remote.custom_data_blocks,
         prefer_local,
         &mut state,
-        |_| true,
-    );
-    reconcile_custom_data_blocks(
         &mut merged.custom_data_blocks,
         &mut merged.opaque_xml,
         &mut merged.raw_state.node_order,
-        &merged.custom_data,
-        None,
     );
+    merged.custom_data = custom_data;
     if state.conflict {
         return Err(ThreeWayPatchError::FidelityConflict {
             object: "group",
@@ -1081,12 +1299,7 @@ fn merge_group_fields(
     Ok((merged, state.changed_from_remote))
 }
 
-fn merge_meta(
-    base: &Vault,
-    local: &Vault,
-    remote: &Vault,
-    report: &mut ThreeWayPatchReport,
-) -> Result<Vault, ThreeWayPatchError> {
+fn merge_meta(base: &Vault, local: &Vault, remote: &Vault) -> Result<Vault, ThreeWayPatchError> {
     let prefer_local = local.settings_changed.unwrap_or(0) > remote.settings_changed.unwrap_or(0);
     let mut state = FieldMerge::default();
     let mut merged = remote.clone();
@@ -1102,48 +1315,56 @@ fn merge_meta(
             );
         };
     }
-    let (name, name_changed) = merge_value(
-        &(base.name.clone(), base.database_name_changed),
-        &(local.name.clone(), local.database_name_changed),
-        &(remote.name.clone(), remote.database_name_changed),
-        local.database_name_changed.unwrap_or(0) > remote.database_name_changed.unwrap_or(0),
+    let (name, name_changed) = merge_timestamped_value(
+        &base.name,
+        base.database_name_changed,
+        &local.name,
+        local.database_name_changed,
+        &remote.name,
+        remote.database_name_changed,
         &mut state,
     );
     merged.name = name;
     merged.database_name_changed = name_changed;
-    let (description, description_changed) = merge_value(
-        &(base.description.clone(), base.description_changed),
-        &(local.description.clone(), local.description_changed),
-        &(remote.description.clone(), remote.description_changed),
-        local.description_changed.unwrap_or(0) > remote.description_changed.unwrap_or(0),
+    let (description, description_changed) = merge_timestamped_value(
+        &base.description,
+        base.description_changed,
+        &local.description,
+        local.description_changed,
+        &remote.description,
+        remote.description_changed,
         &mut state,
     );
     merged.description = description;
     merged.description_changed = description_changed;
-    let (default_username, default_username_changed) = merge_value(
-        &(base.default_username.clone(), base.default_username_changed),
-        &(
-            local.default_username.clone(),
-            local.default_username_changed,
-        ),
-        &(
-            remote.default_username.clone(),
-            remote.default_username_changed,
-        ),
-        local.default_username_changed.unwrap_or(0) > remote.default_username_changed.unwrap_or(0),
+    let (default_username, default_username_changed) = merge_timestamped_value(
+        &base.default_username,
+        base.default_username_changed,
+        &local.default_username,
+        local.default_username_changed,
+        &remote.default_username,
+        remote.default_username_changed,
         &mut state,
     );
     merged.default_username = default_username;
     merged.default_username_changed = default_username_changed;
 
     field!(generator);
-    field!(settings_changed);
+    merged.settings_changed = merge_changed_at(
+        base.settings_changed,
+        local.settings_changed,
+        remote.settings_changed,
+    );
     field!(meta_raw_state);
     field!(root_raw_state);
     field!(public_custom_data);
     field!(maintenance_history_days);
     field!(color);
-    field!(master_key_changed);
+    merged.master_key_changed = merge_changed_at(
+        base.master_key_changed,
+        local.master_key_changed,
+        remote.master_key_changed,
+    );
     field!(master_key_change_rec);
     field!(master_key_change_force);
     field!(master_key_change_force_once);
@@ -1154,42 +1375,47 @@ fn merge_meta(
     field!(memory_protection);
     field!(recycle_bin_enabled);
     field!(recycle_bin_group);
-    field!(recycle_bin_changed);
+    merged.recycle_bin_changed = merge_changed_at(
+        base.recycle_bin_changed,
+        local.recycle_bin_changed,
+        remote.recycle_bin_changed,
+    );
     field!(entry_templates_group);
-    field!(entry_templates_group_changed);
+    merged.entry_templates_group_changed = merge_changed_at(
+        base.entry_templates_group_changed,
+        local.entry_templates_group_changed,
+        remote.entry_templates_group_changed,
+    );
     field!(meta_opaque_xml);
     field!(root_opaque_xml);
-    field!(meta_custom_data_blocks);
     // The remote KDF header is the generation being rebased onto.
     merged.kdf_parameters = remote.kdf_parameters.clone();
 
-    merged.meta_custom_data = merge_keyed_map_filtered(
+    let meta_custom_data = merge_custom_data_fields(
         &base.meta_custom_data,
+        &base.meta_custom_data_blocks,
         &local.meta_custom_data,
+        &local.meta_custom_data_blocks,
         &remote.meta_custom_data,
+        &remote.meta_custom_data_blocks,
         prefer_local,
         &mut state,
-        |_| true,
-    );
-    reconcile_custom_data_blocks(
         &mut merged.meta_custom_data_blocks,
         &mut merged.meta_opaque_xml,
         &mut merged.meta_raw_state.node_order,
-        &merged.meta_custom_data,
-        None,
     );
+    merged.meta_custom_data = meta_custom_data;
     merged.deleted_objects = merge_deleted_objects(
         &base.deleted_objects,
         &local.deleted_objects,
         &remote.deleted_objects,
     );
-    let (icons, icon_conflicts) = merge_custom_icons(
+    let icons = merge_custom_icons(
         &base.custom_icons,
         &local.custom_icons,
         &remote.custom_icons,
-    );
+    )?;
     merged.custom_icons = icons;
-    report.icon_conflicts_resolved += icon_conflicts;
     if state.conflict {
         return Err(ThreeWayPatchError::FidelityConflict {
             object: "meta",
@@ -1221,6 +1447,108 @@ fn merge_value<T: Clone + Eq>(
         state.changed_from_remote = true;
     }
     selected.clone()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn merge_timestamped_value<T: Clone + Eq>(
+    base_value: &T,
+    base_changed_at: Option<i64>,
+    local_value: &T,
+    local_changed_at: Option<i64>,
+    remote_value: &T,
+    remote_changed_at: Option<i64>,
+    state: &mut FieldMerge,
+) -> (T, Option<i64>) {
+    let selected = merge_value(
+        base_value,
+        local_value,
+        remote_value,
+        local_changed_at.unwrap_or(i64::MIN) > remote_changed_at.unwrap_or(i64::MIN),
+        state,
+    );
+    let base_matches = base_value == &selected;
+    let local_matches = local_value == &selected;
+    let remote_matches = remote_value == &selected;
+    let changed_at = match (base_matches, local_matches, remote_matches) {
+        (true, true, true) => {
+            merge_changed_at(base_changed_at, local_changed_at, remote_changed_at)
+        }
+        (_, true, true) => local_changed_at.max(remote_changed_at),
+        (_, true, false) => local_changed_at,
+        (_, false, true) => remote_changed_at,
+        (true, false, false) => base_changed_at,
+        (false, false, false) => unreachable!(),
+    };
+    if changed_at != remote_changed_at {
+        state.changed_from_remote = true;
+    }
+    (selected, changed_at)
+}
+
+fn merge_changed_at(base: Option<i64>, local: Option<i64>, remote: Option<i64>) -> Option<i64> {
+    if local == base {
+        remote
+    } else if remote == base {
+        local
+    } else {
+        local.max(remote)
+    }
+}
+
+fn merge_group_times(
+    base: &Option<crate::GroupTimes>,
+    local: &Option<crate::GroupTimes>,
+    remote: &Option<crate::GroupTimes>,
+    prefer_local: bool,
+    state: &mut FieldMerge,
+) -> Option<crate::GroupTimes> {
+    let (Some(base), Some(local), Some(remote)) = (base, local, remote) else {
+        if base.is_none()
+            && let (Some(local), Some(remote)) = (local, remote)
+            && group_times_have_equal_content(local, remote)
+        {
+            let mut merged = *remote;
+            merged.modified_at = local.modified_at.max(remote.modified_at);
+            merged.location_changed_at = local.location_changed_at.max(remote.location_changed_at);
+            if merged != *remote {
+                state.changed_from_remote = true;
+            }
+            return Some(merged);
+        }
+        return merge_value(base, local, remote, prefer_local, state);
+    };
+
+    let mut merged = *remote;
+    macro_rules! field {
+        ($name:ident) => {
+            merged.$name = merge_value(
+                &base.$name,
+                &local.$name,
+                &remote.$name,
+                prefer_local,
+                state,
+            );
+        };
+    }
+    field!(created_at);
+    field!(expires);
+    field!(expiry_time);
+    field!(last_accessed_at);
+    field!(usage_count);
+    merged.modified_at = local.modified_at.max(remote.modified_at);
+    merged.location_changed_at = local.location_changed_at.max(remote.location_changed_at);
+    if merged != *remote {
+        state.changed_from_remote = true;
+    }
+    Some(merged)
+}
+
+fn group_times_have_equal_content(left: &crate::GroupTimes, right: &crate::GroupTimes) -> bool {
+    left.created_at == right.created_at
+        && left.expires == right.expires
+        && left.expiry_time == right.expiry_time
+        && left.last_accessed_at == right.last_accessed_at
+        && left.usage_count == right.usage_count
 }
 
 fn merge_keyed_map_filtered<K, V, F>(
@@ -1584,7 +1912,7 @@ fn merge_custom_icons(
     base: &[CustomIcon],
     local: &[CustomIcon],
     remote: &[CustomIcon],
-) -> (Vec<CustomIcon>, u32) {
+) -> Result<Vec<CustomIcon>, ThreeWayPatchError> {
     let map = |items: &[CustomIcon]| {
         items
             .iter()
@@ -1595,31 +1923,80 @@ fn merge_custom_icons(
     let local = map(local);
     let remote = map(remote);
     let mut merged = Vec::new();
-    let mut conflicts = 0;
     for id in union_keys3(&base, &local, &remote) {
-        let mut state = FieldMerge::default();
-        let local_value = local.get(&id).cloned();
-        let remote_value = remote.get(&id).cloned();
-        let prefer_local = local_value
-            .as_ref()
-            .and_then(|item| item.last_modified)
-            .unwrap_or(i64::MIN)
-            > remote_value
-                .as_ref()
-                .and_then(|item| item.last_modified)
-                .unwrap_or(i64::MIN);
-        if let Some(value) = merge_value(
-            &base.get(&id).cloned(),
-            &local_value,
-            &remote_value,
-            prefer_local,
-            &mut state,
-        ) {
-            merged.push(value);
+        let base_value = base.get(&id);
+        let local_value = local.get(&id);
+        let remote_value = remote.get(&id);
+        let selected = match (base_value, local_value, remote_value) {
+            (None, None, Some(remote)) => Some(remote),
+            (None, Some(local), None) => Some(local),
+            (None, Some(local), Some(remote)) if custom_icons_have_equal_content(local, remote) => {
+                Some(remote)
+            }
+            (None, Some(_), Some(_)) => {
+                return Err(ThreeWayPatchError::ConcurrentObjectAddition { id });
+            }
+            (Some(_), None, None) => None,
+            (Some(base), None, Some(remote)) => {
+                (!custom_icons_have_equal_content(base, remote)).then_some(remote)
+            }
+            (Some(base), Some(local), None) => {
+                (!custom_icons_have_equal_content(base, local)).then_some(local)
+            }
+            (Some(base), Some(local), Some(remote))
+                if custom_icons_have_equal_content(local, base) =>
+            {
+                Some(remote)
+            }
+            (Some(base), Some(local), Some(remote))
+                if custom_icons_have_equal_content(remote, base) =>
+            {
+                Some(local)
+            }
+            (Some(_), Some(local), Some(remote))
+                if custom_icons_have_equal_content(local, remote) =>
+            {
+                Some(remote)
+            }
+            (Some(_), Some(_), Some(_)) => {
+                return Err(ThreeWayPatchError::FidelityConflict {
+                    object: "meta",
+                    id: None,
+                    field: "custom icon",
+                });
+            }
+            (None, None, None) => unreachable!(),
+        };
+        if let Some(value) = selected {
+            merged.push(merge_custom_icon_timestamp(
+                value,
+                base_value,
+                local_value,
+                remote_value,
+            ));
         }
-        conflicts += u32::from(state.conflict);
     }
-    (merged, conflicts)
+    Ok(merged)
+}
+
+fn custom_icons_have_equal_content(left: &CustomIcon, right: &CustomIcon) -> bool {
+    left.id == right.id && left.data == right.data && left.name == right.name
+}
+
+fn merge_custom_icon_timestamp(
+    selected: &CustomIcon,
+    base: Option<&CustomIcon>,
+    local: Option<&CustomIcon>,
+    remote: Option<&CustomIcon>,
+) -> CustomIcon {
+    let mut merged = selected.clone();
+    merged.last_modified = [base, local, remote]
+        .into_iter()
+        .flatten()
+        .filter(|candidate| custom_icons_have_equal_content(selected, candidate))
+        .filter_map(|candidate| candidate.last_modified)
+        .max();
+    merged
 }
 
 fn group_modified_at(group: &Group) -> u64 {

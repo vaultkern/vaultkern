@@ -1,5 +1,7 @@
 use serde_json::json;
-use vaultkern_windows::DesktopSettingsStore;
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
+use vaultkern_windows::{DesktopSettingsStore, SettingsReconciliationStatus};
 
 #[test]
 fn native_settings_are_available_before_the_webview_starts() {
@@ -21,6 +23,7 @@ fn native_settings_are_available_before_the_webview_starts() {
     let desired = store.desired_state().unwrap();
     assert!(desired.passkey_provider_enabled);
     assert!(!desired.quick_unlock_enabled);
+    assert_eq!(desired.idle_lock_minutes, 10);
 }
 
 #[test]
@@ -38,4 +41,74 @@ fn a_failed_native_settings_save_preserves_the_previous_generation() {
 
     assert!(!error.to_string().is_empty());
     assert_eq!(store.load().unwrap(), previous);
+}
+
+#[test]
+fn reconciliation_status_survives_until_a_later_success_clears_it() {
+    let status = SettingsReconciliationStatus::default();
+    let observer = status.clone();
+
+    status.record(Err("provider registration failed".to_owned()));
+    assert_eq!(
+        observer.error().as_deref(),
+        Some("provider registration failed")
+    );
+
+    status.record(Ok(()));
+    assert_eq!(observer.error(), None);
+}
+
+#[test]
+fn concurrent_settings_commits_cannot_publish_stale_desired_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(DesktopSettingsStore::new(
+        directory.path().join("settings.json"),
+    ));
+    let published = Arc::new(Mutex::new(None));
+    let (first_projecting, first_projecting_rx) = mpsc::channel();
+    let (release_first, release_first_rx) = mpsc::channel();
+
+    let first_store = Arc::clone(&store);
+    let first_published = Arc::clone(&published);
+    let first = std::thread::spawn(move || {
+        first_store
+            .save_and_publish(
+                &json!({ "windowsPasskeyProviderEnabled": true }),
+                |settings| {
+                    first_projecting.send(()).unwrap();
+                    release_first_rx.recv().unwrap();
+                    *first_published.lock().unwrap() = Some(settings.clone());
+                },
+            )
+            .unwrap();
+    });
+    first_projecting_rx.recv().unwrap();
+
+    let second_store = Arc::clone(&store);
+    let second_published = Arc::clone(&published);
+    let (second_done, second_done_rx) = mpsc::channel();
+    let second = std::thread::spawn(move || {
+        second_store
+            .save_and_publish(
+                &json!({ "windowsPasskeyProviderEnabled": false }),
+                |settings| {
+                    *second_published.lock().unwrap() = Some(settings.clone());
+                },
+            )
+            .unwrap();
+        second_done.send(()).unwrap();
+    });
+
+    assert!(
+        second_done_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_err()
+    );
+    release_first.send(()).unwrap();
+    first.join().unwrap();
+    second.join().unwrap();
+
+    let expected = json!({ "windowsPasskeyProviderEnabled": false });
+    assert_eq!(store.load().unwrap(), expected);
+    assert_eq!(*published.lock().unwrap(), Some(expected));
 }

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-take-pending-resident-route"
+description = "Enables the take_pending_resident_route command without any pre-configured scope."
+commands.allow = ["take_pending_resident_route"]
+
+[[permission]]
+identifier = "deny-take-pending-resident-route"
+description = "Denies the take_pending_resident_route command without any pre-configured scope."
+commands.deny = ["take_pending_resident_route"]

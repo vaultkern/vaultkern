@@ -3,7 +3,8 @@ import { expect, it, vi } from "vitest";
 import {
   DEFAULT_EXTENSION_SETTINGS,
   createMemoryExtensionSettingsStore,
-  normalizeExtensionSettings
+  normalizeExtensionSettings,
+  normalizeWindowsAppSettings
 } from "../extensionSettings";
 
 it("normalizes missing extension settings to defaults", () => {
@@ -23,6 +24,33 @@ it("keeps page-load autofill disabled unless the user explicitly enables it", ()
   });
 });
 
+it("keeps browser integration desired state in the resident Windows settings", () => {
+  expect(
+    normalizeWindowsAppSettings({
+      autofillOnPageLoadEnabled: true,
+      browserPasskeyProxyEnabled: true,
+      windowsPasskeyProviderEnabled: false
+    })
+  ).toMatchObject({
+    autofillOnPageLoadEnabled: true,
+    browserPasskeyProxyEnabled: true,
+    windowsPasskeyProviderEnabled: false
+  });
+});
+
+it("uses the legacy passkey setting only when a replacement field is absent", () => {
+  expect(
+    normalizeWindowsAppSettings({
+      passkeyProviderEnabled: true,
+      browserPasskeyProxyEnabled: false,
+      windowsPasskeyProviderEnabled: false
+    })
+  ).toMatchObject({
+    browserPasskeyProxyEnabled: false,
+    windowsPasskeyProviderEnabled: false
+  });
+});
+
 it("persists extension settings in the memory store", async () => {
   const store = createMemoryExtensionSettingsStore();
 
@@ -30,7 +58,6 @@ it("persists extension settings in the memory store", async () => {
     recentVaultLimit: 3,
     language: "zh-CN",
     idleLockMinutes: 5,
-    clearClipboardSeconds: 20,
     autofillOnPageLoadEnabled: true,
     browserPasskeyProxyEnabled: false,
     windowsPasskeyProviderEnabled: false,
@@ -41,7 +68,6 @@ it("persists extension settings in the memory store", async () => {
     recentVaultLimit: 3,
     language: "zh-CN",
     idleLockMinutes: 5,
-    clearClipboardSeconds: 20,
     autofillOnPageLoadEnabled: true,
     browserPasskeyProxyEnabled: false,
     windowsPasskeyProviderEnabled: false,

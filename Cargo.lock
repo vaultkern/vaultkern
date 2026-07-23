@@ -6114,6 +6114,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "windows-sys 0.61.2",
  "winreg 0.56.0",
 ]
 
@@ -6138,6 +6139,7 @@ dependencies = [
  "vaultkern-core",
  "vaultkern-runtime-protocol",
  "windows 0.62.2",
+ "windows-future 0.3.2",
  "windows-sys 0.61.2",
  "zeroize",
 ]
@@ -6174,6 +6176,7 @@ dependencies = [
  "cc",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-single-instance",

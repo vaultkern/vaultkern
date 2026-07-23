@@ -23,17 +23,13 @@ type TranslationKey =
   | "Needs repair in manager"
   | "Extension Settings"
   | "Local extension preferences. These are not stored in the KDBX database."
-  | "Browser Extension Settings"
   | "Windows Settings"
-  | "Local browser extension preferences. These are not stored in the KDBX database."
   | "Local Windows app preferences. These are not stored in the KDBX database."
-  | "Save Extension Settings"
   | "Save Windows Settings"
   | "Saving..."
   | "Database Settings"
   | "Recent Databases"
   | "Idle Lock Minutes"
-  | "Clear Clipboard Seconds"
   | "Language"
   | "VaultKern passkey provider"
   | "Browser passkey proxy"
@@ -46,7 +42,6 @@ type TranslationKey =
   | "Enrolling..."
   | "Unlock this vault before enrolling Windows Hello."
   | "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock."
-  | "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret."
   | "Database"
   | "Loading database settings..."
   | "Back to archive"
@@ -212,6 +207,7 @@ type TranslationKey =
   | "Failed to load fill candidates"
   | "Failed to load entry detail"
   | "Failed to load database settings"
+  | "Failed to select vault"
   | "Failed to unlock vault"
   | "Failed to load popup data"
   | "Failed to load site candidates"
@@ -220,6 +216,8 @@ type TranslationKey =
   | "Unlocked"
   | "Locked"
   | "Open Manager"
+  | "Open VaultKern"
+  | "VaultKern Settings"
   | "Lock"
   | "Search"
   | "Search records"
@@ -252,17 +250,13 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Needs repair in manager": "需要在管理器中修复",
   "Extension Settings": "插件设置",
   "Local extension preferences. These are not stored in the KDBX database.": "本地插件偏好设置，不会保存到 KDBX 数据库。",
-  "Browser Extension Settings": "浏览器插件设置",
   "Windows Settings": "Windows 设置",
-  "Local browser extension preferences. These are not stored in the KDBX database.": "本地浏览器插件偏好设置，不会保存到 KDBX 数据库。",
   "Local Windows app preferences. These are not stored in the KDBX database.": "本地 Windows 应用偏好设置，不会保存到 KDBX 数据库。",
-  "Save Extension Settings": "保存插件设置",
   "Save Windows Settings": "保存 Windows 设置",
   "Saving...": "保存中...",
   "Database Settings": "数据库设置",
   "Recent Databases": "最近数据库",
   "Idle Lock Minutes": "闲置锁定分钟数",
-  "Clear Clipboard Seconds": "清空剪贴板秒数",
   Language: "语言",
   "VaultKern passkey provider": "VaultKern 通行密钥提供器",
   "Browser passkey proxy": "浏览器通行密钥代理",
@@ -275,7 +269,6 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Enrolling...": "正在注册...",
   "Unlock this vault before enrolling Windows Hello.": "请先解锁此数据库，再注册 Windows Hello。",
   "Enter the current master credentials once. VaultKern retains them in Windows Hello-protected storage for Quick Unlock.": "请一次性输入当前主凭据；VaultKern 会将其保留在受 Windows Hello 保护的存储中，用于快速解锁。",
-  "Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.": "剪贴板清空会在延迟后写入空字符串。浏览器 API 不允许后台可靠确认剪贴板仍包含刚复制的秘密。",
   Database: "数据库",
   "Loading database settings...": "正在加载数据库设置...",
   "Back to archive": "返回数据库",
@@ -441,6 +434,7 @@ const ZH_CN: Record<TranslationKey, string> = {
   "Failed to load fill candidates": "加载填充候选失败",
   "Failed to load entry detail": "加载条目详情失败",
   "Failed to load database settings": "加载数据库设置失败",
+  "Failed to select vault": "选择数据库失败",
   "Failed to unlock vault": "解锁数据库失败",
   "Failed to load popup data": "加载弹窗数据失败",
   "Failed to load site candidates": "加载站点候选失败",
@@ -449,6 +443,8 @@ const ZH_CN: Record<TranslationKey, string> = {
   Unlocked: "已解锁",
   Locked: "已锁定",
   "Open Manager": "打开管理器",
+  "Open VaultKern": "打开 VaultKern",
+  "VaultKern Settings": "VaultKern 设置",
   Lock: "锁定",
   Search: "搜索",
   "Search records": "搜索记录",

@@ -28,8 +28,9 @@ zeroize.workspace = true
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62", features = ["Security_Credentials_UI"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+windows = { version = "0.62", features = ["ApplicationModel", "Foundation", "Management_Deployment", "Security_Credentials_UI", "Storage", "Storage_Search", "Win32_Foundation", "Win32_System_Com", "Win32_System_WinRT", "Win32_UI_Shell"] }
+windows-future = "0.3"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_Security_Cryptography", "Win32_Security_Cryptography_Catalog", "Win32_Security_Cryptography_Sip", "Win32_Security_WinTrust", "Win32_Storage_FileSystem", "Win32_Storage_Packaging_Appx", "Win32_System_Com", "Win32_System_Console", "Win32_System_IO", "Win32_System_Pipes", "Win32_System_Threading", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 mockito = "1.5"

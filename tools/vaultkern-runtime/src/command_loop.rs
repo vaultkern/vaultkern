@@ -5,12 +5,28 @@ use anyhow::{Context, Result};
 use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeCommand, RuntimeResponse};
 use zeroize::Zeroizing;
 
-use crate::Runtime;
+use crate::{Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession};
 
-const MAX_NATIVE_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_NATIVE_REQUEST_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_NATIVE_RESPONSE_BYTES: usize = 1024 * 1024;
+#[cfg(any(windows, test))]
+const MAX_CHUNKED_NATIVE_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(any(windows, test))]
+const NATIVE_RESPONSE_CHUNK_BYTES: usize = 384 * 1024;
 const MAX_NATIVE_REQUEST_ID_BYTES: usize = 256;
 
 pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
+    run_stdio_loop_with_session(runtime, RuntimeProtocolSession::legacy_native_host())
+}
+
+pub fn run_browser_stdio_loop(runtime: Runtime) -> Result<()> {
+    run_stdio_loop_with_session(runtime, RuntimeProtocolSession::browser_extension())
+}
+
+fn run_stdio_loop_with_session(
+    runtime: Runtime,
+    protocol_session: RuntimeProtocolSession,
+) -> Result<()> {
     install_redacted_panic_hook();
     configure_stdio_for_native_messaging()?;
 
@@ -19,7 +35,7 @@ pub fn run_stdio_loop(runtime: Runtime) -> Result<()> {
     let mut stdin = stdin.lock();
     let mut stdout = stdout.lock();
 
-    run_loop_with_io(runtime, &mut stdin, &mut stdout)
+    run_loop_with_io_with_session(runtime, protocol_session, &mut stdin, &mut stdout)
 }
 
 pub fn install_redacted_panic_hook() {
@@ -40,16 +56,39 @@ pub fn install_redacted_panic_hook() {
     });
 }
 
+#[cfg(test)]
 fn run_loop_with_io(
     runtime: Runtime,
     stdin: &mut impl Read,
     stdout: &mut impl Write,
 ) -> Result<()> {
-    run_loop_with_io_with_limit(runtime, stdin, stdout, MAX_NATIVE_MESSAGE_BYTES)
+    run_loop_with_io_with_limit(
+        runtime,
+        RuntimeProtocolSession::legacy_native_host(),
+        stdin,
+        stdout,
+        MAX_NATIVE_REQUEST_BYTES,
+    )
+}
+
+fn run_loop_with_io_with_session(
+    runtime: Runtime,
+    protocol_session: RuntimeProtocolSession,
+    stdin: &mut impl Read,
+    stdout: &mut impl Write,
+) -> Result<()> {
+    run_loop_with_io_with_limit(
+        runtime,
+        protocol_session,
+        stdin,
+        stdout,
+        MAX_NATIVE_REQUEST_BYTES,
+    )
 }
 
 fn run_loop_with_io_with_limit(
     mut runtime: Runtime,
+    mut protocol_session: RuntimeProtocolSession,
     stdin: &mut impl Read,
     stdout: &mut impl Write,
     max_message_bytes: usize,
@@ -88,7 +127,14 @@ fn run_loop_with_io_with_limit(
                     )?;
                     continue;
                 }
-                let outcome = handle_command_response(&mut runtime, envelope.command);
+                let command = match protocol_session.accept(envelope.command) {
+                    RuntimeProtocolDispatch::Respond(response) => {
+                        write_native_message(stdout, &response, request_id.as_deref())?;
+                        continue;
+                    }
+                    RuntimeProtocolDispatch::Dispatch(command) => command,
+                };
+                let outcome = handle_command_response(&mut runtime, command);
                 #[cfg(debug_assertions)]
                 maybe_abort_after_autofill_source_commit(&outcome.response);
                 write_native_message(stdout, &outcome.response, request_id.as_deref())?;
@@ -217,7 +263,7 @@ pub(crate) fn format_error_chain(error: &anyhow::Error) -> String {
 }
 
 #[derive(Debug, PartialEq)]
-enum NativeMessage<T> {
+pub(crate) enum NativeMessage<T> {
     Eof,
     Message(T),
     DecodeError {
@@ -230,7 +276,7 @@ enum NativeMessage<T> {
     },
 }
 
-fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
+pub(crate) fn read_native_message_or_eof_with_limit<T: serde::de::DeserializeOwned>(
     reader: &mut impl Read,
     max_message_bytes: usize,
 ) -> Result<NativeMessage<T>> {
@@ -296,19 +342,104 @@ fn request_id_from_native_payload(payload: &[u8]) -> Option<String> {
         .filter(|request_id| request_id.len() <= MAX_NATIVE_REQUEST_ID_BYTES)
 }
 
-fn write_native_message(
+pub(crate) fn write_native_message(
     writer: &mut impl Write,
     response: &RuntimeResponse,
     request_id: Option<&str>,
 ) -> Result<()> {
-    let payload =
+    let mut payload =
         encode_native_response(response, request_id).context("failed to encode native message")?;
+    if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
+        let oversized = RuntimeResponse::Error(ErrorDto {
+            code: "response_too_large".into(),
+            message: "native response exceeds Chrome's 1 MiB limit".into(),
+        });
+        payload = encode_native_response(&oversized, request_id)
+            .context("failed to encode oversized native response error")?;
+        if payload.len() > MAX_NATIVE_RESPONSE_BYTES {
+            payload = encode_native_response(&oversized, None)
+                .context("failed to encode uncorrelated oversized native response error")?;
+        }
+    }
+    write_native_payload(writer, &payload)
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn write_chunked_native_message(
+    writer: &mut impl Write,
+    response: &RuntimeResponse,
+    request_id: &str,
+) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct NativeResponseChunk<'a> {
+        #[serde(rename = "type")]
+        message_type: &'static str,
+        #[serde(rename = "requestId")]
+        request_id: &'a str,
+        #[serde(rename = "chunkIndex")]
+        chunk_index: u32,
+        #[serde(rename = "chunkCount")]
+        chunk_count: u32,
+        data: &'a str,
+    }
+
+    let payload = encode_native_response(response, Some(request_id))
+        .context("failed to encode native message")?;
+    if payload.len() <= MAX_NATIVE_RESPONSE_BYTES {
+        return write_native_payload(writer, &payload);
+    }
+    if payload.len() > MAX_CHUNKED_NATIVE_RESPONSE_BYTES {
+        return write_native_message(
+            writer,
+            &RuntimeResponse::Error(ErrorDto {
+                code: "response_too_large".into(),
+                message: "native response exceeds the 64 MiB chunked transport limit".into(),
+            }),
+            Some(request_id),
+        );
+    }
+
+    let payload_text = std::str::from_utf8(&payload).context("native response is not UTF-8")?;
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    while start < payload_text.len() {
+        let mut end = (start + NATIVE_RESPONSE_CHUNK_BYTES).min(payload_text.len());
+        while end > start && !payload_text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            anyhow::bail!("native response chunk boundary did not advance");
+        }
+        ranges.push((start, end));
+        start = end;
+    }
+    let chunk_count =
+        u32::try_from(ranges.len()).context("native response chunk count overflow")?;
+    for (chunk_index, (start, end)) in ranges.into_iter().enumerate() {
+        let chunk = encode_zeroizing_json(&NativeResponseChunk {
+            message_type: "native_response_chunk",
+            request_id,
+            chunk_index: u32::try_from(chunk_index)
+                .context("native response chunk index overflow")?,
+            chunk_count,
+            data: &payload_text[start..end],
+        })
+        .context("encode native response chunk")?;
+        if chunk.len() > MAX_NATIVE_RESPONSE_BYTES {
+            anyhow::bail!("encoded native response chunk exceeds Chrome's 1 MiB limit");
+        }
+        write_native_payload(writer, &chunk)?;
+    }
+    Ok(())
+}
+
+fn write_native_payload(writer: &mut impl Write, payload: &[u8]) -> Result<()> {
     let length = native_message_length_prefix(payload.len())?;
     writer
         .write_all(&length)
         .context("failed to write message length")?;
     writer
-        .write_all(&payload)
+        .write_all(payload)
         .context("failed to write message payload")?;
     writer.flush().context("failed to flush native message")
 }
@@ -318,7 +449,7 @@ fn native_message_length_prefix(length: usize) -> Result<[u8; 4]> {
     Ok(length.to_le_bytes())
 }
 
-fn encode_native_response(
+pub(crate) fn encode_native_response(
     response: &RuntimeResponse,
     request_id: Option<&str>,
 ) -> Result<Zeroizing<Vec<u8>>> {
@@ -330,24 +461,58 @@ fn encode_native_response(
         request_id: &'a str,
     }
 
-    let payload = match request_id {
-        Some(request_id) => serde_json::to_vec(&ResponseWithRequestId {
+    match request_id {
+        Some(request_id) => encode_zeroizing_json(&ResponseWithRequestId {
             response,
             request_id,
         }),
-        None => serde_json::to_vec(response),
+        None => encode_zeroizing_json(response),
     }
-    .context("failed to encode native response")?;
-    Ok(Zeroizing::new(payload))
+    .context("failed to encode native response")
+}
+
+pub fn encode_zeroizing_json<T: serde::Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>> {
+    #[derive(Default)]
+    struct SerializedLength {
+        bytes: usize,
+    }
+
+    impl Write for SerializedLength {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.bytes = self
+                .bytes
+                .checked_add(buffer.len())
+                .ok_or_else(|| std::io::Error::other("serialized JSON length overflow"))?;
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut length = SerializedLength::default();
+    serde_json::to_writer(&mut length, value).context("measure JSON payload")?;
+
+    let mut payload = Zeroizing::new(Vec::with_capacity(length.bytes));
+    serde_json::to_writer(&mut *payload, value).context("encode JSON payload")?;
+    if payload.len() != length.bytes {
+        anyhow::bail!(
+            "serialized JSON length changed between measurement and encoding: {} != {}",
+            payload.len(),
+            length.bytes
+        );
+    }
+    Ok(payload)
 }
 
 #[cfg(not(windows))]
-fn configure_stdio_for_native_messaging() -> Result<()> {
+pub(crate) fn configure_stdio_for_native_messaging() -> Result<()> {
     Ok(())
 }
 
 #[cfg(windows)]
-fn configure_stdio_for_native_messaging() -> Result<()> {
+pub(crate) fn configure_stdio_for_native_messaging() -> Result<()> {
     const STDIN_FILENO: i32 = 0;
     const STDOUT_FILENO: i32 = 1;
     const O_BINARY: i32 = 0x8000;
@@ -380,13 +545,14 @@ mod tests {
     };
 
     use super::{
-        NativeMessage, claim_autofill_source_commit_crash_marker, command_response_from_result,
-        configure_stdio_for_native_messaging, encode_native_response, format_error_chain,
-        handle_command_response, is_committed_autofill_source_response,
+        MAX_NATIVE_RESPONSE_BYTES, NativeMessage, claim_autofill_source_commit_crash_marker,
+        command_response_from_result, configure_stdio_for_native_messaging, encode_native_response,
+        format_error_chain, handle_command_response, is_committed_autofill_source_response,
         native_message_length_prefix, read_native_message_or_eof_with_limit,
         request_id_from_native_payload, run_loop_with_io, run_loop_with_io_with_limit,
+        write_chunked_native_message, write_native_message,
     };
-    use crate::Runtime;
+    use crate::{Runtime, RuntimeProtocolSession};
 
     fn durable_autofill_response(
         disposition: AutofillPersistDispositionDto,
@@ -522,6 +688,75 @@ mod tests {
     }
 
     #[test]
+    fn native_responses_over_chromes_one_mebibyte_limit_become_correlated_errors() {
+        let response = RuntimeResponse::EntryAttachmentContent(
+            vaultkern_runtime_protocol::EntryAttachmentContentDto {
+                name: "oversized.bin".into(),
+                data_base64: "A".repeat(1024 * 1024).into(),
+                protect_in_memory: false,
+            },
+        );
+        let mut output = Vec::new();
+
+        write_native_message(&mut output, &response, Some("native-large-1"))
+            .expect("oversized response should have a recoverable native response");
+        assert!(output.len() <= 4 + MAX_NATIVE_RESPONSE_BYTES);
+
+        let mut output = std::io::Cursor::new(output);
+        let value =
+            read_native_message_or_eof_with_limit::<serde_json::Value>(&mut output, 1024 * 1024)
+                .expect("read native response");
+        let NativeMessage::Message(value) = value else {
+            panic!("expected a native response");
+        };
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["code"], "response_too_large");
+        assert_eq!(value["requestId"], "native-large-1");
+    }
+
+    #[test]
+    fn resident_native_responses_are_split_into_bounded_reassemblable_chunks() {
+        let response = RuntimeResponse::EntryAttachmentContent(
+            vaultkern_runtime_protocol::EntryAttachmentContentDto {
+                name: "oversized.bin".into(),
+                data_base64: "A".repeat(2 * 1024 * 1024).into(),
+                protect_in_memory: false,
+            },
+        );
+        let mut encoded = Vec::new();
+        write_chunked_native_message(&mut encoded, &response, "native-chunked-1")
+            .expect("write chunked native response");
+
+        let mut input = std::io::Cursor::new(encoded);
+        let mut parts = Vec::new();
+        loop {
+            match read_native_message_or_eof_with_limit::<serde_json::Value>(
+                &mut input,
+                MAX_NATIVE_RESPONSE_BYTES,
+            )
+            .expect("read native response chunk")
+            {
+                NativeMessage::Message(chunk) => {
+                    assert_eq!(chunk["type"], "native_response_chunk");
+                    assert_eq!(chunk["requestId"], "native-chunked-1");
+                    parts.push(chunk["data"].as_str().expect("chunk data").to_owned());
+                }
+                NativeMessage::Eof => break,
+                other => panic!("unexpected native chunk frame: {other:?}"),
+            }
+        }
+        assert!(parts.len() > 1);
+        let assembled: serde_json::Value =
+            serde_json::from_str(&parts.concat()).expect("reassemble native response");
+        assert_eq!(assembled["type"], "entry_attachment_content");
+        assert_eq!(assembled["requestId"], "native-chunked-1");
+        assert_eq!(
+            assembled["dataBase64"].as_str().map(str::len),
+            Some(2 * 1024 * 1024)
+        );
+    }
+
+    #[test]
     fn native_message_reader_rejects_oversized_messages_without_draining_attacker_payload() {
         let mut input = Vec::new();
         input.extend_from_slice(&9_u32.to_le_bytes());
@@ -560,8 +795,14 @@ mod tests {
         let mut input = std::io::Cursor::new(input);
         let mut output = Vec::new();
 
-        run_loop_with_io_with_limit(Runtime::for_tests(), &mut input, &mut output, max_length)
-            .expect("native loop should continue after oversized command");
+        run_loop_with_io_with_limit(
+            Runtime::for_tests(),
+            RuntimeProtocolSession::legacy_native_host(),
+            &mut input,
+            &mut output,
+            max_length,
+        )
+        .expect("native loop should continue after oversized command");
 
         let mut output = std::io::Cursor::new(output);
         let first = read_response_from(&mut output);
@@ -580,7 +821,7 @@ mod tests {
     #[test]
     fn native_message_loop_serializes_decode_errors_without_exiting_the_host() {
         let invalid_command = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "requestId": "future-command",
             "command": { "type": "future_runtime_command" }
         });
@@ -617,7 +858,7 @@ mod tests {
     fn malformed_native_messages_extract_only_a_bounded_request_id() {
         let secret = "malformed-command-secret-must-not-be-retained";
         let invalid_command = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "requestId": "request-1",
             "command": {
                 "type": "future_runtime_command",
@@ -633,7 +874,7 @@ mod tests {
 
         let oversized_request_id = "r".repeat(super::MAX_NATIVE_REQUEST_ID_BYTES + 1);
         let invalid_command = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "requestId": oversized_request_id,
             "command": {
                 "type": "future_runtime_command",
@@ -647,7 +888,7 @@ mod tests {
     #[test]
     fn native_message_loop_echoes_request_id_in_response() {
         let command = serde_json::json!({
-            "version": 1,
+            "version": 2,
             "requestId": "request-1",
             "command": { "type": "get_session_state" }
         });
@@ -670,7 +911,7 @@ mod tests {
     #[test]
     fn native_message_loop_rejects_an_unsupported_envelope_version() {
         let command = serde_json::json!({
-            "version": 2,
+            "version": vaultkern_runtime_protocol::PROTOCOL_VERSION + 1,
             "requestId": "future-version",
             "command": { "type": "get_session_state" }
         });

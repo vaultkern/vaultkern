@@ -757,7 +757,7 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
             .into());
         }
 
-        let data_key = with_hello_key(
+        let data_key = Zeroizing::new(with_hello_key(
             &self.wrapping_key_name()?,
             false,
             self.parent_window,
@@ -774,7 +774,7 @@ impl SecureStorageProvider for WindowsHelloSecureStorageProvider {
                 )?;
                 ncrypt_decrypt_pkcs1(key, &wrapped_key)
             },
-        )?;
+        )?);
         let cipher = Aes256Gcm::new_from_slice(&data_key).map_err(|_| {
             SecureStorageError::record_invalidated(
                 "decrypted quick unlock data key has an invalid length",

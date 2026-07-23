@@ -7,9 +7,10 @@ use uuid::Uuid;
 use vaultkern_core::{
     CustomDataItemInput, CustomField, Entry, EntryCreate, Group, KeepassCore, MutationError,
     PasskeyRecord, TotpAlgorithm, TotpSpec, Vault, is_totp_persistent_attribute_key,
+    three_way_field_patch,
 };
 use vaultkern_runtime_protocol::{
-    AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryFieldsDto,
+    AutofillPersistConflictCodeDto, AutofillPersistPlanDto, AutofillUpdateFieldsDto, EntryFieldsDto,
 };
 use zeroize::Zeroizing;
 
@@ -106,6 +107,19 @@ struct ValidatedEntryFields {
     notes: Zeroizing<String>,
 }
 
+#[derive(Clone)]
+struct ValidatedUpdateFields {
+    username: Zeroizing<String>,
+    password: Zeroizing<String>,
+    url: Zeroizing<String>,
+}
+
+impl std::fmt::Debug for ValidatedUpdateFields {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("ValidatedUpdateFields([REDACTED])")
+    }
+}
+
 impl std::fmt::Debug for ValidatedEntryFields {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("ValidatedEntryFields([REDACTED])")
@@ -116,8 +130,8 @@ impl std::fmt::Debug for ValidatedEntryFields {
 enum ValidatedPlan {
     Update {
         entry_id: String,
-        expected_fields: ValidatedFields,
-        desired_fields: ValidatedFields,
+        expected_fields: ValidatedUpdateFields,
+        desired_fields: ValidatedUpdateFields,
     },
     Create {
         parent_group_id: String,
@@ -125,32 +139,6 @@ enum ValidatedPlan {
         expected_matching_entry_ids: Vec<String>,
         desired_fields: ValidatedFields,
     },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Located<T> {
-    parent_id: Option<Uuid>,
-    value: T,
-}
-
-#[derive(Debug, Clone)]
-struct Indexed<T> {
-    located: Located<T>,
-    order: usize,
-}
-
-#[derive(Debug)]
-struct VaultIndex {
-    groups: BTreeMap<Uuid, Indexed<Group>>,
-    entries: BTreeMap<Uuid, Indexed<Entry>>,
-    deleted_objects: BTreeMap<Uuid, Indexed<vaultkern_core::DeletedObject>>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PostReceiptEntryState {
-    located: Option<Located<Entry>>,
-    recycled: bool,
-    deleted_objects: Vec<vaultkern_core::DeletedObject>,
 }
 
 impl ValidatedPlan {
@@ -162,11 +150,12 @@ impl ValidatedPlan {
                 desired_fields,
             } => {
                 validate_canonical_uuid("entry_id", entry_id)?;
-                let expected_fields = validate_fields("expected_fields", expected_fields)?;
-                let desired_fields = validate_fields("desired_fields", desired_fields)?;
-                validate_desired_fields("desired_fields", &desired_fields)?;
-                if http_origin("expected_fields.url", &expected_fields.values.url)?
-                    != http_origin("desired_fields.url", &desired_fields.values.url)?
+                let expected_fields =
+                    validate_update_fields("expected_fields", expected_fields, true)?;
+                let desired_fields =
+                    validate_update_fields("desired_fields", desired_fields, false)?;
+                if http_origin("expected_fields.url", &expected_fields.url)?
+                    != http_origin("desired_fields.url", &desired_fields.url)?
                 {
                     return invalid_plan("update URLs must have the same exact origin");
                 }
@@ -225,6 +214,7 @@ impl ValidatedPlan {
 }
 
 fn merge_autofill_candidate(
+    core: &KeepassCore,
     baseline: &Vault,
     local: &Vault,
     current: &Vault,
@@ -244,69 +234,26 @@ fn merge_autofill_candidate(
     if current == baseline {
         return Ok(local.clone());
     }
-    let baseline_index = index_vault(baseline)?;
-    let local_index = index_vault(local)?;
-    let current_index = index_vault(current)?;
-    let mut groups = merge_indexed_maps(
-        &baseline_index.groups,
-        &local_index.groups,
-        &current_index.groups,
-        "group",
-    )?;
-    let mut entries = merge_indexed_maps(
-        &baseline_index.entries,
-        &local_index.entries,
-        &current_index.entries,
-        "entry",
-    )?;
-    let deleted_objects = merge_indexed_maps(
-        &baseline_index.deleted_objects,
-        &local_index.deleted_objects,
-        &current_index.deleted_objects,
-        "deleted object",
-    )?;
+    let baseline = without_autofill_receipts(core, baseline);
+    let local = without_autofill_receipts(core, local);
+    let current = without_autofill_receipts(core, current);
+    let patched = three_way_field_patch(&baseline, &local, &current)
+        .map_err(|error| AutofillPersistEngineError::MergeConflict(error.to_string()))?;
+    crate::runtime::ensure_patch_conflict_history_is_recoverable(
+        &patched.vault,
+        &patched.required_history_snapshots,
+    )
+    .map_err(|error| AutofillPersistEngineError::MergeConflict(error.to_string()))?;
+    Ok(patched.vault)
+}
 
-    if entries.keys().any(|id| groups.contains_key(id)) {
-        return merge_conflict("entry and group UUID namespaces collide");
+fn without_autofill_receipts(core: &KeepassCore, vault: &Vault) -> Vault {
+    let mut vault = vault.clone();
+    if vault.meta_custom_data.contains_key(AUTOFILL_RECEIPT_KEY) {
+        core.delete_vault_custom_data(&mut vault, AUTOFILL_RECEIPT_KEY)
+            .expect("receipt key checked before deletion");
     }
-    merge_sibling_orders(
-        &baseline_index.groups,
-        &local_index.groups,
-        &current_index.groups,
-        &mut groups,
-        "group",
-    )?;
-    merge_sibling_orders(
-        &baseline_index.entries,
-        &local_index.entries,
-        &current_index.entries,
-        &mut entries,
-        "entry",
-    )?;
-
-    let baseline_shell = vault_shell(baseline);
-    let local_shell = vault_shell(local);
-    let current_shell = vault_shell(current);
-    let mut candidate = choose_three_way_value(
-        &baseline_shell,
-        &local_shell,
-        &current_shell,
-        "vault metadata",
-    )?;
-    // KDF parameters describe the remote file generation, not a model edit.
-    // A rebased candidate must be serialized with the current remote generation.
-    candidate.kdf_parameters = current.kdf_parameters.clone();
-    candidate.meta_custom_data = merge_unknown_meta_custom_data(baseline, local, current)?;
-    // Start from the durable block layout. The receipt-ledger Core mutation
-    // later reconciles it with the merged map before the candidate can be saved.
-    candidate.meta_custom_data_blocks = current.meta_custom_data_blocks.clone();
-    candidate.deleted_objects = deleted_objects
-        .values()
-        .map(|record| record.located.value.clone())
-        .collect();
-    candidate.deleted_objects.sort_by_key(|item| item.id);
-    candidate.root = rebuild_group_tree(baseline.root.id, &groups, &entries)?;
-    Ok(candidate)
+    vault
 }
 
 fn validate_vault_identifiers(vault: &Vault) -> Result<(), AutofillPersistEngineError> {
@@ -342,535 +289,6 @@ fn validate_vault_identifiers(vault: &Vault) -> Result<(), AutofillPersistEngine
         }
     }
     Ok(())
-}
-
-fn vault_shell(vault: &Vault) -> Vault {
-    let mut shell = vault.clone();
-    let mut root = Group::new("");
-    root.id = Uuid::nil();
-    shell.root = root;
-    shell.deleted_objects.clear();
-    shell.meta_custom_data.clear();
-    shell.meta_custom_data_blocks.clear();
-    shell.kdf_parameters = None;
-    shell
-}
-
-fn index_vault(vault: &Vault) -> Result<VaultIndex, AutofillPersistEngineError> {
-    fn visit_group(
-        group: &Group,
-        parent_id: Option<Uuid>,
-        order: usize,
-        groups: &mut BTreeMap<Uuid, Indexed<Group>>,
-        entries: &mut BTreeMap<Uuid, Indexed<Entry>>,
-    ) -> Result<(), AutofillPersistEngineError> {
-        let mut shell = group.clone();
-        shell.entries.clear();
-        shell.children.clear();
-        if groups
-            .insert(
-                group.id,
-                Indexed {
-                    located: Located {
-                        parent_id,
-                        value: shell,
-                    },
-                    order,
-                },
-            )
-            .is_some()
-        {
-            return merge_conflict(format!("duplicate group UUID {}", group.id));
-        }
-        for (entry_order, entry) in group.entries.iter().enumerate() {
-            if entries
-                .insert(
-                    entry.id,
-                    Indexed {
-                        located: Located {
-                            parent_id: Some(group.id),
-                            value: entry.clone(),
-                        },
-                        order: entry_order,
-                    },
-                )
-                .is_some()
-            {
-                return merge_conflict(format!("duplicate entry UUID {}", entry.id));
-            }
-        }
-        for (child_order, child) in group.children.iter().enumerate() {
-            visit_group(child, Some(group.id), child_order, groups, entries)?;
-        }
-        Ok(())
-    }
-
-    let mut groups = BTreeMap::new();
-    let mut entries = BTreeMap::new();
-    visit_group(&vault.root, None, 0, &mut groups, &mut entries)?;
-    let mut deleted_objects = BTreeMap::new();
-    for (order, item) in vault.deleted_objects.iter().enumerate() {
-        if deleted_objects
-            .insert(
-                item.id,
-                Indexed {
-                    located: Located {
-                        parent_id: None,
-                        value: item.clone(),
-                    },
-                    order,
-                },
-            )
-            .is_some()
-        {
-            return merge_conflict(format!("duplicate deleted-object UUID {}", item.id));
-        }
-    }
-    Ok(VaultIndex {
-        groups,
-        entries,
-        deleted_objects,
-    })
-}
-
-fn merge_indexed_maps<T: Clone + PartialEq + Eq>(
-    baseline: &BTreeMap<Uuid, Indexed<T>>,
-    local: &BTreeMap<Uuid, Indexed<T>>,
-    current: &BTreeMap<Uuid, Indexed<T>>,
-    kind: &str,
-) -> Result<BTreeMap<Uuid, Indexed<T>>, AutofillPersistEngineError> {
-    let ids = baseline
-        .keys()
-        .chain(local.keys())
-        .chain(current.keys())
-        .copied()
-        .collect::<BTreeSet<_>>();
-    let mut merged = BTreeMap::new();
-    for id in ids {
-        let baseline_record = baseline.get(&id);
-        let local_record = local.get(&id);
-        let current_record = current.get(&id);
-        let baseline_state = baseline_record.map(|record| &record.located);
-        let local_state = local_record.map(|record| &record.located);
-        let current_state = current_record.map(|record| &record.located);
-        let selected = if local_state == current_state {
-            current_record.or(local_record)
-        } else if local_state == baseline_state {
-            current_record
-        } else if current_state == baseline_state {
-            local_record
-        } else {
-            return merge_conflict(format!("concurrent {kind} change for {id}"));
-        };
-        if let Some(selected) = selected {
-            merged.insert(id, selected.clone());
-        }
-    }
-    Ok(merged)
-}
-
-fn merge_sibling_orders<T>(
-    baseline: &BTreeMap<Uuid, Indexed<T>>,
-    local: &BTreeMap<Uuid, Indexed<T>>,
-    current: &BTreeMap<Uuid, Indexed<T>>,
-    merged: &mut BTreeMap<Uuid, Indexed<T>>,
-    kind: &str,
-) -> Result<(), AutofillPersistEngineError> {
-    let mut final_siblings = BTreeMap::<Uuid, BTreeSet<Uuid>>::new();
-    for (id, record) in merged.iter() {
-        if let Some(parent_id) = record.located.parent_id {
-            final_siblings.entry(parent_id).or_default().insert(*id);
-        }
-    }
-    let baseline_sequences = sibling_sequences(baseline);
-    let local_sequences = sibling_sequences(local);
-    let current_sequences = sibling_sequences(current);
-
-    for (parent_id, final_ids) in final_siblings {
-        let baseline_order = filtered_sibling_sequence(&baseline_sequences, parent_id, &final_ids);
-        let local_order = filtered_sibling_sequence(&local_sequences, parent_id, &final_ids);
-        let current_order = filtered_sibling_sequence(&current_sequences, parent_id, &final_ids);
-        let selected = choose_three_way_value(
-            &baseline_order,
-            &local_order,
-            &current_order,
-            &format!("{kind} sibling order under {parent_id}"),
-        )?;
-        let selected_ids = selected.iter().copied().collect::<BTreeSet<_>>();
-        if selected.len() != final_ids.len() || selected_ids != final_ids {
-            return merge_conflict(format!("incomplete {kind} sibling order under {parent_id}"));
-        }
-        for (order, id) in selected.into_iter().enumerate() {
-            merged.get_mut(&id).expect("merged sibling").order = order;
-        }
-    }
-    Ok(())
-}
-
-fn sibling_sequences<T>(index: &BTreeMap<Uuid, Indexed<T>>) -> BTreeMap<Uuid, Vec<Uuid>> {
-    let mut records = BTreeMap::<Uuid, Vec<(usize, Uuid)>>::new();
-    for (id, record) in index {
-        if let Some(parent_id) = record.located.parent_id {
-            records
-                .entry(parent_id)
-                .or_default()
-                .push((record.order, *id));
-        }
-    }
-    records
-        .into_iter()
-        .map(|(parent_id, mut siblings)| {
-            siblings.sort_by_key(|(order, _)| *order);
-            (parent_id, siblings.into_iter().map(|(_, id)| id).collect())
-        })
-        .collect()
-}
-
-fn filtered_sibling_sequence(
-    sequences: &BTreeMap<Uuid, Vec<Uuid>>,
-    parent_id: Uuid,
-    final_ids: &BTreeSet<Uuid>,
-) -> Vec<Uuid> {
-    sequences
-        .get(&parent_id)
-        .into_iter()
-        .flatten()
-        .filter(|id| final_ids.contains(id))
-        .copied()
-        .collect()
-}
-
-fn reconcile_candidate_sibling_orders(
-    baseline: &Vault,
-    local: &Vault,
-    current: &Vault,
-    candidate: &mut Vault,
-) -> Result<(), AutofillPersistEngineError> {
-    #[derive(Default)]
-    struct Orders {
-        groups: BTreeMap<Uuid, Vec<Uuid>>,
-        entries: BTreeMap<Uuid, Vec<Uuid>>,
-    }
-
-    fn collect(group: &Group, orders: &mut Orders) {
-        orders.entries.insert(
-            group.id,
-            group.entries.iter().map(|entry| entry.id).collect(),
-        );
-        orders.groups.insert(
-            group.id,
-            group.children.iter().map(|child| child.id).collect(),
-        );
-        for child in &group.children {
-            collect(child, orders);
-        }
-    }
-
-    fn from_vault(vault: &Vault) -> Orders {
-        let mut orders = Orders::default();
-        collect(&vault.root, &mut orders);
-        orders
-    }
-
-    fn select_orders(
-        baseline: &BTreeMap<Uuid, Vec<Uuid>>,
-        local: &BTreeMap<Uuid, Vec<Uuid>>,
-        current: &BTreeMap<Uuid, Vec<Uuid>>,
-        final_orders: &BTreeMap<Uuid, Vec<Uuid>>,
-        kind: &str,
-    ) -> Result<BTreeMap<Uuid, Vec<Uuid>>, AutofillPersistEngineError> {
-        let mut selected_orders = BTreeMap::new();
-        for (parent_id, final_order) in final_orders {
-            let final_ids = final_order.iter().copied().collect::<BTreeSet<_>>();
-            if final_ids.len() != final_order.len() {
-                return merge_conflict(format!("duplicate {kind} sibling under {parent_id}"));
-            }
-            let baseline_order = filtered_sibling_sequence(baseline, *parent_id, &final_ids);
-            let local_order = filtered_sibling_sequence(local, *parent_id, &final_ids);
-            let current_order = filtered_sibling_sequence(current, *parent_id, &final_ids);
-            let selected = choose_three_way_value(
-                &baseline_order,
-                &local_order,
-                &current_order,
-                &format!("{kind} sibling order under {parent_id}"),
-            )?;
-            let selected_ids = selected.iter().copied().collect::<BTreeSet<_>>();
-            if selected.len() != final_ids.len() || selected_ids != final_ids {
-                return merge_conflict(format!(
-                    "incomplete {kind} sibling order under {parent_id}"
-                ));
-            }
-            selected_orders.insert(*parent_id, selected);
-        }
-        Ok(selected_orders)
-    }
-
-    fn apply(
-        group: &mut Group,
-        group_orders: &BTreeMap<Uuid, Vec<Uuid>>,
-        entry_orders: &BTreeMap<Uuid, Vec<Uuid>>,
-    ) -> Result<(), AutofillPersistEngineError> {
-        let entry_order = entry_orders.get(&group.id).ok_or_else(|| {
-            AutofillPersistEngineError::MergeConflict(format!(
-                "missing entry sibling order under {}",
-                group.id
-            ))
-        })?;
-        let mut entries = std::mem::take(&mut group.entries)
-            .into_iter()
-            .map(|entry| (entry.id, entry))
-            .collect::<BTreeMap<_, _>>();
-        if entries.len() != entry_order.len() {
-            return merge_conflict(format!("incomplete entry sibling order under {}", group.id));
-        }
-        group.entries = entry_order
-            .iter()
-            .map(|id| {
-                entries.remove(id).ok_or_else(|| {
-                    AutofillPersistEngineError::MergeConflict(format!(
-                        "missing entry sibling {id} under {}",
-                        group.id
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let group_order = group_orders.get(&group.id).ok_or_else(|| {
-            AutofillPersistEngineError::MergeConflict(format!(
-                "missing group sibling order under {}",
-                group.id
-            ))
-        })?;
-        let mut children = std::mem::take(&mut group.children)
-            .into_iter()
-            .map(|child| (child.id, child))
-            .collect::<BTreeMap<_, _>>();
-        if children.len() != group_order.len() {
-            return merge_conflict(format!("incomplete group sibling order under {}", group.id));
-        }
-        group.children = group_order
-            .iter()
-            .map(|id| {
-                children.remove(id).ok_or_else(|| {
-                    AutofillPersistEngineError::MergeConflict(format!(
-                        "missing group sibling {id} under {}",
-                        group.id
-                    ))
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        for child in &mut group.children {
-            apply(child, group_orders, entry_orders)?;
-        }
-        Ok(())
-    }
-
-    validate_vault_identifiers(candidate)?;
-    let baseline_orders = from_vault(baseline);
-    let local_orders = from_vault(local);
-    let current_orders = from_vault(current);
-    let final_orders = from_vault(candidate);
-    let group_orders = select_orders(
-        &baseline_orders.groups,
-        &local_orders.groups,
-        &current_orders.groups,
-        &final_orders.groups,
-        "group",
-    )?;
-    let entry_orders = select_orders(
-        &baseline_orders.entries,
-        &local_orders.entries,
-        &current_orders.entries,
-        &final_orders.entries,
-        "entry",
-    )?;
-    apply(&mut candidate.root, &group_orders, &entry_orders)?;
-    Ok(())
-}
-
-fn choose_three_way_value<T: Clone + PartialEq + Eq>(
-    baseline: &T,
-    local: &T,
-    current: &T,
-    kind: &str,
-) -> Result<T, AutofillPersistEngineError> {
-    if local == current {
-        Ok(local.clone())
-    } else if local == baseline {
-        Ok(current.clone())
-    } else if current == baseline {
-        Ok(local.clone())
-    } else {
-        merge_conflict(format!("concurrent {kind} change"))
-    }
-}
-
-fn merge_unknown_meta_custom_data(
-    baseline: &Vault,
-    local: &Vault,
-    current: &Vault,
-) -> Result<BTreeMap<String, String>, AutofillPersistEngineError> {
-    let keys = baseline
-        .meta_custom_data
-        .keys()
-        .chain(local.meta_custom_data.keys())
-        .chain(current.meta_custom_data.keys())
-        .filter(|key| key.as_str() != AUTOFILL_RECEIPT_KEY)
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut merged = BTreeMap::new();
-    for key in keys {
-        let baseline_value = baseline.meta_custom_data.get(&key);
-        let local_value = local.meta_custom_data.get(&key);
-        let current_value = current.meta_custom_data.get(&key);
-        let selected = if local_value == current_value {
-            local_value
-        } else if local_value == baseline_value {
-            current_value
-        } else if current_value == baseline_value {
-            local_value
-        } else {
-            return merge_conflict(format!("concurrent meta custom-data change for {key}"));
-        };
-        if let Some(value) = selected {
-            merged.insert(key, value.clone());
-        }
-    }
-    Ok(merged)
-}
-
-fn rebuild_group_tree(
-    root_id: Uuid,
-    groups: &BTreeMap<Uuid, Indexed<Group>>,
-    entries: &BTreeMap<Uuid, Indexed<Entry>>,
-) -> Result<Group, AutofillPersistEngineError> {
-    fn sort_siblings(
-        records: &mut [(usize, Uuid)],
-        kind: &str,
-        parent_id: Uuid,
-    ) -> Result<(), AutofillPersistEngineError> {
-        records.sort_by_key(|(order, _)| *order);
-        if records.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-            return merge_conflict(format!("duplicate {kind} sibling order under {parent_id}"));
-        }
-        Ok(())
-    }
-
-    let Some(root) = groups.get(&root_id) else {
-        return merge_conflict("vault root was deleted");
-    };
-    if root.located.parent_id.is_some()
-        || groups
-            .iter()
-            .any(|(id, record)| *id != root_id && record.located.parent_id.is_none())
-    {
-        return merge_conflict("group tree has multiple or relocated roots");
-    }
-
-    let mut children = BTreeMap::<Uuid, Vec<(usize, Uuid)>>::new();
-    for (id, record) in groups {
-        if *id == root_id {
-            continue;
-        }
-        let Some(parent_id) = record.located.parent_id else {
-            return merge_conflict(format!("group {id} has no parent"));
-        };
-        if !groups.contains_key(&parent_id) {
-            return merge_conflict(format!("group {id} has missing parent {parent_id}"));
-        }
-        children
-            .entry(parent_id)
-            .or_default()
-            .push((record.order, *id));
-    }
-    for (parent_id, records) in &mut children {
-        sort_siblings(records, "group", *parent_id)?;
-    }
-
-    let mut entries_by_parent = BTreeMap::<Uuid, Vec<(usize, Uuid)>>::new();
-    for (id, record) in entries {
-        let Some(parent_id) = record.located.parent_id else {
-            return merge_conflict(format!("entry {id} has no parent"));
-        };
-        if !groups.contains_key(&parent_id) {
-            return merge_conflict(format!("entry {id} has missing parent {parent_id}"));
-        }
-        entries_by_parent
-            .entry(parent_id)
-            .or_default()
-            .push((record.order, *id));
-    }
-    for (parent_id, records) in &mut entries_by_parent {
-        sort_siblings(records, "entry", *parent_id)?;
-    }
-
-    fn build(
-        id: Uuid,
-        groups: &BTreeMap<Uuid, Indexed<Group>>,
-        entries: &BTreeMap<Uuid, Indexed<Entry>>,
-        children: &BTreeMap<Uuid, Vec<(usize, Uuid)>>,
-        entries_by_parent: &BTreeMap<Uuid, Vec<(usize, Uuid)>>,
-        visiting: &mut BTreeSet<Uuid>,
-        visited: &mut BTreeSet<Uuid>,
-    ) -> Result<Group, AutofillPersistEngineError> {
-        if !visiting.insert(id) {
-            return merge_conflict(format!("group cycle at {id}"));
-        }
-        let mut group = groups
-            .get(&id)
-            .ok_or_else(|| AutofillPersistEngineError::MergeConflict("missing group".into()))?
-            .located
-            .value
-            .clone();
-        group.entries = entries_by_parent
-            .get(&id)
-            .into_iter()
-            .flatten()
-            .map(|(_, entry_id)| {
-                entries
-                    .get(entry_id)
-                    .expect("indexed entry")
-                    .located
-                    .value
-                    .clone()
-            })
-            .collect();
-        group.children = children
-            .get(&id)
-            .into_iter()
-            .flatten()
-            .map(|(_, child_id)| {
-                build(
-                    *child_id,
-                    groups,
-                    entries,
-                    children,
-                    entries_by_parent,
-                    visiting,
-                    visited,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        visiting.remove(&id);
-        visited.insert(id);
-        Ok(group)
-    }
-
-    let mut visiting = BTreeSet::new();
-    let mut visited = BTreeSet::new();
-    let root = build(
-        root_id,
-        groups,
-        entries,
-        &children,
-        &entries_by_parent,
-        &mut visiting,
-        &mut visited,
-    )?;
-    if visited.len() != groups.len() {
-        return merge_conflict("group tree contains an unreachable cycle");
-    }
-    Ok(root)
 }
 
 pub(crate) fn prepare_autofill_persist(
@@ -914,30 +332,31 @@ pub(crate) fn prepare_autofill_persist(
     let current_has_operation_receipt = current_operation_receipt.is_some();
     let mut merged_receipts = merge_receipt_maps(base_receipts, current_receipts)?;
     let core = KeepassCore::new();
-    let mut candidate = merge_autofill_candidate(
-        input.baseline_source,
-        input.base_loaded,
-        input.current_source,
-    )?;
-
-    if current_has_operation_receipt {
-        if base_has_operation_receipt {
-            reconcile_post_receipt_entry(
-                &mut candidate,
-                input.baseline_source,
-                input.base_loaded,
-                input.current_source,
-                plan.entry_id(),
-            )?;
-        } else {
-            force_entry_state_from_source(&mut candidate, input.current_source, plan.entry_id())?;
-        }
-        reconcile_candidate_sibling_orders(
+    let mut candidate = if base_has_operation_receipt || current_has_operation_receipt {
+        merge_autofill_candidate(
+            &core,
             input.baseline_source,
             input.base_loaded,
             input.current_source,
-            &mut candidate,
+        )?
+    } else {
+        let mut local_with_plan = input.base_loaded.clone();
+        apply_plan_to_local_candidate(
+            &core,
+            &mut local_with_plan,
+            input.current_source,
+            &plan,
+            input.now_epoch_ms,
         )?;
+        merge_autofill_candidate(
+            &core,
+            input.baseline_source,
+            &local_with_plan,
+            input.current_source,
+        )?
+    };
+
+    if current_has_operation_receipt {
         protect_target_xml_forbidden_fields(&mut candidate, plan.entry_id());
         write_pruned_ledger(
             &core,
@@ -960,28 +379,6 @@ pub(crate) fn prepare_autofill_persist(
             outcome,
             plan_sha256,
         });
-    }
-
-    if base_has_operation_receipt {
-        ensure_base_only_recovery_postcondition(input.current_source, &plan)?;
-        force_entry_state_from_source(&mut candidate, input.base_loaded, plan.entry_id())?;
-    } else {
-        apply_idempotent_mutation(
-            &core,
-            &mut candidate,
-            input.base_loaded,
-            input.current_source,
-            &plan,
-            input.now_epoch_ms,
-        )?;
-    }
-    if base_has_operation_receipt {
-        reconcile_candidate_sibling_orders(
-            input.baseline_source,
-            input.base_loaded,
-            input.current_source,
-            &mut candidate,
-        )?;
     }
 
     protect_target_xml_forbidden_fields(&mut candidate, plan.entry_id());
@@ -1152,6 +549,31 @@ fn validate_fields(
     })
 }
 
+fn validate_update_fields(
+    name: &str,
+    fields: &AutofillUpdateFieldsDto,
+    allow_empty_password: bool,
+) -> Result<ValidatedUpdateFields, AutofillPersistEngineError> {
+    for (field_name, value) in [
+        ("username", &fields.username),
+        ("password", &fields.password),
+        ("url", &fields.url),
+    ] {
+        if value.len() > MAX_FIELD_BYTES {
+            return invalid_plan(format!("{name}.{field_name} is too large"));
+        }
+    }
+    if !allow_empty_password && fields.password.is_empty() {
+        return invalid_plan(format!("{name}.password must not be empty"));
+    }
+    http_origin(&format!("{name}.url"), &fields.url)?;
+    Ok(ValidatedUpdateFields {
+        username: Zeroizing::new(fields.username.as_str().to_owned()),
+        password: Zeroizing::new(fields.password.as_str().to_owned()),
+        url: Zeroizing::new(fields.url.as_str().to_owned()),
+    })
+}
+
 fn valid_totp_spec(spec: &TotpSpec) -> bool {
     let mut saw_padding = false;
     if spec.secret_base32.is_empty()
@@ -1237,8 +659,8 @@ fn hash_validated_plan(
         } => {
             hash_component(&mut hasher, b"update");
             hash_component(&mut hasher, entry_id.as_bytes());
-            hash_fields(&mut hasher, expected_fields);
-            hash_fields(&mut hasher, desired_fields);
+            hash_update_fields(&mut hasher, expected_fields);
+            hash_update_fields(&mut hasher, desired_fields);
         }
         ValidatedPlan::Create {
             parent_group_id,
@@ -1303,6 +725,12 @@ fn hash_fields(hasher: &mut Sha256, fields: &ValidatedFields) {
         hash_component(hasher, key.as_bytes());
         hash_component(hasher, value.value.as_bytes());
         hasher.update([u8::from(value.protected)]);
+    }
+}
+
+fn hash_update_fields(hasher: &mut Sha256, fields: &ValidatedUpdateFields) {
+    for value in [&fields.username, &fields.password, &fields.url] {
+        hash_component(hasher, value.as_bytes());
     }
 }
 
@@ -1468,46 +896,9 @@ fn write_pruned_ledger(
     Ok(())
 }
 
-fn ensure_base_only_recovery_postcondition(
-    current_source: &Vault,
-    plan: &ValidatedPlan,
-) -> Result<(), AutofillPersistEngineError> {
-    match plan {
-        ValidatedPlan::Update {
-            entry_id,
-            desired_fields,
-            ..
-        } => {
-            if live_entry_matches_fields(current_source, entry_id, desired_fields) {
-                Ok(())
-            } else {
-                conflict(AutofillPersistConflictCodeDto::UpdatePreconditionFailed)
-            }
-        }
-        ValidatedPlan::Create {
-            planned_entry_id,
-            expected_matching_entry_ids,
-            desired_fields,
-            ..
-        } => {
-            let baseline_contains_planned = expected_matching_entry_ids
-                .binary_search(planned_entry_id)
-                .is_ok();
-            if !baseline_contains_planned
-                && live_entry_matches_fields(current_source, planned_entry_id, desired_fields)
-            {
-                Ok(())
-            } else {
-                conflict(AutofillPersistConflictCodeDto::PlannedEntryIdCollision)
-            }
-        }
-    }
-}
-
-fn apply_idempotent_mutation(
+fn apply_plan_to_local_candidate(
     core: &KeepassCore,
-    candidate: &mut Vault,
-    base_loaded: &Vault,
+    local: &mut Vault,
     current_source: &Vault,
     plan: &ValidatedPlan,
     now_epoch_ms: u64,
@@ -1518,28 +909,19 @@ fn apply_idempotent_mutation(
             expected_fields,
             desired_fields,
         } => {
-            if live_entry_matches_fields(current_source, entry_id, desired_fields) {
-                if live_entry_matches_fields(base_loaded, entry_id, expected_fields) {
-                    force_entry_state_from_source(candidate, current_source, entry_id)?;
-                }
+            if live_entry_matches_update_fields(local, entry_id, desired_fields) {
                 return Ok(());
             }
-            if !live_entry_matches_fields(current_source, entry_id, expected_fields) {
+            if !live_entry_matches_update_fields(local, entry_id, expected_fields) {
                 return conflict(AutofillPersistConflictCodeDto::UpdatePreconditionFailed);
             }
-            if live_entry_matches_fields(candidate, entry_id, desired_fields) {
-                return Ok(());
-            }
-            if !live_entry_matches_fields(candidate, entry_id, expected_fields) {
-                return conflict(AutofillPersistConflictCodeDto::UpdatePreconditionFailed);
-            }
-            if !same_validated_fields(expected_fields, desired_fields) {
-                core.snapshot_entry_to_history(candidate, entry_id)
+            if !same_validated_update_fields(expected_fields, desired_fields) {
+                core.snapshot_entry_to_history(local, entry_id)
                     .map_err(mutation_error)?;
-                let entry = find_entry_mut(candidate, entry_id).ok_or_else(|| {
+                let entry = find_entry_mut(local, entry_id).ok_or_else(|| {
                     AutofillPersistEngineError::Mutation("entry disappeared".into())
                 })?;
-                apply_fields(entry, desired_fields, now_epoch_ms);
+                apply_update_fields(entry, desired_fields, now_epoch_ms);
             }
             Ok(())
         }
@@ -1565,7 +947,7 @@ fn apply_idempotent_mutation(
                 return conflict(AutofillPersistConflictCodeDto::PlannedEntryIdCollision);
             }
             if !group_is_live(current_source, parent_group_id)
-                || !group_is_live(candidate, parent_group_id)
+                || !group_is_live(local, parent_group_id)
             {
                 return conflict(AutofillPersistConflictCodeDto::CreateMatchingSetChanged);
             }
@@ -1574,10 +956,10 @@ fn apply_idempotent_mutation(
             {
                 return conflict(AutofillPersistConflictCodeDto::CreateMatchingSetChanged);
             }
-            if let Some((entry, recycled)) = find_entry(candidate, planned_entry_id) {
+            if let Some((entry, recycled)) = find_entry(local, planned_entry_id) {
                 if !recycled && entry_matches_validated(entry, desired_fields) {
                     let candidate_matching_without_planned: Vec<_> =
-                        exact_matching_entry_ids(candidate, desired_fields)
+                        exact_matching_entry_ids(local, desired_fields)
                             .into_iter()
                             .filter(|entry_id| entry_id != planned_entry_id)
                             .collect();
@@ -1588,12 +970,12 @@ fn apply_idempotent_mutation(
                 }
                 return conflict(AutofillPersistConflictCodeDto::PlannedEntryIdCollision);
             }
-            if exact_matching_entry_ids(candidate, desired_fields) != *expected_matching_entry_ids {
+            if exact_matching_entry_ids(local, desired_fields) != *expected_matching_entry_ids {
                 return conflict(AutofillPersistConflictCodeDto::CreateMatchingSetChanged);
             }
             let created = core
                 .add_entry_with_id(
-                    candidate,
+                    local,
                     parent_group_id,
                     planned_entry_id,
                     EntryCreate {
@@ -1610,7 +992,7 @@ fn apply_idempotent_mutation(
                     ),
                     other => mutation_error(other),
                 })?;
-            let entry = find_entry_mut(candidate, &created.id).ok_or_else(|| {
+            let entry = find_entry_mut(local, &created.id).ok_or_else(|| {
                 AutofillPersistEngineError::Mutation("created entry missing".into())
             })?;
             apply_fields(entry, desired_fields, now_epoch_ms);
@@ -1620,21 +1002,20 @@ fn apply_idempotent_mutation(
     }
 }
 
-fn same_validated_fields(left: &ValidatedFields, right: &ValidatedFields) -> bool {
-    left.values.title == right.values.title
-        && left.values.username == right.values.username
-        && left.values.password == right.values.password
-        && left.values.url == right.values.url
-        && left.values.notes == right.values.notes
-        && totp_specs_semantically_equal(
-            &left.values.title,
-            &left.values.username,
-            left.totp.as_ref(),
-            &right.values.title,
-            &right.values.username,
-            right.totp.as_ref(),
-        )
-        && left.custom_fields == right.custom_fields
+fn same_validated_update_fields(
+    left: &ValidatedUpdateFields,
+    right: &ValidatedUpdateFields,
+) -> bool {
+    left.username == right.username && left.password == right.password && left.url == right.url
+}
+
+fn apply_update_fields(entry: &mut Entry, fields: &ValidatedUpdateFields, now_epoch_ms: u64) {
+    let next_modified_at = (now_epoch_ms / 1_000).max(entry.modified_at.saturating_add(1));
+    entry.username = fields.username.as_str().to_owned();
+    entry.password = fields.password.as_str().to_owned();
+    entry.url = fields.url.as_str().to_owned();
+    protect_xml_forbidden_fields(entry);
+    entry.modified_at = next_modified_at;
 }
 
 fn apply_fields(entry: &mut Entry, fields: &ValidatedFields, now_epoch_ms: u64) {
@@ -1698,10 +1079,20 @@ fn protect_target_xml_forbidden_fields(candidate: &mut Vault, entry_id: &str) {
     }
 }
 
-fn live_entry_matches_fields(vault: &Vault, entry_id: &str, fields: &ValidatedFields) -> bool {
+fn live_entry_matches_update_fields(
+    vault: &Vault,
+    entry_id: &str,
+    fields: &ValidatedUpdateFields,
+) -> bool {
     find_entry(vault, entry_id)
-        .map(|(entry, recycled)| !recycled && entry_matches_validated(entry, fields))
+        .map(|(entry, recycled)| !recycled && entry_matches_update_fields(entry, fields))
         .unwrap_or(false)
+}
+
+fn entry_matches_update_fields(entry: &Entry, fields: &ValidatedUpdateFields) -> bool {
+    entry.username == fields.username.as_str()
+        && entry.password == fields.password.as_str()
+        && entry.url == fields.url.as_str()
 }
 
 fn entry_matches_validated(entry: &Entry, fields: &ValidatedFields) -> bool {
@@ -1741,120 +1132,6 @@ fn custom_fields_match(
 
 fn is_hidden_credential_attribute(key: &str) -> bool {
     is_totp_persistent_attribute_key(key) || PasskeyRecord::is_persistent_attribute_key(key)
-}
-
-fn force_entry_state_from_source(
-    candidate: &mut Vault,
-    source: &Vault,
-    entry_id: &str,
-) -> Result<(), AutofillPersistEngineError> {
-    let id = Uuid::parse_str(entry_id)
-        .map_err(|_| AutofillPersistEngineError::Mutation("invalid entry ID".into()))?;
-    let candidate_position =
-        locate_entry(&candidate.root, id).map(|(parent_id, index, _)| (parent_id, index));
-    remove_entry_from_group(&mut candidate.root, id);
-    candidate.deleted_objects.retain(|item| item.id != id);
-    candidate.deleted_objects.extend(
-        source
-            .deleted_objects
-            .iter()
-            .filter(|item| item.id == id)
-            .cloned(),
-    );
-    let Some((parent_id, _, entry)) = locate_entry(&source.root, id) else {
-        return Ok(());
-    };
-    let parent = find_group_by_uuid_mut(&mut candidate.root, parent_id).ok_or_else(|| {
-        AutofillPersistEngineError::Mutation("current entry parent is missing from merge".into())
-    })?;
-    let index = candidate_position
-        .filter(|(candidate_parent_id, _)| *candidate_parent_id == parent_id)
-        .map(|(_, index)| index)
-        .unwrap_or(parent.entries.len());
-    parent
-        .entries
-        .insert(index.min(parent.entries.len()), entry);
-    Ok(())
-}
-
-fn reconcile_post_receipt_entry(
-    candidate: &mut Vault,
-    baseline_source: &Vault,
-    base_loaded: &Vault,
-    current_source: &Vault,
-    entry_id: &str,
-) -> Result<(), AutofillPersistEngineError> {
-    let baseline = post_receipt_entry_state(baseline_source, entry_id)?;
-    let local = post_receipt_entry_state(base_loaded, entry_id)?;
-    let current = post_receipt_entry_state(current_source, entry_id)?;
-    let source = if local == current {
-        current_source
-    } else if local == baseline {
-        current_source
-    } else if current == baseline {
-        base_loaded
-    } else {
-        return merge_conflict(format!(
-            "concurrent post-receipt entry change for {entry_id}"
-        ));
-    };
-    force_entry_state_from_source(candidate, source, entry_id)
-}
-
-fn post_receipt_entry_state(
-    vault: &Vault,
-    entry_id: &str,
-) -> Result<PostReceiptEntryState, AutofillPersistEngineError> {
-    let id = Uuid::parse_str(entry_id)
-        .map_err(|_| AutofillPersistEngineError::Mutation("invalid entry ID".into()))?;
-    let located = locate_entry(&vault.root, id).map(|(parent_id, _, entry)| Located {
-        parent_id: Some(parent_id),
-        value: entry,
-    });
-    let mut deleted = vault
-        .deleted_objects
-        .iter()
-        .filter(|item| item.id == id)
-        .cloned()
-        .collect::<Vec<_>>();
-    deleted.sort_by_key(|item| item.deleted_at);
-    Ok(PostReceiptEntryState {
-        located,
-        recycled: find_entry(vault, entry_id)
-            .map(|(_, recycled)| recycled)
-            .unwrap_or(false),
-        deleted_objects: deleted,
-    })
-}
-
-fn locate_entry(group: &Group, entry_id: Uuid) -> Option<(Uuid, usize, Entry)> {
-    if let Some(index) = group.entries.iter().position(|entry| entry.id == entry_id) {
-        return Some((group.id, index, group.entries[index].clone()));
-    }
-    group
-        .children
-        .iter()
-        .find_map(|child| locate_entry(child, entry_id))
-}
-
-fn remove_entry_from_group(group: &mut Group, entry_id: Uuid) -> bool {
-    let original_len = group.entries.len();
-    group.entries.retain(|entry| entry.id != entry_id);
-    let mut removed = group.entries.len() != original_len;
-    for child in &mut group.children {
-        removed |= remove_entry_from_group(child, entry_id);
-    }
-    removed
-}
-
-fn find_group_by_uuid_mut(group: &mut Group, group_id: Uuid) -> Option<&mut Group> {
-    if group.id == group_id {
-        return Some(group);
-    }
-    group
-        .children
-        .iter_mut()
-        .find_map(|child| find_group_by_uuid_mut(child, group_id))
 }
 
 fn find_entry<'a>(vault: &'a Vault, entry_id: &str) -> Option<(&'a Entry, bool)> {
@@ -2010,7 +1287,8 @@ mod tests {
     use super::*;
     use vaultkern_core::{DeletedObject, EntryCreate, EntryUpdate, KeepassCore, TotpSpec, Vault};
     use vaultkern_runtime_protocol::{
-        AutofillPersistConflictCodeDto, AutofillPersistPlanDto, EntryCustomFieldDto, EntryFieldsDto,
+        AutofillPersistConflictCodeDto, AutofillPersistPlanDto, AutofillUpdateFieldsDto,
+        EntryCustomFieldDto, EntryFieldsDto,
     };
 
     const ENTRY_ID: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
@@ -2099,11 +1377,19 @@ mod tests {
         }
     }
 
+    fn update_fields(fields: &EntryFieldsDto) -> AutofillUpdateFieldsDto {
+        AutofillUpdateFieldsDto {
+            username: fields.username.as_str().into(),
+            password: fields.password.as_str().into(),
+            url: fields.url.as_str().into(),
+        }
+    }
+
     fn update_plan(expected: EntryFieldsDto, desired: EntryFieldsDto) -> AutofillPersistPlanDto {
         AutofillPersistPlanDto::Update {
             entry_id: ENTRY_ID.into(),
-            expected_fields: expected,
-            desired_fields: desired,
+            expected_fields: update_fields(&expected),
+            desired_fields: update_fields(&desired),
         }
     }
 
@@ -2231,15 +1517,6 @@ mod tests {
             .collect()
     }
 
-    fn root_child_ids(vault: &Vault) -> Vec<String> {
-        vault
-            .root
-            .children
-            .iter()
-            .map(|group| group.id.to_string())
-            .collect()
-    }
-
     fn count_entry_id(group: &Group, entry_id: Uuid) -> usize {
         group
             .entries
@@ -2251,6 +1528,16 @@ mod tests {
                 .iter()
                 .map(|child| count_entry_id(child, entry_id))
                 .sum::<usize>()
+    }
+
+    fn entry_parent_id(group: &Group, entry_id: Uuid) -> Option<Uuid> {
+        if group.entries.iter().any(|entry| entry.id == entry_id) {
+            return Some(group.id);
+        }
+        group
+            .children
+            .iter()
+            .find_map(|child| entry_parent_id(child, entry_id))
     }
 
     fn entry_password(vault: &Vault, entry_id: &str) -> Option<String> {
@@ -2315,7 +1602,7 @@ mod tests {
         let digest = plan_sha256(TRANSACTION_ID, VAULT_ID, SOURCE_SHA, &plan).unwrap();
         assert_eq!(
             digest,
-            "8f43045c3d351d2a9438795b2617f2bd5c444e5f4812ae1f164e3020b4c19181"
+            "8175febe4b4c2178f611255e1a7274b4f064730f21b03f51cb047d163cb14709"
         );
 
         let reordered = update_plan(
@@ -2446,8 +1733,8 @@ mod tests {
         let invalid_plans = [
             AutofillPersistPlanDto::Update {
                 entry_id: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA".into(),
-                expected_fields: fields("old-secret"),
-                desired_fields: fields("new-secret"),
+                expected_fields: update_fields(&fields("old-secret")),
+                desired_fields: update_fields(&fields("new-secret")),
             },
             AutofillPersistPlanDto::Create {
                 parent_group_id: base.root.id.simple().to_string(),
@@ -2461,14 +1748,16 @@ mod tests {
                 expected_matching_entry_ids: vec![],
                 desired_fields: fields("new-secret"),
             },
-            update_plan(fields("old-secret"), duplicate_fields),
-            update_plan(
-                fields("old-secret"),
-                EntryFieldsDto {
-                    title: "x".repeat(MAX_FIELD_BYTES + 1).into(),
-                    ..fields("new-secret")
+            create_plan(&base.root.id.to_string(), vec![], duplicate_fields),
+            AutofillPersistPlanDto::Update {
+                entry_id: ENTRY_ID.into(),
+                expected_fields: update_fields(&fields("old-secret")),
+                desired_fields: AutofillUpdateFieldsDto {
+                    username: "x".repeat(MAX_FIELD_BYTES + 1).into(),
+                    password: "new-secret".into(),
+                    url: "https://example.com".into(),
                 },
-            ),
+            },
         ];
 
         for plan in invalid_plans {
@@ -2538,12 +1827,12 @@ mod tests {
                 vec![OTHER_ID.into(), OTHER_ID.into()],
                 fields("secret"),
             ),
-            update_plan(fields("old-secret"), reserved),
-            update_plan(fields("old-secret"), invalid_key),
-            update_plan(fields("old-secret"), invalid_xml_key),
-            update_plan(fields("old-secret"), invalid_value),
-            update_plan(fields("old-secret"), invalid_totp),
-            update_plan(fields("old-secret"), invalid_totp_control),
+            create_plan(&parent, vec![], reserved),
+            create_plan(&parent, vec![], invalid_key),
+            create_plan(&parent, vec![], invalid_xml_key),
+            create_plan(&parent, vec![], invalid_value),
+            create_plan(&parent, vec![], invalid_totp),
+            create_plan(&parent, vec![], invalid_totp_control),
         ];
         let before = current.clone();
 
@@ -2557,9 +1846,10 @@ mod tests {
     }
 
     #[test]
-    fn credential_source_custom_keys_fail_closed_without_mutation() {
+    fn create_rejects_credential_source_custom_keys_without_mutation() {
         let current = vault_with_entry(&fields("old-secret"));
         let before = current.clone();
+        let parent = current.root.id.to_string();
 
         for key in [
             "otp",
@@ -2587,11 +1877,7 @@ mod tests {
 
             assert!(
                 matches!(
-                    execute(
-                        &current,
-                        &current,
-                        &update_plan(fields("old-secret"), desired)
-                    ),
+                    execute(&current, &current, &create_plan(&parent, vec![], desired)),
                     Err(AutofillPersistEngineError::InvalidPlan(_))
                 ),
                 "{key}"
@@ -2601,8 +1887,9 @@ mod tests {
     }
 
     #[test]
-    fn differently_cased_credential_names_remain_ordinary_custom_fields() {
+    fn create_accepts_differently_cased_ordinary_custom_fields() {
         let current = vault_with_entry(&fields("old-secret"));
+        let parent = current.root.id.to_string();
         let mut desired = fields("new-secret");
         desired.custom_fields = [
             "OTP",
@@ -2617,13 +1904,12 @@ mod tests {
         })
         .collect();
 
-        let prepared = execute(
-            &current,
-            &current,
-            &update_plan(fields("old-secret"), desired),
-        )
-        .expect("differently cased names are not KDBX credential source keys");
-        let attributes = &prepared.candidate.root.entries[0].attributes;
+        let prepared = execute(&current, &current, &create_plan(&parent, vec![], desired))
+            .expect("differently cased names are not KDBX credential source keys");
+        let attributes = &find_entry(&prepared.candidate, PLANNED_ID)
+            .unwrap()
+            .0
+            .attributes;
 
         assert_eq!(attributes.len(), 3);
         for key in [
@@ -2693,9 +1979,10 @@ mod tests {
     }
 
     #[test]
-    fn update_roundtrips_custom_fields_and_totp_with_one_history_snapshot() {
-        let expected = fields("old-secret");
-        let desired = fields_with_custom_and_totp("new-secret");
+    fn update_preserves_custom_fields_and_totp_with_one_history_snapshot() {
+        let expected = fields_with_custom_and_totp("old-secret");
+        let mut desired = duplicate_fields(&expected);
+        desired.password = "new-secret".into();
         let current = vault_with_entry(&expected);
         let prepared = execute(
             &current,
@@ -2750,7 +2037,7 @@ mod tests {
     }
 
     #[test]
-    fn update_rejects_nonpersistent_entry_totp_fallback_state() {
+    fn update_keeps_nonpersistent_totp_state_for_runtime_roundtrip_validation() {
         let expected = fields_with_custom_and_totp("old-secret");
         let mut desired = duplicate_fields(&expected);
         desired.password = "new-secret".into();
@@ -2760,11 +2047,13 @@ mod tests {
         totp.issuer = None;
         totp.account_name = None;
 
-        assert_eq!(
-            execute(&current, &current, &update_plan(expected, desired)),
-            Err(AutofillPersistEngineError::Conflict(
-                AutofillPersistConflictCodeDto::UpdatePreconditionFailed
-            ))
+        let prepared = execute(&current, &current, &update_plan(expected, desired)).unwrap();
+        let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
+        assert!(
+            entry
+                .totp
+                .as_ref()
+                .is_some_and(|totp| { totp.issuer.is_none() && totp.account_name.is_none() })
         );
     }
 
@@ -2792,20 +2081,21 @@ mod tests {
     #[test]
     fn update_protects_xml_forbidden_field_values_before_serialization() {
         let expected = fields("old-secret");
-        let mut desired = fields("new\0secret");
-        desired.title = "Example\0Title".into();
+        let mut desired = duplicate_fields(&expected);
         desired.username = "alice\0name".into();
-        desired.notes = "notes\0body".into();
-        desired.custom_fields.push(EntryCustomFieldDto {
-            key: "UnsafeValue".into(),
-            value: "custom\0value".into(),
-            protected: false,
-        });
+        desired.password = "new\0secret".into();
         let mut current = vault_with_entry(&expected);
-        find_entry_mut(&mut current, ENTRY_ID)
-            .unwrap()
-            .field_protection
-            .protect_password = false;
+        let current_entry = find_entry_mut(&mut current, ENTRY_ID).unwrap();
+        current_entry.title = "Example\0Title".into();
+        current_entry.notes = "notes\0body".into();
+        current_entry.attributes.insert(
+            "UnsafeValue".into(),
+            CustomField {
+                value: "custom\0value".into(),
+                protected: false,
+            },
+        );
+        current_entry.field_protection.protect_password = false;
 
         let prepared = execute(&current, &current, &update_plan(expected, desired)).unwrap();
         let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
@@ -3020,7 +2310,27 @@ mod tests {
     }
 
     #[test]
-    fn three_way_merge_preserves_one_sided_entry_reorder_with_other_side_value_change() {
+    fn autofill_rebase_uses_the_common_field_patch_for_disjoint_same_entry_changes() {
+        let expected = fields("old-secret");
+        let desired = fields("new-secret");
+        let baseline = vault_with_entry(&expected);
+        let mut local = baseline.clone();
+        find_entry_mut(&mut local, ENTRY_ID).unwrap().notes = "resident note".into();
+        let mut remote = baseline.clone();
+        find_entry_mut(&mut remote, ENTRY_ID).unwrap().username = "remote-user".into();
+
+        let prepared =
+            execute_with_baseline(&baseline, &local, &remote, &update_plan(expected, desired))
+                .expect("disjoint entry fields must use the 007 patch semantics");
+        let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
+
+        assert_eq!(entry.username, "remote-user");
+        assert_eq!(entry.password, "new-secret");
+        assert_eq!(entry.notes, "resident note");
+    }
+
+    #[test]
+    fn common_patch_rejects_unrepresentable_entry_reorder_with_remote_value_change() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let mut baseline = vault_with_entry(&expected);
@@ -3033,23 +2343,14 @@ mod tests {
             .tags
             .insert("remote-edit".into());
 
-        let candidate =
-            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired))
-                .unwrap()
-                .candidate;
-
-        assert_eq!(root_entry_ids(&candidate), vec![OTHER_ID, ENTRY_ID]);
-        assert!(
-            find_entry(&candidate, OTHER_ID)
-                .unwrap()
-                .0
-                .tags
-                .contains("remote-edit")
-        );
+        assert!(matches!(
+            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired)),
+            Err(AutofillPersistEngineError::MergeConflict(_))
+        ));
     }
 
     #[test]
-    fn three_way_merge_preserves_one_sided_group_reorder_with_other_side_value_change() {
+    fn common_patch_rejects_unrepresentable_group_reorder_with_remote_value_change() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let mut baseline = vault_with_entry(&expected);
@@ -3063,54 +2364,14 @@ mod tests {
         let mut current = baseline.clone();
         current.root.children[1].notes = "remote-edit".into();
 
-        let candidate =
-            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired))
-                .unwrap()
-                .candidate;
-
-        assert_eq!(root_child_ids(&candidate), vec![GROUP_B_ID, GROUP_A_ID]);
-        assert_eq!(candidate.root.children[0].notes, "remote-edit");
+        assert!(matches!(
+            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired)),
+            Err(AutofillPersistEngineError::MergeConflict(_))
+        ));
     }
 
     #[test]
-    fn sibling_order_reconciliation_moves_attachment_storage_without_cloning_it() {
-        let expected = fields("old-secret");
-        let mut baseline = vault_with_entry(&expected);
-        add_entry(&mut baseline, OTHER_ID, &fields("other-secret"));
-        find_entry_mut(&mut baseline, ENTRY_ID)
-            .unwrap()
-            .attachments
-            .insert(
-                "large.bin".into(),
-                vaultkern_core::Attachment {
-                    name: "large.bin".into(),
-                    data: vec![0x5a; 4_096],
-                    protect_in_memory: false,
-                },
-            );
-        let mut local = baseline.clone();
-        local.root.entries.swap(0, 1);
-        let mut current = baseline.clone();
-        find_entry_mut(&mut current, OTHER_ID)
-            .unwrap()
-            .tags
-            .insert("remote-edit".into());
-        let mut candidate = merge_autofill_candidate(&baseline, &local, &current).unwrap();
-        let before = find_entry(&candidate, ENTRY_ID).unwrap().0.attachments["large.bin"]
-            .data
-            .as_ptr();
-
-        reconcile_candidate_sibling_orders(&baseline, &local, &current, &mut candidate).unwrap();
-
-        let after = find_entry(&candidate, ENTRY_ID).unwrap().0.attachments["large.bin"]
-            .data
-            .as_ptr();
-        assert_eq!(after, before);
-        assert_eq!(root_entry_ids(&candidate), vec![OTHER_ID, ENTRY_ID]);
-    }
-
-    #[test]
-    fn three_way_merge_rejects_independent_same_parent_insertions() {
+    fn common_patch_merges_independent_same_parent_insertions() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let baseline = vault_with_entry(&expected);
@@ -3119,10 +2380,15 @@ mod tests {
         let mut current = baseline.clone();
         add_entry(&mut current, PENDING_ID, &fields("current-insert"));
 
-        assert!(matches!(
-            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired),),
-            Err(AutofillPersistEngineError::MergeConflict(_))
-        ));
+        let candidate =
+            execute_with_baseline(&baseline, &local, &current, &update_plan(expected, desired))
+                .unwrap()
+                .candidate;
+        let mut ids = root_entry_ids(&candidate);
+        ids.sort_unstable();
+        let mut expected_ids = vec![ENTRY_ID, OTHER_ID, PENDING_ID];
+        expected_ids.sort_unstable();
+        assert_eq!(ids, expected_ids);
     }
 
     #[test]
@@ -3190,7 +2456,7 @@ mod tests {
         assert_eq!(count_entry_id(&moved_candidate.root, other_id), 1);
         assert!(find_entry(&moved_candidate, PENDING_ID).is_some());
         assert_eq!(
-            locate_entry(&moved_candidate.root, other_id).map(|(parent, _, _)| parent),
+            entry_parent_id(&moved_candidate.root, other_id),
             Some(Uuid::parse_str(&group_b).unwrap())
         );
     }
@@ -3230,7 +2496,7 @@ mod tests {
     }
 
     #[test]
-    fn divergent_concurrent_change_to_the_same_unrelated_entry_fails_closed() {
+    fn common_patch_keeps_later_unrelated_entry_edit_with_history_recovery() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let mut original = vault_with_entry(&expected);
@@ -3241,14 +2507,21 @@ mod tests {
         let mut current = original.clone();
         set_entry_password_and_modified(&mut current, OTHER_ID, "external-edit", 30);
 
-        assert!(matches!(
-            execute_with_baseline(&original, &base, &current, &update_plan(expected, desired),),
-            Err(AutofillPersistEngineError::MergeConflict(_))
-        ));
+        let prepared =
+            execute_with_baseline(&original, &base, &current, &update_plan(expected, desired))
+                .unwrap();
+        let entry = find_entry(&prepared.candidate, OTHER_ID).unwrap().0;
+        assert_eq!(entry.password, "external-edit");
+        assert!(
+            entry
+                .history
+                .iter()
+                .any(|snapshot| snapshot.password == "local-edit")
+        );
     }
 
     #[test]
-    fn divergent_concurrent_non_field_changes_to_the_target_fail_closed() {
+    fn common_patch_resolves_concurrent_target_tags_with_history_recovery() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let original = vault_with_entry(&expected);
@@ -3263,14 +2536,23 @@ mod tests {
             .tags
             .insert("current-tag".into());
 
-        assert!(matches!(
-            execute_with_baseline(&original, &local, &current, &update_plan(expected, desired)),
-            Err(AutofillPersistEngineError::MergeConflict(_))
-        ));
+        let prepared =
+            execute_with_baseline(&original, &local, &current, &update_plan(expected, desired))
+                .unwrap();
+        let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
+        assert!(entry.tags.contains("local-tag"));
+        assert!(!entry.tags.contains("current-tag"));
+        assert!(
+            entry
+                .history
+                .iter()
+                .any(|snapshot| snapshot.tags.contains("current-tag"))
+        );
+        assert_eq!(entry.password, "new-secret");
     }
 
     #[test]
-    fn raw_current_third_state_conflicts_even_when_timestamp_merge_prefers_base_expected() {
+    fn browser_mutation_is_a_local_branch_and_common_patch_retains_remote_history() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let mut base = vault_with_entry(&expected);
@@ -3280,18 +2562,21 @@ mod tests {
         let base_before = base.clone();
         let current_before = current.clone();
 
-        assert_eq!(
-            execute(&base, &current, &update_plan(expected, desired)),
-            Err(AutofillPersistEngineError::Conflict(
-                AutofillPersistConflictCodeDto::UpdatePreconditionFailed
-            ))
+        let prepared = execute(&base, &current, &update_plan(expected, desired)).unwrap();
+        let entry = find_entry(&prepared.candidate, ENTRY_ID).unwrap().0;
+        assert_eq!(entry.password, "new-secret");
+        assert!(
+            entry
+                .history
+                .iter()
+                .any(|snapshot| snapshot.password == "third-secret")
         );
         assert_eq!(base, base_before);
         assert_eq!(current, current_before);
     }
 
     #[test]
-    fn old_in_memory_update_without_receipt_conflicts_with_a_changed_source() {
+    fn already_applied_local_update_without_receipt_converges_through_common_patch() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let current = vault_with_entry(&expected);
@@ -3303,19 +2588,21 @@ mod tests {
         let mut raw_current = current.clone();
         set_entry_password_and_modified(&mut raw_current, ENTRY_ID, "old-secret", 10);
 
-        assert!(matches!(
-            execute_with_baseline(
-                &current,
-                &base,
-                &raw_current,
-                &update_plan(expected, desired),
-            ),
-            Err(AutofillPersistEngineError::MergeConflict(_))
-        ));
+        let prepared = execute_with_baseline(
+            &current,
+            &base,
+            &raw_current,
+            &update_plan(expected, desired),
+        )
+        .unwrap();
+        assert_eq!(
+            entry_password(&prepared.candidate, ENTRY_ID).as_deref(),
+            Some("new-secret")
+        );
     }
 
     #[test]
-    fn concurrent_exact_target_postcondition_without_receipt_fails_closed() {
+    fn concurrent_exact_target_postcondition_without_receipt_converges() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let mut baseline = vault_with_entry(&expected);
@@ -3328,10 +2615,14 @@ mod tests {
         let mut current = baseline.clone();
         set_entry_password_and_modified(&mut current, ENTRY_ID, "new-secret", 30);
 
-        assert!(matches!(
-            execute_with_baseline(&baseline, &base, &current, &update_plan(expected, desired)),
-            Err(AutofillPersistEngineError::MergeConflict(_))
-        ));
+        let prepared =
+            execute_with_baseline(&baseline, &base, &current, &update_plan(expected, desired))
+                .unwrap();
+        assert_eq!(
+            entry_password(&prepared.candidate, ENTRY_ID).as_deref(),
+            Some("new-secret")
+        );
+        assert_eq!(ledger(&prepared.candidate).receipts.len(), 1);
     }
 
     #[test]
@@ -3560,7 +2851,7 @@ mod tests {
     }
 
     #[test]
-    fn receipts_on_both_sources_reject_concurrent_hard_delete_and_recycle() {
+    fn receipts_on_both_sources_keep_recycled_entry_over_concurrent_hard_delete() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let original = vault_with_entry(&expected);
@@ -3575,21 +2866,22 @@ mod tests {
             .soft_delete_entry_to_recycle_bin(&mut current, ENTRY_ID)
             .unwrap();
 
-        assert!(matches!(
-            execute_with_baseline(&committed, &local, &current, &plan),
-            Err(AutofillPersistEngineError::MergeConflict(_))
-        ));
+        let replayed = execute_with_baseline(&committed, &local, &current, &plan).unwrap();
+        assert!(find_entry(&replayed.candidate, ENTRY_ID).unwrap().1);
     }
 
     #[test]
-    fn receipts_on_both_sources_reject_divergent_target_edits_regardless_of_timestamp() {
+    fn receipt_replay_uses_common_timestamp_and_history_semantics_for_target_edits() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let original = vault_with_entry(&expected);
         let plan = update_plan(expected, desired);
         let committed = execute(&original, &original, &plan).unwrap().candidate;
 
-        for (local_modified_at, current_modified_at) in [(100, 100), (100, 101), (101, 100)] {
+        for (local_modified_at, current_modified_at, winner, recovered) in [
+            (100, 101, "current-later-edit", "local-later-edit"),
+            (101, 100, "local-later-edit", "current-later-edit"),
+        ] {
             let mut local = committed.clone();
             let mut current = committed.clone();
             set_entry_password_and_modified(
@@ -3605,15 +2897,20 @@ mod tests {
                 current_modified_at,
             );
 
-            assert!(matches!(
-                execute_with_baseline(&committed, &local, &current, &plan),
-                Err(AutofillPersistEngineError::MergeConflict(_))
-            ));
+            let replayed = execute_with_baseline(&committed, &local, &current, &plan).unwrap();
+            let entry = find_entry(&replayed.candidate, ENTRY_ID).unwrap().0;
+            assert_eq!(entry.password, winner);
+            assert!(
+                entry
+                    .history
+                    .iter()
+                    .any(|snapshot| snapshot.password == recovered)
+            );
         }
     }
 
     #[test]
-    fn base_only_update_receipt_requires_exact_current_postcondition() {
+    fn base_only_update_receipt_uses_the_common_patch_state_machine() {
         let expected = fields("old-secret");
         let desired = fields("new-secret");
         let original = vault_with_entry(&expected);
@@ -3637,7 +2934,13 @@ mod tests {
         KeepassCore::new()
             .delete_entry(&mut base_deleted_after_receipt, ENTRY_ID)
             .unwrap();
-        let restored = execute(&base_deleted_after_receipt, &current_desired, &plan).unwrap();
+        let restored = execute_with_baseline(
+            &base_with_receipt,
+            &base_deleted_after_receipt,
+            &current_desired,
+            &plan,
+        )
+        .unwrap();
         assert_eq!(
             restored.outcome,
             AutofillPersistLogicalOutcome::NeedsPublish {
@@ -3647,19 +2950,17 @@ mod tests {
         assert!(find_entry(&restored.candidate, ENTRY_ID).is_none());
 
         let current_expected = original.clone();
+        let restored = execute(&base_with_receipt, &current_expected, &plan).unwrap();
         assert_eq!(
-            execute(&base_with_receipt, &current_expected, &plan),
-            Err(AutofillPersistEngineError::Conflict(
-                AutofillPersistConflictCodeDto::UpdatePreconditionFailed
-            ))
+            entry_password(&restored.candidate, ENTRY_ID).as_deref(),
+            Some("old-secret")
         );
         let mut current_third = original;
         set_entry_password_and_modified(&mut current_third, ENTRY_ID, "third-secret", 20);
+        let restored = execute(&base_with_receipt, &current_third, &plan).unwrap();
         assert_eq!(
-            execute(&base_with_receipt, &current_third, &plan),
-            Err(AutofillPersistEngineError::Conflict(
-                AutofillPersistConflictCodeDto::UpdatePreconditionFailed
-            ))
+            entry_password(&restored.candidate, ENTRY_ID).as_deref(),
+            Some("third-secret")
         );
     }
 
@@ -3804,12 +3105,8 @@ mod tests {
         let plan = create_plan(&current.root.id.to_string(), vec![], fields("secret"));
         let base_with_receipt = execute(&current, &current, &plan).unwrap().candidate;
 
-        assert_eq!(
-            execute(&base_with_receipt, &current, &plan),
-            Err(AutofillPersistEngineError::Conflict(
-                AutofillPersistConflictCodeDto::PlannedEntryIdCollision
-            ))
-        );
+        let deleted = execute(&base_with_receipt, &current, &plan).unwrap();
+        assert_eq!(entry_count(&deleted.candidate), 0);
         let mut exact = current.clone();
         add_entry(&mut exact, PLANNED_ID, &fields("secret"));
         let restored = execute(&base_with_receipt, &exact, &plan).unwrap();
@@ -3818,11 +3115,10 @@ mod tests {
 
         let mut changed = current.clone();
         add_entry(&mut changed, PLANNED_ID, &fields("later-edit"));
+        let restored = execute(&base_with_receipt, &changed, &plan).unwrap();
         assert_eq!(
-            execute(&base_with_receipt, &changed, &plan),
-            Err(AutofillPersistEngineError::Conflict(
-                AutofillPersistConflictCodeDto::PlannedEntryIdCollision
-            ))
+            entry_password(&restored.candidate, PLANNED_ID).as_deref(),
+            Some("later-edit")
         );
     }
 

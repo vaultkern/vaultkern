@@ -20,21 +20,21 @@ describe("createNegotiatedRuntimeTransport", () => {
       "runtime-core"
     ]);
 
-    const first = transport.send({ version: 1, command: { type: "first" } });
-    const second = transport.send({ version: 1, command: { type: "second" } });
+    const first = transport.send({ version: 2, command: { type: "first" } });
+    const second = transport.send({ version: 2, command: { type: "second" } });
     expect(base.send).toHaveBeenCalledTimes(1);
     expect(base.send).toHaveBeenCalledWith({
-      version: 1,
+      version: 2,
       command: {
         type: "handshake",
-        protocol_version: 1,
+        protocol_version: 2,
         capabilities: ["runtime-core"]
       }
     });
 
     resolveHandshake({
       type: "handshake",
-      protocolVersion: 1,
+      protocolVersion: 2,
       capabilities: ["runtime-core"]
     });
     await expect(first).resolves.toEqual({ type: "first" });
@@ -63,8 +63,8 @@ describe("createNegotiatedRuntimeTransport", () => {
     };
     const transport = createNegotiatedRuntimeTransport(base, ["runtime-core"]);
 
-    const first = transport.send({ version: 1, command: { type: "first" } });
-    const second = transport.send({ version: 1, command: { type: "second" } });
+    const first = transport.send({ version: 2, command: { type: "first" } });
+    const second = transport.send({ version: 2, command: { type: "second" } });
 
     expect(
       base.send.mock.calls.filter(
@@ -76,7 +76,7 @@ describe("createNegotiatedRuntimeTransport", () => {
 
     resolveHandshake({
       type: "handshake",
-      protocolVersion: 1,
+      protocolVersion: 2,
       capabilities: ["runtime-core"]
     });
     await expect(first).resolves.toEqual({ type: "first" });
@@ -94,7 +94,7 @@ describe("createNegotiatedRuntimeTransport", () => {
         return commandType === "handshake"
           ? {
               type: "handshake",
-              protocolVersion: 1,
+              protocolVersion: 2,
               capabilities: ["runtime-core"]
             }
           : { type: commandType };
@@ -103,11 +103,11 @@ describe("createNegotiatedRuntimeTransport", () => {
     const transport = createNegotiatedRuntimeTransport(base, ["runtime-core"]);
 
     await expect(
-      transport.send({ version: 1, command: { type: "first" } })
+      transport.send({ version: 2, command: { type: "first" } })
     ).resolves.toEqual({ type: "first" });
     generation = 2;
     await expect(
-      transport.send({ version: 1, command: { type: "second" } })
+      transport.send({ version: 2, command: { type: "second" } })
     ).resolves.toEqual({ type: "second" });
 
     expect(
@@ -130,7 +130,7 @@ describe("createNegotiatedRuntimeTransport", () => {
         })
         .mockResolvedValueOnce({
           type: "handshake",
-          protocolVersion: 1,
+          protocolVersion: 2,
           capabilities: ["runtime-core"]
         })
         .mockResolvedValueOnce({ type: "session_state" })
@@ -138,10 +138,13 @@ describe("createNegotiatedRuntimeTransport", () => {
     const transport = createNegotiatedRuntimeTransport(base, ["runtime-core"]);
 
     await expect(
-      transport.send({ version: 1, command: { type: "get_session_state" } })
-    ).rejects.toThrow("temporary: not ready");
+      transport.send({ version: 2, command: { type: "get_session_state" } })
+    ).rejects.toMatchObject({
+      code: "temporary",
+      message: "not ready"
+    });
     await expect(
-      transport.send({ version: 1, command: { type: "get_session_state" } })
+      transport.send({ version: 2, command: { type: "get_session_state" } })
     ).resolves.toEqual({ type: "session_state" });
     expect(base.send).toHaveBeenCalledTimes(3);
   });

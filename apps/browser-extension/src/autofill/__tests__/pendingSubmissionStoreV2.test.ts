@@ -4,7 +4,10 @@ import {
   createPendingAutofillSubmissionStore,
   pendingAutofillTransactionStorageKey
 } from "../pendingSubmissionStore";
-import type { PendingAutofillDesiredFields } from "../pendingSubmission";
+import type {
+  PendingAutofillDesiredFields,
+  PendingAutofillUpdateFields
+} from "../pendingSubmission";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000101";
 const OPERATION_ID = "00000000-0000-4000-8000-000000000201";
@@ -39,12 +42,20 @@ function fields(password = "new-secret"): PendingAutofillDesiredFields {
   };
 }
 
+function updateFields(password = "new-secret"): PendingAutofillUpdateFields {
+  return {
+    username: "alice",
+    password,
+    url: "https://example.com/login"
+  };
+}
+
 function updatePlan() {
   return {
     mode: "update" as const,
     entryId: ENTRY_ID,
-    expectedFields: fields("old-secret"),
-    desiredFields: fields()
+    expectedFields: updateFields("old-secret"),
+    desiredFields: updateFields()
   };
 }
 
@@ -193,15 +204,12 @@ describe("pending autofill V2 store", () => {
       ids: [TRANSACTION_ID, OPERATION_ID]
     });
     const oversized = updatePlan();
-    oversized.expectedFields.notes = "e".repeat(MAX_FIELD_BYTES);
-    oversized.desiredFields.notes = "d".repeat(MAX_FIELD_BYTES);
-    for (let index = 0; index < 3; index += 1) {
-      oversized.desiredFields.customFields.push({
-        key: `field-${index}`,
-        value: "v".repeat(MAX_FIELD_BYTES),
-        protected: true
-      });
-    }
+    oversized.expectedFields.username = "e".repeat(MAX_FIELD_BYTES);
+    oversized.expectedFields.password = "p".repeat(MAX_FIELD_BYTES);
+    oversized.desiredFields.username = "d".repeat(MAX_FIELD_BYTES);
+    oversized.desiredFields.password = "n".repeat(MAX_FIELD_BYTES);
+    oversized.desiredFields.url =
+      "https://example.com/" + "u".repeat(MAX_FIELD_BYTES - 20);
     expect(JSON.stringify(oversized).length).toBeGreaterThan(MAX_WAL_BYTES);
     storage.set.mockClear();
 
@@ -209,6 +217,28 @@ describe("pending autofill V2 store", () => {
       store.plan(7, captured.transactionId, {
         vaultId: "vault-1",
         plan: oversized
+      })
+    ).resolves.toBeNull();
+    expect(storage.set).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it("rejects unsupported fields on a newly planned update", async () => {
+    const { storage, store, captured } = await capturedStore({
+      ids: [TRANSACTION_ID, OPERATION_ID]
+    });
+    const unsupported = {
+      ...updatePlan(),
+      desiredFields: {
+        ...updatePlan().desiredFields,
+        notes: "must not be persisted by the extension"
+      }
+    };
+    storage.set.mockClear();
+
+    await expect(
+      store.plan(7, captured.transactionId, {
+        vaultId: "vault-1",
+        plan: unsupported
       })
     ).resolves.toBeNull();
     expect(storage.set).not.toHaveBeenCalled();
@@ -693,7 +723,7 @@ describe("pending autofill V2 store", () => {
     ).resolves.toBeNull();
 
     const changed = updatePlan();
-    changed.expectedFields.notes = "changed elsewhere";
+    changed.expectedFields.username = "changed-elsewhere";
     await expect(
       store.plan(7, TRANSACTION_ID, {
         vaultId: "vault-1",
@@ -728,7 +758,7 @@ describe("pending autofill V2 store", () => {
       }
     });
     const changed = updatePlan();
-    changed.expectedFields.notes = "changed elsewhere";
+    changed.expectedFields.username = "changed elsewhere";
 
     await expect(
       store.plan(7, TRANSACTION_ID, {
@@ -962,6 +992,7 @@ describe("pending autofill V2 store", () => {
     const createId = idSequence([
       TRANSACTION_ID,
       OPERATION_ID,
+      PLANNED_ENTRY_ID,
       ATTEMPT_ID,
       NEXT_ATTEMPT_ID
     ]);
@@ -976,10 +1007,7 @@ describe("pending autofill V2 store", () => {
       password: "old-secret",
       submittedAt: now
     });
-    const sensitivePlan = updatePlan();
-    sensitivePlan.expectedFields.customFields = [
-      { key: "legacy", value: "expected-custom-secret", protected: true }
-    ];
+    const sensitivePlan = createPlan([]);
     sensitivePlan.desiredFields.customFields = [
       { key: "tenant", value: "desired-custom-secret", protected: true }
     ];

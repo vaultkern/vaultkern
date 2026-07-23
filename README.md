@@ -11,7 +11,7 @@ The project is currently focused on a Rust kernel for KDBX parsing, vault modeli
 - `crates/vaultkern-kdbx` - KDBX headers, version handling, XML and binary format logic.
 - `crates/vaultkern-core` - public Rust facade over the lower-level crates.
 - `crates/vaultkern-runtime-protocol` - JSON protocol shared by the runtime and web clients.
-- `tools/vaultkern-runtime` - native runtime used by browser integration.
+- `tools/vaultkern-runtime` - browser native host; on Windows it is a stateless shim to the resident app.
 - `tools/vkdbx` - small verification and demo CLI.
 - `packages/runtime-web-client` - TypeScript client for the runtime protocol.
 - `packages/shared-web-ui` - shared React UI for vault workflows.
@@ -52,7 +52,7 @@ cargo run -p vkdbx -- roundtrip-demo /tmp/demo.kdbx
 
 ## Browser Runtime
 
-The browser extension talks to `tools/vaultkern-runtime` through the browser native messaging API. The runtime exposes vault operations over a small JSON protocol defined in `crates/vaultkern-runtime-protocol`.
+The browser extension talks to `tools/vaultkern-runtime` through the browser native messaging API. On Windows this process authenticates and forwards to the running Tauri resident app over a per-user named pipe; it never owns runtime state or writes KDBX files. The shared JSON protocol is defined in `crates/vaultkern-runtime-protocol`.
 
 Native messaging manifests are platform-specific and should be generated or installed for the local browser profile. Do not commit local native-host manifests, browser profile paths, or deployment scripts containing machine-specific paths.
 

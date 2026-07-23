@@ -12,8 +12,6 @@ export default defineConfig({
     rollupOptions: {
       input: {
         popup: "popup.html",
-        manager: "manager.html",
-        options: "options.html",
         background: "src/background.ts",
         contentScript: "src/contentScript.ts",
         autofillShadowPageHook: "src/autofillShadowPageHook.ts",

@@ -129,11 +129,10 @@ type PasskeyUserVerificationRequirement =
   | "preferred"
   | "required";
 
-type PasskeyUserVerificationMethod = "master_password" | "quick_unlock";
+type PasskeyUserVerificationMethod = "quick_unlock";
 
 type UnlockUserVerificationProof = {
   method: PasskeyUserVerificationMethod;
-  password?: string;
 };
 
 type PasskeyCeremonyBaseContext = {
@@ -1037,12 +1036,7 @@ function registerUnlockCompleteHandler(
         }
         const expected = promptStates.verify.contexts.get(promptKey);
         const method = userVerificationMethodFromMessage(message);
-        const password = userVerificationPasswordFromMessage(message);
-        if (
-          !expected ||
-          !method ||
-          (method === "master_password" && typeof password !== "string")
-        ) {
+        if (!expected || !method) {
           if (typeof sendResponse === "function") {
             sendResponse({
               ok: false,
@@ -1057,8 +1051,7 @@ function registerUnlockCompleteHandler(
             ceremony_token: expected.ceremonyToken,
             expected_phase: expected.expectedPhase,
             vault_id: expected.activeVaultId,
-            method,
-            ...(method === "master_password" ? { password } : {})
+            method
           });
           requireRuntimeResponseType(
             response,
@@ -1330,14 +1323,7 @@ function senderMatchesPrompt(
 
 function userVerificationMethodFromMessage(message: unknown) {
   const method = (message as { method?: unknown } | null)?.method;
-  return method === "master_password" || method === "quick_unlock"
-    ? method
-    : null;
-}
-
-function userVerificationPasswordFromMessage(message: unknown) {
-  const password = (message as { password?: unknown } | null)?.password;
-  return typeof password === "string" ? password : null;
+  return method === "quick_unlock" ? method : null;
 }
 
 function unlockUserVerificationProofFromMessage(
@@ -1347,14 +1333,7 @@ function unlockUserVerificationProofFromMessage(
   if (!method) {
     return null;
   }
-  if (method === "quick_unlock") {
-    return { method };
-  }
-
-  const password = userVerificationPasswordFromMessage(message);
-  return typeof password === "string" && password !== ""
-    ? { method, password }
-    : null;
+  return { method };
 }
 
 async function handleIsUvpaaRequest(
@@ -1418,10 +1397,9 @@ function getPasskeyUserVerificationMethodsFromResponse(response: unknown) {
     return [];
   }
   const methods = candidate.methods.filter(
-    (method): method is "master_password" | "quick_unlock" =>
-      method === "master_password" || method === "quick_unlock"
+    (method): method is "quick_unlock" => method === "quick_unlock"
   );
-  return methods.length === candidate.methods.length ? methods : [];
+  return methods;
 }
 
 async function handleGetRequest(
@@ -6565,10 +6543,7 @@ async function verifyPasskeyUserFromUnlockProof(
     ceremony_token: ceremonyToken,
     expected_phase: "s1_user_authorization",
     vault_id: activeVaultId,
-    method: unlockUserVerificationProof.method,
-    ...(unlockUserVerificationProof.method === "master_password"
-      ? { password: unlockUserVerificationProof.password }
-      : {})
+    method: unlockUserVerificationProof.method
   });
   requireRuntimeResponseType(
     response,
@@ -6680,7 +6655,7 @@ async function userVerificationForRequest(
   }
   promptStates.verify.activeDrivers.add(promptKey);
   try {
-    let methods: Array<"master_password" | "quick_unlock">;
+    let methods: Array<"quick_unlock">;
     try {
       methods = getPasskeyUserVerificationMethodsFromResponse(
         await sendRuntimeCommand({

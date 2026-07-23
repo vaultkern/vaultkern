@@ -2,6 +2,9 @@
 
 #[cfg(windows)]
 mod app {
+    use std::ffi::OsStr;
+    use std::mem::size_of;
+    use std::os::windows::ffi::OsStrExt;
     use std::sync::Arc;
 
     use eframe::egui;
@@ -11,8 +14,24 @@ mod app {
         BrowserDiagnosis, BrowserKind, RegistrationStatus, built_in_extension_id,
         resolve_extension_id,
     };
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, INFINITE, WaitForSingleObject,
+    };
+    use windows_sys::Win32::UI::Shell::{
+        SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW, ShellExecuteExW,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
     pub fn run() -> eframe::Result<()> {
+        let arguments = std::env::args().skip(1).collect::<Vec<_>>();
+        if let Some(result) = run_elevated_mode(&arguments) {
+            if let Err(error) = result {
+                eprintln!("VaultKern elevated setup failed: {error}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
+        }
         let options = eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([760.0, 640.0])
@@ -29,6 +48,98 @@ mod app {
                 Ok(Box::new(NativeSetupApp::new()))
             }),
         )
+    }
+
+    fn run_elevated_mode(arguments: &[String]) -> Option<Result<(), String>> {
+        match arguments.first().map(String::as_str) {
+            Some("--elevated-register") => Some((|| {
+                if arguments.len() != 4 {
+                    return Err("invalid elevated register arguments".into());
+                }
+                let browser = parse_browser(&arguments[2])?;
+                let config = windows_setup::default_config(browser, &arguments[3])?;
+                windows_setup::register_browser_for_user(&config, &arguments[1])
+            })()),
+            Some("--elevated-unregister") => Some((|| {
+                if arguments.len() != 3 {
+                    return Err("invalid elevated unregister arguments".into());
+                }
+                windows_setup::unregister_browser_for_user(
+                    parse_browser(&arguments[2])?,
+                    &arguments[1],
+                )
+            })()),
+            _ => None,
+        }
+    }
+
+    fn parse_browser(value: &str) -> Result<BrowserKind, String> {
+        match value {
+            "chrome" => Ok(BrowserKind::Chrome),
+            "edge" => Ok(BrowserKind::Edge),
+            _ => Err("invalid browser setup target".into()),
+        }
+    }
+
+    fn browser_argument(browser: BrowserKind) -> &'static str {
+        match browser {
+            BrowserKind::Chrome => "chrome",
+            BrowserKind::Edge => "edge",
+        }
+    }
+
+    fn wide_nul(value: &OsStr) -> Vec<u16> {
+        value.encode_wide().chain(Some(0)).collect()
+    }
+
+    fn run_elevated_action(arguments: &[String]) -> Result<(), String> {
+        if arguments.iter().any(|argument| {
+            argument.is_empty()
+                || argument
+                    .bytes()
+                    .any(|byte| byte.is_ascii_whitespace() || byte == b'"')
+        }) {
+            return Err("invalid elevated setup argument".into());
+        }
+        let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+        let executable = wide_nul(executable.as_os_str());
+        let verb = wide_nul(OsStr::new("runas"));
+        let parameters = wide_nul(OsStr::new(&arguments.join(" ")));
+        let mut execution = SHELLEXECUTEINFOW {
+            cbSize: size_of::<SHELLEXECUTEINFOW>() as u32,
+            fMask: SEE_MASK_NOCLOSEPROCESS,
+            lpVerb: verb.as_ptr(),
+            lpFile: executable.as_ptr(),
+            lpParameters: parameters.as_ptr(),
+            nShow: SW_HIDE,
+            ..Default::default()
+        };
+        if unsafe { ShellExecuteExW(&mut execution) } == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if execution.hProcess.is_null() {
+            return Err("elevated setup returned no process handle".into());
+        }
+        let process = execution.hProcess;
+        let wait = unsafe { WaitForSingleObject(process, INFINITE) };
+        if wait != WAIT_OBJECT_0 {
+            unsafe {
+                CloseHandle(process);
+            }
+            return Err("waiting for elevated setup failed".into());
+        }
+        let mut exit_code = 1;
+        let got_exit_code = unsafe { GetExitCodeProcess(process, &mut exit_code) };
+        unsafe {
+            CloseHandle(process);
+        }
+        if got_exit_code == 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+        if exit_code != 0 {
+            return Err(format!("elevated setup exited with code {exit_code}"));
+        }
+        Ok(())
     }
 
     struct NativeSetupApp {
@@ -73,9 +184,15 @@ mod app {
         }
 
         fn register(&mut self, browser: BrowserKind) {
-            match windows_setup::default_config(browser, self.extension_id.trim())
-                .and_then(|config| windows_setup::register_browser(&config))
-            {
+            let result = windows_setup::current_user_sid_string().and_then(|user_sid| {
+                run_elevated_action(&[
+                    "--elevated-register".into(),
+                    user_sid,
+                    browser_argument(browser).into(),
+                    self.extension_id.trim().into(),
+                ])
+            });
+            match result {
                 Ok(()) => self.message = format!("{} registered.", browser.label()),
                 Err(error) => {
                     self.message = format!("{} registration failed: {error}", browser.label())
@@ -85,7 +202,14 @@ mod app {
         }
 
         fn unregister(&mut self, browser: BrowserKind) {
-            match windows_setup::unregister_browser(browser) {
+            let result = windows_setup::current_user_sid_string().and_then(|user_sid| {
+                run_elevated_action(&[
+                    "--elevated-unregister".into(),
+                    user_sid,
+                    browser_argument(browser).into(),
+                ])
+            });
+            match result {
                 Ok(()) => self.message = format!("{} unregistered.", browser.label()),
                 Err(error) => {
                     self.message = format!("{} unregister failed: {error}", browser.label())
@@ -153,18 +277,20 @@ mod app {
                     );
                     ui.add_space(6.0);
 
+                    let pinned_extension_id = built_in_extension_id();
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.extension_id)
                             .desired_width(430.0)
-                            .hint_text("Chrome extension id"),
+                            .hint_text("Chrome extension id")
+                            .interactive(pinned_extension_id.is_none()),
                     );
                     if response.changed() {
                         self.refresh();
                     }
 
-                    let helper = if let Some(extension_id) = built_in_extension_id() {
+                    let helper = if let Some(extension_id) = pinned_extension_id {
                         format!(
-                            "This package was built with a default extension id ({extension_id}). Override it only for development, sideload, or E2E builds."
+                            "This signed package is pinned to extension id {extension_id}. Build a separate signed development package to use another id."
                         )
                     } else {
                         "Paste the current extension id from chrome://extensions or from the extension error page. Release packages can prefill this field with VAULTKERN_DEFAULT_EXTENSION_ID.".into()

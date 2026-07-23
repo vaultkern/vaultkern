@@ -1,4 +1,4 @@
-import type { RuntimeTransport } from "./transport";
+import { RUNTIME_PROTOCOL_VERSION, type RuntimeTransport } from "./transport";
 
 export interface SessionState {
   type: "session_state";
@@ -7,6 +7,15 @@ export interface SessionState {
   currentVaultRefId: string | null;
   supportsBiometricUnlock: boolean;
   sourceStatus?: VaultSourceStatus | null;
+}
+
+export type ResidentAppRoute = "unlock" | "vaults" | "settings";
+
+export interface BrowserIntegrationSettings {
+  type: "browser_integration_settings";
+  language: "en" | "zh-CN";
+  autofillOnPageLoadEnabled: boolean;
+  browserPasskeyProxyEnabled: boolean;
 }
 
 export interface VaultSourceStatus {
@@ -112,6 +121,31 @@ export interface EntrySummary {
   hasTotp?: boolean;
 }
 
+export interface AutofillCredential {
+  type: "autofill_credential";
+  id: string;
+  username: string;
+  password: string;
+  totp?: string | null;
+}
+
+export interface AutofillEntryFields {
+  type: "autofill_entry_fields";
+  id: string;
+  fields: AutofillUpdateFields;
+}
+
+export interface AutofillUpdateFields {
+  username: string;
+  password: string;
+  url: string;
+}
+
+export interface AutofillCreateContext {
+  type: "autofill_create_context";
+  rootGroupId: string;
+}
+
 export interface GroupNode {
   id: string;
   title: string;
@@ -208,6 +242,12 @@ export type SaveVaultResult = {
   conflictCopyPath?: string;
 };
 
+export interface CommittedMutation<T> {
+  value: T;
+  saveResult: SaveVaultResult;
+  operationId: string;
+}
+
 export interface EntryHistoryItem {
   index: number;
   title: string;
@@ -249,8 +289,8 @@ export type AutofillPersistPlan =
   | {
       mode: "update";
       entryId: string;
-      expectedFields: EntryDraft;
-      desiredFields: EntryDraft;
+      expectedFields: AutofillUpdateFields;
+      desiredFields: AutofillUpdateFields;
     }
   | {
       mode: "create";
@@ -398,6 +438,19 @@ export class RuntimeClient {
     });
   }
 
+  async getBrowserIntegrationSettings(): Promise<BrowserIntegrationSettings> {
+    return this.sendCommand<BrowserIntegrationSettings>({
+      type: "get_browser_integration_settings"
+    });
+  }
+
+  async activateResidentApp(route: ResidentAppRoute): Promise<void> {
+    await this.sendCommand<{ type: "resident_app_activated" }>({
+      type: "activate_resident_app",
+      route
+    });
+  }
+
   async listRecentVaults(): Promise<VaultReference[]> {
     const response = await this.sendCommand<VaultReferenceList>({
       type: "list_recent_vaults"
@@ -492,6 +545,12 @@ export class RuntimeClient {
     });
   }
 
+  async recordUserActivity(): Promise<SessionState> {
+    return this.sendCommand<SessionState>({
+      type: "record_user_activity"
+    });
+  }
+
   async unlockCurrentVaultWithPassword(password: string): Promise<SessionState> {
     return this.sendCommand<SessionState>({
       type: "unlock_current_vault_with_password",
@@ -578,11 +637,47 @@ export class RuntimeClient {
     });
   }
 
+  async getAutofillCredential(
+    vaultId: string,
+    entryId: string,
+    url: string
+  ): Promise<AutofillCredential> {
+    return this.sendCommand<AutofillCredential>({
+      type: "get_autofill_credential",
+      vault_id: vaultId,
+      entry_id: entryId,
+      url
+    });
+  }
+
+  async getAutofillEntryFields(
+    vaultId: string,
+    entryId: string,
+    url: string
+  ): Promise<AutofillEntryFields> {
+    return this.sendCommand<AutofillEntryFields>({
+      type: "get_autofill_entry_fields",
+      vault_id: vaultId,
+      entry_id: entryId,
+      url
+    });
+  }
+
+  async getAutofillCreateContext(
+    vaultId: string
+  ): Promise<AutofillCreateContext> {
+    return this.sendCommand<AutofillCreateContext>({
+      type: "get_autofill_create_context",
+      vault_id: vaultId
+    });
+  }
+
   async createEntry(
     vaultId: string,
-    input: EntryCreateInput
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    input: EntryCreateInput,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "create_entry",
       vault_id: vaultId,
       parent_group_id: input.parentGroupId,
@@ -592,15 +687,16 @@ export class RuntimeClient {
       url: input.url,
       notes: input.notes,
       totp_uri: input.totpUri
-    });
+    }, operationId);
   }
 
   async updateEntryFields(
     vaultId: string,
     entryId: string,
-    input: EntryDraft
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    input: EntryDraft,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "update_entry_fields",
       vault_id: vaultId,
       entry_id: entryId,
@@ -611,7 +707,7 @@ export class RuntimeClient {
       notes: input.notes,
       totp_uri: input.totpUri,
       custom_fields: input.customFields
-    });
+    }, operationId);
   }
 
   async compareAndUpdateEntryFields(
@@ -619,8 +715,8 @@ export class RuntimeClient {
     entryId: string,
     expectedFields: EntryDraft,
     desiredFields: EntryDraft
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "compare_and_update_entry_fields",
       vault_id: vaultId,
       entry_id: entryId,
@@ -652,8 +748,8 @@ export class RuntimeClient {
   async clearEntryTotp(
     vaultId: string,
     entryId: string
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "clear_entry_totp",
       vault_id: vaultId,
       entry_id: entryId
@@ -663,33 +759,40 @@ export class RuntimeClient {
   async setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskeyUpdate
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    passkey: EntryPasskeyUpdate,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "set_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId,
       passkey
-    });
+    }, operationId);
   }
 
   async clearEntryPasskey(
     vaultId: string,
-    entryId: string
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    entryId: string,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "clear_entry_passkey",
       vault_id: vaultId,
       entry_id: entryId
-    });
+    }, operationId);
   }
 
-  async deleteEntry(vaultId: string, entryId: string): Promise<void> {
-    await this.sendCommand<{ type: "saved" }>({
+  async deleteEntry(
+    vaultId: string,
+    entryId: string,
+    operationId?: string
+  ): Promise<CommittedMutation<void>> {
+    const result = await this.sendMutationCommand<{ type: "saved" }>(vaultId, {
       type: "delete_entry",
       vault_id: vaultId,
       entry_id: entryId
-    });
+    }, operationId);
+    return { ...result, value: undefined };
   }
 
   async saveVault(vaultId: string): Promise<SaveVaultResult> {
@@ -697,6 +800,13 @@ export class RuntimeClient {
       type: "save_vault",
       vault_id: vaultId
     });
+  }
+
+  async retryMutationSave(
+    vaultId: string,
+    operationId: string
+  ): Promise<SaveVaultResult> {
+    return this.sendMutationSave(vaultId, operationId);
   }
 
   async getDatabaseSettings(vaultId: string): Promise<DatabaseSettings> {
@@ -733,58 +843,62 @@ export class RuntimeClient {
   async addEntryAttachment(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentInput
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    input: EntryAttachmentInput,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "add_entry_attachment",
       vault_id: vaultId,
       entry_id: entryId,
       name: input.name,
       data_base64: input.dataBase64,
       protect_in_memory: input.protectInMemory
-    });
+    }, operationId);
   }
 
   async updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentMetadataUpdate
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    input: EntryAttachmentMetadataUpdate,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "update_entry_attachment_metadata",
       vault_id: vaultId,
       entry_id: entryId,
       old_name: input.oldName,
       new_name: input.newName,
       protect_in_memory: input.protectInMemory
-    });
+    }, operationId);
   }
 
   async replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentContentUpdate
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    input: EntryAttachmentContentUpdate,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "replace_entry_attachment_content",
       vault_id: vaultId,
       entry_id: entryId,
       name: input.name,
       data_base64: input.dataBase64
-    });
+    }, operationId);
   }
 
   async deleteEntryAttachment(
     vaultId: string,
     entryId: string,
-    name: string
-  ): Promise<EntryDetail> {
-    return this.sendCommand<EntryDetail>({
+    name: string,
+    operationId?: string
+  ): Promise<CommittedMutation<EntryDetail>> {
+    return this.sendMutationCommand<EntryDetail>(vaultId, {
       type: "delete_entry_attachment",
       vault_id: vaultId,
       entry_id: entryId,
       name
-    });
+    }, operationId);
   }
 
   async listEntryHistory(
@@ -839,9 +953,71 @@ export class RuntimeClient {
     return response.entryIds;
   }
 
-  private async sendCommand<T>(command: Record<string, unknown>): Promise<T> {
+  private async sendMutationCommand<T>(
+    vaultId: string,
+    command: Record<string, unknown>,
+    requestedOperationId?: string
+  ): Promise<CommittedMutation<T>> {
+    const operationId = requestedOperationId ?? createLogicalOperationId();
+    const replayableCommand =
+      command.type === "create_entry"
+        ? { ...command, entry_id: operationId }
+        : command;
+    let response: T;
+    try {
+      response = await this.sendCommand<T>(replayableCommand, operationId);
+    } catch (error) {
+      if (!isAmbiguousMutationFailure(error)) {
+        throw error;
+      }
+      try {
+        response = await this.sendCommand<T>(replayableCommand, operationId);
+      } catch (retryError) {
+        // Once an attempt may have reached the resident writer, a later
+        // business error cannot prove that the first attempt did not commit.
+        // Preserve the logical operation identity so the caller can reload or
+        // retry the same operation instead of treating the replay as a
+        // definitive failure.
+        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
+      }
+    }
+    try {
+      const saveResult = await this.sendMutationSave(vaultId, operationId);
+      return { value: response, saveResult, operationId };
+    } catch (error) {
+      if (error instanceof RuntimeMutationSaveError) {
+        throw error.withMutationResult(response);
+      }
+      throw error;
+    }
+  }
+
+  private async sendMutationSave(
+    vaultId: string,
+    operationId: string
+  ): Promise<SaveVaultResult> {
+    const command = { type: "save_vault", vault_id: vaultId };
+    try {
+      return await this.sendCommand<SaveVaultResult>(command, operationId);
+    } catch (error) {
+      if (!isAmbiguousMutationFailure(error)) {
+        throw new RuntimeMutationSaveError(operationId, error);
+      }
+      try {
+        return await this.sendCommand<SaveVaultResult>(command, operationId);
+      } catch (retryError) {
+        throw new RuntimeMutationSaveError(operationId, retryError);
+      }
+    }
+  }
+
+  private async sendCommand<T>(
+    command: Record<string, unknown>,
+    operationId?: string
+  ): Promise<T> {
     const response = await this.transport.send({
-      version: 1,
+      version: RUNTIME_PROTOCOL_VERSION,
+      ...(operationId ? { operationId } : {}),
       command
     });
 
@@ -851,6 +1027,108 @@ export class RuntimeClient {
 
     return response as T;
   }
+}
+
+class RuntimeMutationOutcomeUnknownError extends Error {
+  readonly code: string;
+
+  constructor(
+    readonly operationId: string,
+    cause: unknown
+  ) {
+    super(
+      cause instanceof Error
+        ? `runtime mutation outcome is unknown: ${cause.message}`
+        : "runtime mutation outcome is unknown",
+      { cause }
+    );
+    this.name = "RuntimeMutationOutcomeUnknownError";
+    this.code = "request_outcome_unknown";
+  }
+}
+
+class RuntimeMutationSaveError extends Error {
+  readonly code: string;
+
+  constructor(
+    readonly operationId: string,
+    cause: unknown,
+    readonly mutationResult?: unknown
+  ) {
+    super(cause instanceof Error ? cause.message : "runtime mutation save failed", {
+      cause
+    });
+    this.name = "RuntimeMutationSaveError";
+    this.code =
+      typeof cause === "object" &&
+      cause !== null &&
+      "code" in cause &&
+      typeof (cause as { code?: unknown }).code === "string"
+        ? (cause as { code: string }).code
+        : "mutation_save_failed";
+  }
+
+  withMutationResult(result: unknown) {
+    return new RuntimeMutationSaveError(this.operationId, this.cause, result);
+  }
+}
+
+export function runtimeMutationOperationId(error: unknown): string | null {
+  if (
+    typeof error !== "object" ||
+    error === null ||
+    !("operationId" in error) ||
+    typeof (error as { operationId?: unknown }).operationId !== "string"
+  ) {
+    return null;
+  }
+  const operationId = (error as { operationId: string }).operationId;
+  return isCanonicalNonNilUuid(operationId) ? operationId : null;
+}
+
+export function runtimeMutationResult<T>(error: unknown): T | null {
+  if (!(error instanceof RuntimeMutationSaveError)) {
+    return null;
+  }
+  return (error.mutationResult as T | undefined) ?? null;
+}
+
+let logicalOperationSequence = 0;
+
+function createLogicalOperationId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  if (typeof globalThis.crypto?.getRandomValues === "function") {
+    globalThis.crypto.getRandomValues(bytes);
+  } else {
+    logicalOperationSequence += 1;
+    for (let index = 0; index < bytes.length; index += 1) {
+      bytes[index] = Math.floor(Math.random() * 256);
+    }
+    const sequence = logicalOperationSequence;
+    bytes[0] ^= sequence & 0xff;
+    bytes[1] ^= (sequence >>> 8) & 0xff;
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
+  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
+    .slice(6, 8)
+    .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
+}
+
+function isAmbiguousMutationFailure(error: unknown) {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return (
+    code === "native_port_disconnected" ||
+    code === "native_timeout" ||
+    code === "request_outcome_unknown"
+  );
 }
 
 export type { RuntimeTransport };
@@ -893,6 +1171,14 @@ function entryFieldsCommand(fields: EntryDraft) {
   };
 }
 
+function autofillUpdateFieldsCommand(fields: AutofillUpdateFields) {
+  return {
+    username: fields.username,
+    password: fields.password,
+    url: fields.url
+  };
+}
+
 interface AutofillPersistRequestBinding {
   readonly transactionId: string;
   readonly operationId: string;
@@ -919,8 +1205,8 @@ function snapshotAutofillPersistRequest(request: PersistAutofillMutationRequest)
       commandPlan: {
         mode: "update",
         entry_id: entryId,
-        expected_fields: entryFieldsCommand(plan.expectedFields),
-        desired_fields: entryFieldsCommand(plan.desiredFields)
+        expected_fields: autofillUpdateFieldsCommand(plan.expectedFields),
+        desired_fields: autofillUpdateFieldsCommand(plan.desiredFields)
       }
     };
   }

@@ -103,6 +103,7 @@ export function EntryEditor({
   );
   const [generatedPassword, setGeneratedPassword] = useState("");
   const editable = mode !== "view";
+  const fieldsEditable = editable && !pendingSave;
   const values = editable && draft ? draft : entry;
 
   useEffect(() => {
@@ -270,13 +271,13 @@ export function EntryEditor({
       <Field
         label={text("Title")}
         value={values.title}
-        editable={editable}
+        editable={fieldsEditable}
         onChange={(value) => onChangeDraft("title", value)}
       />
       <Field
         label={text("Username")}
         value={values.username}
-        editable={editable}
+        editable={fieldsEditable}
         onChange={(value) => onChangeDraft("username", value)}
       />
       <label
@@ -290,14 +291,14 @@ export function EntryEditor({
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: editable ? "minmax(0, 1fr) auto auto" : "minmax(0, 1fr) auto",
+            gridTemplateColumns: fieldsEditable ? "minmax(0, 1fr) auto auto" : "minmax(0, 1fr) auto",
             gap: archiveTheme.spacing.sm,
             alignItems: "center"
           }}
         >
           <input
             type={showPassword ? "text" : "password"}
-            readOnly={!editable}
+            readOnly={!fieldsEditable}
             value={values.password}
             onChange={(event) => onChangeDraft("password", event.target.value)}
             style={fieldStyle}
@@ -309,7 +310,7 @@ export function EntryEditor({
           >
             {showPassword ? text("Hide password") : text("Show password")}
           </button>
-          {editable ? (
+          {fieldsEditable ? (
             <button
               type="button"
               onClick={() => {
@@ -325,7 +326,7 @@ export function EntryEditor({
           ) : null}
         </div>
       </label>
-      {editable && showGenerator ? (
+      {fieldsEditable && showGenerator ? (
         <PasswordGeneratorPanel
           options={generatorOptions}
           generatedPassword={generatedPassword}
@@ -341,7 +342,7 @@ export function EntryEditor({
       <Field
         label={text("URL")}
         value={values.url}
-        editable={editable}
+        editable={fieldsEditable}
         onChange={(value) => onChangeDraft("url", value)}
       />
       <label
@@ -353,7 +354,7 @@ export function EntryEditor({
       >
         {text("Notes")}
         <textarea
-          readOnly={!editable}
+          readOnly={!fieldsEditable}
           value={values.notes}
           onChange={(event) => onChangeDraft("notes", event.target.value)}
           style={notesStyle}
@@ -363,7 +364,7 @@ export function EntryEditor({
         <Field
           label={text("TOTP URI")}
           value={values.totpUri ?? ""}
-          editable
+          editable={fieldsEditable}
           onChange={(value) => onChangeDraft("totpUri", value)}
         />
       ) : null}
@@ -389,6 +390,7 @@ export function EntryEditor({
         <EditableCustomFields
           fields={draft.customFields}
           text={text}
+          disabled={!fieldsEditable}
           onChange={onChangeCustomField}
           onAdd={onAddCustomField}
           onDelete={onDeleteCustomField}
@@ -520,12 +522,14 @@ function GeneratorCheckbox({
 function EditableCustomFields({
   fields,
   text,
+  disabled,
   onChange,
   onAdd,
   onDelete
 }: {
   fields: EntryCustomField[];
   text: ReturnType<typeof useText>;
+  disabled?: boolean;
   onChange: (
     index: number,
     field: keyof EntryCustomField,
@@ -538,7 +542,12 @@ function EditableCustomFields({
     <section aria-label={text("Additional Properties")} style={sectionStyle}>
       <div style={sectionHeaderStyle}>
         <h3 style={sectionTitleStyle}>{text("Additional Properties")}</h3>
-        <button type="button" onClick={onAdd} style={secondaryActionStyle}>
+        <button
+          type="button"
+          onClick={onAdd}
+          disabled={disabled}
+          style={secondaryActionStyle}
+        >
           {text("Add property")}
         </button>
       </div>
@@ -556,6 +565,7 @@ function EditableCustomFields({
                     aria-label={`Property ${index + 1} key`}
                     type="text"
                     value={field.key}
+                    disabled={disabled}
                     onChange={(event) => onChange(index, "key", event.target.value)}
                     style={fieldStyle}
                   />
@@ -566,6 +576,7 @@ function EditableCustomFields({
                     aria-label={`${keyLabel} value`}
                     type={field.protected ? "password" : "text"}
                     value={field.value}
+                    disabled={disabled}
                     onChange={(event) => onChange(index, "value", event.target.value)}
                     style={fieldStyle}
                   />
@@ -574,6 +585,7 @@ function EditableCustomFields({
                   <input
                     type="checkbox"
                     checked={field.protected}
+                    disabled={disabled}
                     onChange={(event) =>
                       onChange(index, "protected", event.target.checked)
                     }
@@ -584,6 +596,7 @@ function EditableCustomFields({
                   type="button"
                   aria-label={`Remove ${keyLabel}`}
                   onClick={() => onDelete(index)}
+                  disabled={disabled}
                   style={dangerSmallButtonStyle}
                 >
                   {text("Remove")}
@@ -1138,7 +1151,8 @@ function EntryDetailExtras({
         <section aria-label={text("Attachments")} style={sectionStyle}>
           <h3 style={sectionTitleStyle}>{text("Attachments")}</h3>
           <div style={detailListStyle}>
-            {attachments.map((attachment) => (
+            {attachments.map((attachment) => {
+              return (
               <div key={attachment.name} style={detailRowStyle}>
                 <div style={detailKeyStyle}>{attachment.name}</div>
                 <div style={detailValueStyle}>{formatBytes(attachment.size)}</div>
@@ -1154,7 +1168,8 @@ function EntryDetailExtras({
                   {text("Download")}
                 </button>
               </div>
-            ))}
+              );
+            })}
           </div>
         </section>
       ) : null}

@@ -22,12 +22,15 @@ useDomRenderEnvironment();
 
 const runtimeClientMocks = vi.hoisted(() => ({
   getSessionState: vi.fn(),
+  getBrowserIntegrationSettings: vi.fn(),
+  activateResidentApp: vi.fn(),
   listRecentVaults: vi.fn(),
   preloadCurrentVault: vi.fn(),
   addLocalVaultReference: vi.fn(),
   setCurrentVault: vi.fn(),
   openLocalVault: vi.fn(),
   lockSession: vi.fn(),
+  recordUserActivity: vi.fn(),
   unlockCurrentVault: vi.fn(),
   enableQuickUnlockForCurrentVault: vi.fn(),
   unlockCurrentVaultWithQuickUnlock: vi.fn(),
@@ -35,6 +38,9 @@ const runtimeClientMocks = vi.hoisted(() => ({
   listGroups: vi.fn(),
   listEntries: vi.fn(),
   getEntryDetail: vi.fn(),
+  getAutofillCredential: vi.fn(),
+  getAutofillEntryFields: vi.fn(),
+  getAutofillCreateContext: vi.fn(),
   findFillCandidates: vi.fn(),
   findExactMatchingEntryIds: vi.fn(),
   createEntry: vi.fn(),
@@ -166,6 +172,8 @@ beforeEach(() => {
     __vaultkernAllowSyntheticAutofillSubmitForTests?: boolean;
   }).__vaultkernAllowSyntheticAutofillSubmitForTests;
   runtimeClientMocks.getSessionState.mockReset();
+  runtimeClientMocks.getBrowserIntegrationSettings.mockReset();
+  runtimeClientMocks.activateResidentApp.mockReset();
   runtimeClientMocks.listRecentVaults.mockReset();
   runtimeClientMocks.preloadCurrentVault.mockReset();
   runtimeClientMocks.addLocalVaultReference.mockReset();
@@ -175,9 +183,13 @@ beforeEach(() => {
   runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReset();
   runtimeClientMocks.unlockWithPassword.mockReset();
   runtimeClientMocks.lockSession.mockReset();
+  runtimeClientMocks.recordUserActivity.mockReset();
   runtimeClientMocks.listGroups.mockReset();
   runtimeClientMocks.listEntries.mockReset();
   runtimeClientMocks.getEntryDetail.mockReset();
+  runtimeClientMocks.getAutofillCredential.mockReset();
+  runtimeClientMocks.getAutofillEntryFields.mockReset();
+  runtimeClientMocks.getAutofillCreateContext.mockReset();
   runtimeClientMocks.findFillCandidates.mockReset();
   runtimeClientMocks.findExactMatchingEntryIds.mockReset();
   runtimeClientMocks.createEntry.mockReset();
@@ -185,6 +197,19 @@ beforeEach(() => {
   runtimeClientMocks.compareAndUpdateEntryFields.mockReset();
   runtimeClientMocks.saveVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
+  runtimeClientMocks.recordUserActivity.mockResolvedValue({
+    unlocked: true,
+    activeVaultId: "vault-1",
+    currentVaultRefId: "vault-ref-1"
+  });
+  runtimeClientMocks.getBrowserIntegrationSettings.mockResolvedValue({
+    type: "browser_integration_settings",
+    language: "en",
+    clearClipboardSeconds: 30,
+    autofillOnPageLoadEnabled: false,
+    browserPasskeyProxyEnabled: false
+  });
+  runtimeClientMocks.activateResidentApp.mockResolvedValue(undefined);
   runtimeClientMocks.listRecentVaults.mockResolvedValue([]);
   runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
     unlocked: false,
@@ -201,6 +226,40 @@ beforeEach(() => {
       children: []
     }
   });
+  runtimeClientMocks.getAutofillCreateContext.mockResolvedValue({
+    type: "autofill_create_context",
+    rootGroupId: "group-root"
+  });
+  runtimeClientMocks.getAutofillCredential.mockImplementation(
+    async (vaultId, entryId) => {
+      const detail = await runtimeClientMocks.getEntryDetail(vaultId, entryId);
+      return {
+        type: "autofill_credential",
+        id: detail.id,
+        username: detail.username,
+        password: detail.password,
+        totp: detail.totp
+      };
+    }
+  );
+  runtimeClientMocks.getAutofillEntryFields.mockImplementation(
+    async (vaultId, entryId) => {
+      const detail = await runtimeClientMocks.getEntryDetail(vaultId, entryId);
+      return {
+        type: "autofill_entry_fields",
+        id: detail.id,
+        fields: {
+          title: detail.title,
+          username: detail.username,
+          password: detail.password,
+          url: detail.url,
+          notes: detail.notes,
+          totpUri: detail.totpUri ?? null,
+          customFields: detail.customFields ?? []
+        }
+      };
+    }
+  );
   runtimeClientMocks.createEntry.mockImplementation(async (_vaultId, input) => {
     const { parentGroupId: _parentGroupId, ...fields } = input;
     return {
@@ -907,7 +966,7 @@ describe("fillLoginForm", () => {
     } finally {
       delete (document.body as Element & { children?: HTMLCollection }).children;
     }
-  });
+  }, 10_000);
 
   it("rolls back group values when a native setter fails before events", () => {
     document.body.innerHTML = `
@@ -1250,6 +1309,13 @@ describe("PopupShell fill flow", () => {
       unlocked: true,
       activeVaultId: "vault-1"
     });
+    runtimeClientMocks.getBrowserIntegrationSettings.mockResolvedValue({
+      type: "browser_integration_settings",
+      language: "zh-CN",
+      clearClipboardSeconds: 30,
+      autofillOnPageLoadEnabled: false,
+      browserPasskeyProxyEnabled: false
+    });
     runtimeClientMocks.listEntries.mockResolvedValue([]);
     runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
 
@@ -1258,9 +1324,15 @@ describe("PopupShell fill flow", () => {
     render(createElement(PopupShell));
 
     expect(await screen.findByText("已解锁")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "锁定" })).toBeInTheDocument();
-    expect(screen.getByLabelText("搜索记录")).toBeInTheDocument();
-    expect(screen.getByText("选中记录")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "打开 VaultKern" })
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "VaultKern 设置" })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "锁定" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("主密码")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("搜索记录")).not.toBeInTheDocument();
   });
 
   it("keeps popup header actions visible when the current site label is long", async () => {
@@ -1291,8 +1363,10 @@ describe("PopupShell fill flow", () => {
 
     const siteValue = await screen.findByText(longSiteLabel);
     const status = screen.getByText("Unlocked");
-    const managerButton = screen.getByRole("button", { name: "Open Manager" });
-    const lockButton = screen.getByRole("button", { name: "Lock" });
+    const vaultButton = screen.getByRole("button", { name: "Open VaultKern" });
+    const settingsButton = screen.getByRole("button", {
+      name: "VaultKern Settings"
+    });
     const siteBlock = siteValue.parentElement as HTMLElement;
     const actionBlock = status.parentElement as HTMLElement;
 
@@ -1301,1253 +1375,9 @@ describe("PopupShell fill flow", () => {
     expect(siteValue.style.textOverflow).toBe("ellipsis");
     expect(siteValue.style.whiteSpace).toBe("nowrap");
     expect(actionBlock.style.flexShrink).toBe("0");
-    expect(managerButton).toBeInTheDocument();
-    expect(lockButton).toBeInTheDocument();
-  });
-
-  it("opens extension settings from the locked popup", async () => {
-    const openOptionsPage = vi.fn(async () => undefined);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: { openOptionsPage },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: null
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Extension Settings" }));
-
-    await waitFor(() => {
-      expect(openOptionsPage).toHaveBeenCalled();
-    });
-  });
-
-  it("falls back to the extension options tab when the popup options API fails", async () => {
-    const openOptionsPage = vi.fn(async () => {
-      throw new Error("options page did not open");
-    });
-    const create = vi.fn(async () => undefined);
-    const getURL = vi.fn((path: string) => `chrome-extension://id/${path}`);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: { openOptionsPage, getURL },
-      tabs: {
-        create,
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: null
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Extension Settings" }));
-
-    await waitFor(() => {
-      expect(create).toHaveBeenCalledWith({
-        url: "chrome-extension://id/options.html"
-      });
-    });
-  });
-
-  it("renders popup site candidates search and selected record summary without preloading secrets", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      },
-      {
-        id: "entry-2",
-        title: "Fallback Account",
-        username: "backup@example.com",
-        url: "https://example.com"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      password: "secret-123",
-      url: "https://example.com/login",
-      notes: "",
-      totp: "123456"
-    } as any);
-
-    const { PopupShell } = await import("../popupShell");
-
-    const { container } = render(createElement(PopupShell));
-
-    expect(await screen.findByText("Suggested for this site")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("Search records")).toBeInTheDocument();
-    expect(screen.getByText("Selected record")).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Copy username alice@example.com" })).toBeInTheDocument();
-    expect(await screen.findByRole("button", { name: "Open Manager" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Fallback Account" })).not.toBeInTheDocument();
-    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
-    expect((container.firstElementChild as HTMLElement).style.width).toBe("460px");
-    expect((container.firstElementChild as HTMLElement).style.maxHeight).toBe("600px");
-    expect((container.firstElementChild as HTMLElement).style.overflowY).toBe("auto");
-
-    fireEvent.change(screen.getByPlaceholderText("Search records"), {
-      target: { value: "Fallback" }
-    });
-
-    expect(await screen.findByRole("button", { name: "Fallback Account" })).toBeInTheDocument();
-  });
-
-  it("fills a record selected from popup search even when it is not a site candidate", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-    const get = vi.fn(async () => ({
-      id: 7,
-      url: "https://example.com/login",
-      active: true,
-      windowId: 1
-    }));
-    const getWindow = vi.fn(async () => ({ focused: true }));
-    const sendMessage = vi.fn(async () => undefined);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        get,
-        sendMessage
-      },
-      windows: {
-        get: getWindow
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      },
-      {
-        id: "entry-2",
-        title: "Fallback Account",
-        username: "backup@example.com",
-        url: "https://fallback.example/login"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-2",
-      title: "Fallback Account",
-      username: "backup@example.com",
-      password: "fallback-secret",
-      url: "https://fallback.example/login",
-      notes: ""
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-    fireEvent.change(await screen.findByPlaceholderText("Search records"), {
-      target: { value: "Fallback" }
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Fallback Account" }));
-    fireEvent.click(screen.getByRole("button", { name: "Fill" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-2");
-      expect(sendMessage).toHaveBeenCalledWith(
-        7,
-        {
-          type: "fill_entry_detail",
-          targetUrl: "https://example.com/login",
-          fillCapability: deliveredFillCapability(
-            "manual",
-            "https://example.com/login",
-            "entry-2"
-          ),
-          username: "backup@example.com",
-          password: "fallback-secret"
-        },
-        { frameId: 0 }
-      );
-    });
-  });
-
-  it("loads entry secrets only when a secret field action is clicked", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-
-    Object.assign(navigator, {
-      clipboard: { writeText }
-    });
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      password: "secret-123",
-      url: "https://example.com/login",
-      notes: "",
-      totp: "123456"
-    } as any);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Copy username alice@example.com"
-      })
-    );
-    expect(writeText).toHaveBeenCalledWith("alice@example.com");
-    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
-
-    fireEvent.click(
-      screen.getByRole("button", {
-        name: "Copy password"
-      })
-    );
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
-      expect(writeText).toHaveBeenCalledWith("secret-123");
-    });
-
-    fireEvent.click(
-      await screen.findByRole("button", {
-        name: "Copy TOTP 123456"
-      })
-    );
-
-    expect(writeText).toHaveBeenCalledWith("123456");
-  });
-
-  it("copies TOTP lazily without requiring password detail first", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-
-    Object.assign(navigator, {
-      clipboard: { writeText }
-    });
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login",
-        hasTotp: true
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login",
-        hasTotp: true
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      password: "secret-123",
-      url: "https://example.com/login",
-      notes: "",
-      totp: "123456"
-    } as any);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Copy TOTP" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
-      expect(writeText).toHaveBeenCalledWith("123456");
-    });
-  });
-
-  it.each([
-    ["revealing a password", "Show password"],
-    ["copying a password", "Copy password"],
-    ["copying a TOTP", "Copy TOTP"]
-  ])("rejects a wrong-id detail before %s", async (_action, buttonName) => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    Object.assign(navigator, { clipboard: { writeText } });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => [{ id: 7, url: "https://example.com/login" }]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    const entry = {
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      url: "https://example.com/login",
-      hasTotp: true
-    };
-    runtimeClientMocks.listEntries.mockResolvedValue([entry]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([entry]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-2",
-      title: "Other Account",
-      username: "other@example.com",
-      password: "other-secret",
-      url: "https://example.com/login",
-      notes: "",
-      totp: "654321"
-    } as any);
-
-    const { PopupShell } = await import("../popupShell");
-    render(createElement(PopupShell));
-    fireEvent.click(await screen.findByRole("button", { name: buttonName }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
-    });
-    expect(screen.queryByText("other-secret")).not.toBeInTheDocument();
-    expect(writeText).not.toHaveBeenCalledWith("other-secret");
-    expect(writeText).not.toHaveBeenCalledWith("654321");
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Record detail did not match the selected record"
-    );
-  });
-
-  it.each([
-    [
-      "a wrong response type",
-      {
-        type: "group_tree",
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        password: "other-secret",
-        url: "https://example.com/login",
-        notes: ""
-      }
-    ],
-    [
-      "a malformed password field",
-      {
-        type: "entry_detail",
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        password: 987654,
-        url: "https://example.com/login",
-        notes: ""
-      }
-    ]
-  ])("rejects matching-id detail with %s", async (_case, response) => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => [{ id: 7, url: "https://example.com/login" }]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    const entry = {
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      url: "https://example.com/login"
-    };
-    runtimeClientMocks.listEntries.mockResolvedValue([entry]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([entry]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue(response as any);
-
-    const { PopupShell } = await import("../popupShell");
-    render(createElement(PopupShell));
-    fireEvent.click(await screen.findByRole("button", { name: "Show password" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "Record detail did not match the selected record"
-    );
-    expect(screen.queryByText("other-secret")).not.toBeInTheDocument();
-    expect(screen.queryByText("987654")).not.toBeInTheDocument();
-  });
-
-  it("masks the password until the reveal toggle is pressed", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      password: "secret-123",
-      url: "https://example.com/login",
-      notes: "",
-      totp: "123456"
-    } as any);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("••••••••••")).toBeInTheDocument();
-    expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
-    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Show password" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
-    });
-    expect(await screen.findByText("secret-123")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Hide password" })).toBeInTheDocument();
-  });
-
-  it("does not reveal stale secrets when selection changes while detail is loading", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-    const detailRequest = createDeferred<{
-      type: "entry_detail";
-      id: string;
-      title: string;
-      username: string;
-      password: string;
-      url: string;
-      notes: string;
-      totp: string;
-    }>();
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      },
-      {
-        id: "entry-2",
-        title: "Fallback Account",
-        username: "backup@example.com",
-        url: "https://example.com"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockReturnValue(detailRequest.promise);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Show password" }));
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
-    });
-
-    fireEvent.change(screen.getByPlaceholderText("Search records"), {
-      target: { value: "Fallback" }
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Fallback Account" }));
-    expect(
-      await screen.findByRole("button", {
-        name: "Copy username backup@example.com"
-      })
-    ).toBeInTheDocument();
-
-    await act(async () => {
-      detailRequest.resolve({
-        type: "entry_detail",
-        id: "entry-2",
-        title: "Fallback Account",
-        username: "backup@example.com",
-        password: "fallback-secret",
-        url: "https://example.com",
-        notes: "",
-        totp: "654321"
-      });
-      await detailRequest.promise;
-    });
-
-    expect(screen.queryByText("fallback-secret")).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Copy TOTP 654321" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show password" })).toBeInTheDocument();
-  });
-
-  it("does not copy stale secrets when selection changes while detail is loading", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-    const writeText = vi.fn().mockResolvedValue(undefined);
-    const detailRequest = createDeferred<{
-      type: "entry_detail";
-      id: string;
-      title: string;
-      username: string;
-      password: string;
-      url: string;
-      notes: string;
-    }>();
-
-    Object.assign(navigator, {
-      clipboard: { writeText }
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      },
-      {
-        id: "entry-2",
-        title: "Fallback Account",
-        username: "backup@example.com",
-        url: "https://example.com"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockReturnValue(detailRequest.promise);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Copy password" }));
-    await waitFor(() => {
-      expect(runtimeClientMocks.getEntryDetail).toHaveBeenCalledWith("vault-1", "entry-1");
-    });
-
-    fireEvent.change(screen.getByPlaceholderText("Search records"), {
-      target: { value: "Fallback" }
-    });
-    fireEvent.click(await screen.findByRole("button", { name: "Fallback Account" }));
-
-    await act(async () => {
-      detailRequest.resolve({
-        type: "entry_detail",
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        password: "secret-123",
-        url: "https://example.com/login",
-        notes: ""
-      });
-      await detailRequest.promise;
-    });
-
-    expect(writeText).not.toHaveBeenCalledWith("secret-123");
-    expect(screen.queryByText("secret-123")).not.toBeInTheDocument();
-  });
-
-  it("never provisions resident quick unlock from a popup password unlock", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      storage: {
-        local: {
-          get: vi.fn((_key, callback) =>
-            callback({
-              vaultkernExtensionSettings: {
-                recentVaultLimit: 10,
-                language: "en",
-                idleLockMinutes: 0,
-                clearClipboardSeconds: 30,
-                browserPasskeyProxyEnabled: false,
-                quickUnlockEnabled: true
-              }
-            })
-          ),
-          set: vi.fn((_values, callback) => callback?.())
-        }
-      },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Personal")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: ""
-      });
-    });
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-  });
-
-  it("does not provision quick unlock after popup unlock when biometric unlock is unsupported", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      storage: {
-        local: {
-          get: vi.fn((_key, callback) =>
-            callback({
-              vaultkernExtensionSettings: {
-                recentVaultLimit: 10,
-                language: "en",
-                idleLockMinutes: 0,
-                clearClipboardSeconds: 30,
-                browserPasskeyProxyEnabled: false,
-                quickUnlockEnabled: true
-              }
-            })
-          ),
-          set: vi.fn((_values, callback) => callback?.())
-        }
-      },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockRejectedValue(
-      new Error("biometric unlock is not supported")
-    );
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Personal")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    expect(await screen.findByText("Unlocked")).toBeInTheDocument();
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-    expect(screen.queryByText("Failed to update quick unlock")).not.toBeInTheDocument();
-  });
-
-  it("never provisions resident quick unlock from a popup key-file-only unlock", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      storage: {
-        local: {
-          get: vi.fn((_key, callback) =>
-            callback({
-              vaultkernExtensionSettings: {
-                recentVaultLimit: 10,
-                language: "en",
-                idleLockMinutes: 0,
-                clearClipboardSeconds: 30,
-                browserPasskeyProxyEnabled: false,
-                quickUnlockEnabled: true
-              }
-            })
-          ),
-          set: vi.fn((_values, callback) => callback?.())
-        }
-      },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Personal")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Key File Path"), {
-      target: { value: "/tmp/demo.keyx" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "",
-        keyFilePath: "/tmp/demo.keyx"
-      });
-    });
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-  });
-
-  it("unlocks without provisioning quick unlock while recent vaults are still loading", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      storage: {
-        local: {
-          get: vi.fn((_key, callback) =>
-            callback({
-              vaultkernExtensionSettings: {
-                recentVaultLimit: 10,
-                language: "en",
-                idleLockMinutes: 0,
-                clearClipboardSeconds: 30,
-                browserPasskeyProxyEnabled: false,
-                quickUnlockEnabled: true
-              }
-            })
-          ),
-          set: vi.fn((_values, callback) => callback?.())
-        }
-      },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    const slowVaults = createDeferred<
-      Array<{
-        vaultRefId: string;
-        displayName: string;
-        sourceKind: string;
-        sourceSummary: string;
-        lastUsedAt: number;
-        availability: string;
-        supportsQuickUnlock: boolean;
-        isCurrent: boolean;
-      }>
-    >();
-    const loadedVaults = [
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ];
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults
-      .mockReturnValueOnce(slowVaults.promise)
-      .mockResolvedValue(loadedVaults);
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByLabelText("Master Password")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
-    });
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-
-    slowVaults.resolve(loadedVaults);
-  });
-
-  it("does not wait for browser settings before unlocking or provision resident quick unlock", async () => {
-    const storageCallbacks: Array<(items: Record<string, unknown>) => void> = [];
-    const savedSettings = {
-      recentVaultLimit: 10,
-      language: "en",
-      idleLockMinutes: 0,
-      clearClipboardSeconds: 30,
-      browserPasskeyProxyEnabled: false,
-      quickUnlockEnabled: true
-    };
-    const resolveSavedSettings = () => {
-      while (storageCallbacks.length > 0) {
-        storageCallbacks.shift()?.({
-          vaultkernExtensionSettings: savedSettings
-        });
-      }
-    };
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      storage: {
-        local: {
-          get: vi.fn((_key, callback) => {
-            storageCallbacks.push(callback);
-          }),
-          set: vi.fn((_values, callback) => callback?.())
-        }
-      },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.enableQuickUnlockForCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByLabelText("Master Password")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
-      expect(storageCallbacks.length).toBeGreaterThan(0);
-    });
-    expect(runtimeClientMocks.enableQuickUnlockForCurrentVault).not.toHaveBeenCalled();
-    resolveSavedSettings();
-  });
-
-  it("keeps the popup unlocked when quick unlock vault refresh fails after unlock", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      storage: {
-        local: {
-          get: vi.fn((_key, callback) =>
-            callback({
-              vaultkernExtensionSettings: {
-                recentVaultLimit: 10,
-                language: "en",
-                idleLockMinutes: 0,
-                clearClipboardSeconds: 30,
-                browserPasskeyProxyEnabled: false,
-                quickUnlockEnabled: true
-              }
-            })
-          ),
-          set: vi.fn((_values, callback) => callback?.())
-        }
-      },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults
-      .mockResolvedValueOnce([])
-      .mockRejectedValueOnce(new Error("recent vault refresh failed"));
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByLabelText("Master Password")).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
-    });
-
-    expect(await screen.findByText("Unlocked")).toBeInTheDocument();
-    expect(screen.queryByText("Failed to unlock vault")).not.toBeInTheDocument();
+    expect(vaultButton).toBeInTheDocument();
+    expect(settingsButton).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Lock" })).not.toBeInTheDocument();
   });
 
   it("loads fill candidates for the active tab and fills the selected entry", async () => {
@@ -2699,6 +1529,57 @@ describe("PopupShell fill flow", () => {
     );
     expect(get).toHaveBeenCalledWith(7);
     expect(getWindow).toHaveBeenCalledWith(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not deliver a retrieved credential after the resident vault locks", async () => {
+    const sendMessage = vi.fn(async () => undefined);
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => [
+          { id: 7, url: "https://example.com/login" }
+        ]),
+        get: vi.fn(async () => ({
+          id: 7,
+          url: "https://example.com/login",
+          active: true,
+          windowId: 1
+        })),
+        sendMessage
+      },
+      windows: {
+        get: vi.fn(async () => ({ focused: true }))
+      }
+    };
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Example Account",
+        username: "alice",
+        url: "https://example.com/login"
+      }
+    ]);
+    runtimeClientMocks.getAutofillCredential.mockResolvedValue({
+      type: "autofill_credential",
+      id: "entry-1",
+      username: "alice",
+      password: "secret-123",
+      totp: null
+    });
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: false,
+      activeVaultId: null
+    });
+
+    const { fillSelectedEntry } = await import("../popupShell");
+    await fillSelectedEntry("vault-1", "entry-1");
+
+    expect(runtimeClientMocks.getAutofillCredential).toHaveBeenCalledWith(
+      "vault-1",
+      "entry-1",
+      "https://example.com/login"
+    );
+    expect(runtimeClientMocks.getSessionState).toHaveBeenCalledOnce();
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
@@ -2866,236 +1747,6 @@ describe("PopupShell fill flow", () => {
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
-  it("opens the full manager in a dedicated extension page", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-    const create = vi.fn(async () => undefined);
-    const getURL = vi.fn((path: string) => `chrome-extension://test-id/${path}`);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: { getURL },
-      tabs: {
-        query,
-        create,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-1",
-      title: "Example Account",
-      username: "alice@example.com",
-      password: "secret-123",
-      url: "https://example.com/login",
-      notes: ""
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Open Manager" }));
-
-    await waitFor(() => {
-      expect(getURL).toHaveBeenCalledWith("manager.html");
-      expect(create).toHaveBeenCalledWith({
-        url: "chrome-extension://test-id/manager.html"
-      });
-    });
-  });
-
-  it("shows the manager entry in the unlocked popup even when no record is selected", async () => {
-    const create = vi.fn(async () => undefined);
-    const getURL = vi.fn((path: string) => `chrome-extension://test-id/${path}`);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: { getURL },
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        create,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Open Manager" }));
-
-    await waitFor(() => {
-      expect(getURL).toHaveBeenCalledWith("manager.html");
-      expect(create).toHaveBeenCalledWith({
-        url: "chrome-extension://test-id/manager.html"
-      });
-    });
-  });
-
-  it("collapses popup search results after five records until more is requested", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => [
-          {
-            id: 7,
-            url: "https://example.com/login"
-          }
-        ]),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue(
-      Array.from({ length: 7 }, (_, index) => ({
-        id: `entry-${index + 1}`,
-        title: `Search Account ${index + 1}`,
-        username: `user-${index + 1}`,
-        url: `https://example.com/${index + 1}`
-      }))
-    );
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.change(await screen.findByPlaceholderText("Search records"), {
-      target: { value: "Search Account" }
-    });
-
-    expect(await screen.findByRole("button", { name: "Search Account 1" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Search Account 5" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Search Account 6" })).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Show 2 more" }));
-
-    expect(await screen.findByRole("button", { name: "Search Account 7" })).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "Show less" }));
-
-    expect(screen.queryByRole("button", { name: "Search Account 6" })).not.toBeInTheDocument();
-  });
-
-  it("shows recent vaults in the locked popup and unlocks the selected current vault", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-2"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: false
-      },
-      {
-        vaultRefId: "vault-ref-2",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.setCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Work")).toBeInTheDocument();
-    expect(screen.queryByLabelText("Vault Path")).not.toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /Personal/ }));
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.change(screen.getByLabelText("Key File Path"), {
-      target: { value: "/tmp/demo.keyx" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.setCurrentVault).toHaveBeenCalledWith("vault-ref-1");
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: "/tmp/demo.keyx"
-      });
-    });
-  });
-
   it("shows a passkey unlock prompt when opened for a WebAuthn request", async () => {
     window.history.replaceState(
       null,
@@ -3140,189 +1791,54 @@ describe("PopupShell fill flow", () => {
     ).toBeInTheDocument();
   });
 
-  it("unlocks the locked popup with Windows Hello when quick unlock is enabled", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: true,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Personal")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Unlock with Windows Hello" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
-    });
-    expect(await screen.findByText("Select a record to inspect fields.")).toBeInTheDocument();
-  });
-
-  it("notifies the background page after unlocking for a WebAuthn request", async () => {
+  it("continues a waiting passkey request after the resident app unlocks the vault", async () => {
     window.history.replaceState(
       null,
       "",
-      "/popup.html?webauthn=unlock&requestId=12&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+      "/popup.html?webauthn=unlock&requestId=10&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-10"
     );
     const sendMessage = vi.fn(async () => undefined);
+    const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
       configurable: true,
-      value: vi.fn()
+      value: closeWindow
     });
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
-      },
+      runtime: { sendMessage },
       tabs: {
         query: vi.fn(async () => []),
         sendMessage: vi.fn(async () => undefined)
       }
     };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+    runtimeClientMocks.getSessionState
+      .mockResolvedValueOnce({
+        unlocked: false,
+        activeVaultId: null,
+        currentVaultRefId: "vault-ref-1"
+      })
+      .mockResolvedValue({
+        unlocked: true,
+        activeVaultId: "vault-1",
+        currentVaultRefId: "vault-ref-1"
+      });
 
     const { PopupShell } = await import("../popupShell");
-
     render(createElement(PopupShell));
 
-    fireEvent.change(await screen.findByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_unlock_complete",
-        requestId: 12,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        method: "master_password",
-        password: "demo-password"
-      });
-    });
-  });
-
-  it("notifies the background page that a WebAuthn unlock used quick unlock", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/popup.html?webauthn=unlock&requestId=14&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-14"
-    );
-    const sendMessage = vi.fn(async () => undefined);
-    Object.defineProperty(window, "close", {
-      configurable: true,
-      value: vi.fn()
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
+    expect(await screen.findByText("Passkey request waiting")).toBeInTheDocument();
+    await waitFor(
+      () => {
+        expect(sendMessage).toHaveBeenCalledWith({
+          type: "vaultkern_unlock_complete",
+          requestId: 10,
+          origin: "https://example.com",
+          relyingParty: "example.com",
+          nonce: "nonce-10"
+        });
+        expect(closeWindow).toHaveBeenCalledOnce();
       },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: true,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Unlock with Windows Hello" })
+      { timeout: 2_000 }
     );
-
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_unlock_complete",
-        requestId: 14,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        nonce: "nonce-14",
-        method: "quick_unlock"
-      });
-    });
   });
 
   it("does not complete a WebAuthn unlock prompt just because the vault is already unlocked", async () => {
@@ -3388,132 +1904,51 @@ describe("PopupShell fill flow", () => {
     expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
   });
 
-  it("does not notify WebAuthn waiters after unlocking in the regular popup", async () => {
-    window.history.replaceState(null, "", "/popup.html");
-    const sendMessage = vi.fn(async () => undefined);
-    Object.defineProperty(window, "close", {
-      configurable: true,
-      value: vi.fn()
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.change(await screen.findByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledTimes(1);
-    });
-    await waitFor(() => {
-      expect(screen.queryByLabelText("Master Password")).not.toBeInTheDocument();
-    });
-    expect(sendMessage).not.toHaveBeenCalledWith(
-      expect.objectContaining({
-        type: "vaultkern_unlock_complete"
-      })
-    );
-    expect(window.close).not.toHaveBeenCalled();
-  });
-
-  it("closes the temporary WebAuthn unlock window after unlocking", async () => {
+  it("uses only Windows Hello for browser passkey user verification", async () => {
     window.history.replaceState(
       null,
       "",
-      "/popup.html?webauthn=unlock&requestId=24&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
+      "/popup.html?webauthn=verify&requestId=41&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-41"
     );
+    const sendMessage = vi.fn(async () => ({ ok: true }));
     const closeWindow = vi.fn();
     Object.defineProperty(window, "close", {
       configurable: true,
       value: closeWindow
     });
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage: vi.fn(async () => undefined)
-      },
+      runtime: { sendMessage },
       tabs: {
         query: vi.fn(async () => []),
         sendMessage: vi.fn(async () => undefined)
       }
     };
-
     runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
       unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
+      activeVaultId: "vault-1"
     });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
 
     const { PopupShell } = await import("../popupShell");
-
     render(createElement(PopupShell));
 
-    fireEvent.change(await screen.findByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
+    expect(
+      await screen.findByText("Verify passkey request")
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Master Password")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Verify with Windows Hello" })
+    );
 
     await waitFor(() => {
-      expect(closeWindow).toHaveBeenCalledTimes(1);
+      expect(sendMessage).toHaveBeenCalledWith({
+        type: "vaultkern_user_verification_complete",
+        requestId: 41,
+        origin: "https://example.com",
+        relyingParty: "example.com",
+        nonce: "nonce-41",
+        method: "quick_unlock"
+      });
+      expect(closeWindow).toHaveBeenCalledOnce();
     });
   });
 
@@ -3572,129 +2007,6 @@ describe("PopupShell fill flow", () => {
         requestId: 42,
         origin: "https://example.com",
         relyingParty: "example.com"
-      });
-      expect(closeWindow).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it("hides manager access while verifying a WebAuthn request", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/popup.html?webauthn=verify&requestId=45&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-45"
-    );
-    const sendMessage = vi.fn(async () => ({ ok: true }));
-    const closeWindow = vi.fn();
-    Object.defineProperty(window, "close", {
-      configurable: true,
-      value: closeWindow
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: false
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "Open Manager" })
-    ).not.toBeInTheDocument();
-    expect(runtimeClientMocks.listEntries).not.toHaveBeenCalled();
-    expect(runtimeClientMocks.findFillCandidates).not.toHaveBeenCalled();
-    expect(runtimeClientMocks.getEntryDetail).not.toHaveBeenCalled();
-
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Verify and continue" }));
-
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_user_verification_complete",
-        requestId: 45,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        nonce: "nonce-45",
-        method: "master_password",
-        password: "demo-password"
-      });
-      expect(closeWindow).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it("auto verifies the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/popup.html?webauthn=verify&requestId=46&relyingParty=example.com&origin=https%3A%2F%2Fexample.com&nonce=nonce-46"
-    );
-    const sendMessage = vi.fn(async () => ({ ok: true }));
-    const closeWindow = vi.fn();
-    Object.defineProperty(window, "close", {
-      configurable: true,
-      value: closeWindow
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: true,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Verify passkey request")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_user_verification_complete",
-        requestId: 46,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        nonce: "nonce-46",
-        method: "quick_unlock"
       });
       expect(closeWindow).toHaveBeenCalledTimes(1);
     });
@@ -3898,393 +2210,10 @@ describe("PopupShell fill flow", () => {
     });
   });
 
-  it("auto unlocks the WebAuthn prompt with Windows Hello when quick unlock is enabled", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      "/popup.html?webauthn=unlock&requestId=24&relyingParty=example.com&origin=https%3A%2F%2Fexample.com"
-    );
-    const sendMessage = vi.fn(async () => undefined);
-    const closeWindow = vi.fn();
-    Object.defineProperty(window, "close", {
-      configurable: true,
-      value: closeWindow
-    });
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        sendMessage
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: true,
-        isCurrent: true
-      }
-    ]);
-    const quickUnlock = createDeferred<{
-      unlocked: boolean;
-      activeVaultId: string | null;
-      currentVaultRefId: string | null;
-      supportsBiometricUnlock: boolean;
-    }>();
-    runtimeClientMocks.unlockCurrentVaultWithQuickUnlock.mockReturnValue(
-      quickUnlock.promise
-    );
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(await screen.findByText("Passkey request waiting")).toBeInTheDocument();
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).toHaveBeenCalledTimes(1);
-    });
-    quickUnlock.resolve({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1",
-      supportsBiometricUnlock: true
-    });
-    await waitFor(() => {
-      expect(sendMessage).toHaveBeenCalledWith({
-        type: "vaultkern_unlock_complete",
-        requestId: 24,
-        origin: "https://example.com",
-        relyingParty: "example.com",
-        method: "quick_unlock"
-      });
-      expect(closeWindow).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it("waits for on-demand preload when unlocking before recent vaults finish loading", async () => {
+  it("shows only locked status and opens the resident app for unlock", async () => {
     (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
       tabs: {
         query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    const recentVaults = createDeferred<[]>();
-    const preload = createDeferred<{
-      unlocked: boolean;
-      activeVaultId: string | null;
-      currentVaultRefId: string | null;
-    }>();
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockReturnValue(recentVaults.promise);
-    runtimeClientMocks.preloadCurrentVault.mockReturnValue(preload.promise);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    const passwordField = await screen.findByLabelText("Master Password");
-    expect(passwordField).toBeEnabled();
-    expect(screen.getByText("Loading...")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Manage vaults" })).toBeInTheDocument();
-    expect(runtimeClientMocks.getSessionState).toHaveBeenCalledTimes(1);
-    expect(runtimeClientMocks.preloadCurrentVault).not.toHaveBeenCalled();
-
-    fireEvent.change(passwordField, {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    expect(await screen.findByRole("button", { name: "Unlocking..." })).toBeDisabled();
-    expect(runtimeClientMocks.preloadCurrentVault).toHaveBeenCalledTimes(1);
-    expect(runtimeClientMocks.unlockCurrentVault).not.toHaveBeenCalled();
-
-    preload.resolve({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: ""
-      });
-    });
-  });
-
-  it("starts preloading after local recent vaults have loaded", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    const recentVaults = createDeferred<
-      Array<{
-        vaultRefId: string;
-        displayName: string;
-        sourceKind: "local";
-        sourceSummary: string;
-        lastUsedAt: number;
-        availability: "ready";
-        supportsQuickUnlock: boolean;
-        isCurrent: boolean;
-      }>
-    >();
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockReturnValue(recentVaults.promise);
-    runtimeClientMocks.preloadCurrentVault.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    await screen.findByLabelText("Master Password");
-    expect(runtimeClientMocks.preloadCurrentVault).not.toHaveBeenCalled();
-
-    recentVaults.resolve([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.preloadCurrentVault).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it("surfaces preload failure and retries the unlock request on the next click", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    const preload = createDeferred<{
-      unlocked: boolean;
-      activeVaultId: string | null;
-      currentVaultRefId: string | null;
-    }>();
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "onedrive",
-        sourceSummary: "OneDrive / Personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.preloadCurrentVault.mockReturnValue(preload.promise);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.change(await screen.findByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    preload.reject(new Error("native messaging timed out"));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      "native messaging timed out"
-    );
-    expect(runtimeClientMocks.unlockCurrentVault).not.toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: ""
-      });
-    });
-  });
-
-  it("shows progress while the locked popup is unlocking", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    const unlock = createDeferred<{
-      unlocked: boolean;
-      activeVaultId: string | null;
-      currentVaultRefId: string | null;
-    }>();
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockReturnValue(unlock.promise);
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.change(await screen.findByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    expect(await screen.findByRole("button", { name: "Unlocking..." })).toBeDisabled();
-    expect(screen.getByLabelText("Master Password")).toBeDisabled();
-    expect(screen.getByLabelText("Key File Path")).toBeDisabled();
-
-    unlock.resolve({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: ""
-      });
-    });
-  });
-
-  it("treats Enter in the popup master password field as unlock", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Work",
-        sourceKind: "local",
-        sourceSummary: "work.kdbx",
-        lastUsedAt: 1776500010,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    await screen.findByText("Work");
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.keyDown(screen.getByLabelText("Master Password"), {
-      key: "Enter",
-      code: "Enter"
-    });
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.unlockCurrentVault).toHaveBeenCalledWith({
-        password: "demo-password",
-        keyFilePath: ""
-      });
-    });
-  });
-
-  it("opens the manager when there are no recent vaults", async () => {
-    const getURL = vi.fn((path: string) => `chrome-extension://test-id/${path}`);
-    const create = vi.fn(async () => undefined);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: { getURL },
-      tabs: {
-        query: vi.fn(async () => []),
-        create,
         sendMessage: vi.fn(async () => undefined)
       }
     };
@@ -4300,12 +2229,41 @@ describe("PopupShell fill flow", () => {
 
     render(createElement(PopupShell));
 
-    fireEvent.click(await screen.findByRole("button", { name: "Manage vaults" }));
+    expect(await screen.findByText("Locked")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Master Password")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Key File Path")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Unlock Vault" })).not.toBeInTheDocument();
 
-    expect(getURL).toHaveBeenCalledWith("manager.html");
-    expect(create).toHaveBeenCalledWith({
-      url: "chrome-extension://test-id/manager.html"
+    fireEvent.click(screen.getByRole("button", { name: "Open VaultKern" }));
+
+    expect(runtimeClientMocks.activateResidentApp).toHaveBeenCalledWith("unlock");
+    expect(runtimeClientMocks.unlockCurrentVault).not.toHaveBeenCalled();
+    expect(runtimeClientMocks.unlockCurrentVaultWithQuickUnlock).not.toHaveBeenCalled();
+  });
+
+  it("opens resident settings instead of an extension-owned page", async () => {
+    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
+      tabs: {
+        query: vi.fn(async () => [{ id: 7, url: "https://example.com/login" }]),
+        sendMessage: vi.fn(async () => undefined)
+      }
+    };
+    runtimeClientMocks.getSessionState.mockResolvedValue({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
     });
+    runtimeClientMocks.listEntries.mockResolvedValue([]);
+    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
+
+    const { PopupShell } = await import("../popupShell");
+    render(createElement(PopupShell));
+
+    fireEvent.click(
+      await screen.findByRole("button", { name: "VaultKern Settings" })
+    );
+
+    expect(runtimeClientMocks.activateResidentApp).toHaveBeenCalledWith("settings");
   });
 
   it("renders fill candidates in runtime-provided order", async () => {
@@ -4352,176 +2310,6 @@ describe("PopupShell fill flow", () => {
       "Fill Most Specific",
       "Fill Less Specific"
     ]);
-  });
-
-  it("keeps search results available when site candidate lookup fails", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      },
-      {
-        id: "entry-2",
-        title: "Manual Fallback",
-        username: "backup@example.com",
-        url: "https://backup.example.com"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockRejectedValue(
-      new Error("candidate lookup failed")
-    );
-    runtimeClientMocks.getEntryDetail.mockResolvedValue({
-      type: "entry_detail",
-      id: "entry-2",
-      title: "Manual Fallback",
-      username: "backup@example.com",
-      password: "secret-456",
-      url: "https://backup.example.com",
-      notes: ""
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    expect(
-      await screen.findByRole("alert", { name: "" })
-    ).toHaveTextContent("candidate lookup failed");
-
-    fireEvent.change(screen.getByPlaceholderText("Search records"), {
-      target: { value: "manual" }
-    });
-
-    const [searchResult] = await screen.findAllByText("Manual Fallback");
-    fireEvent.click(searchResult.closest("button")!);
-
-    expect(await screen.findByText("Selected record")).toBeInTheDocument();
-    expect(screen.getAllByText("backup@example.com")).toHaveLength(2);
-  });
-
-  it("locks the popup session and returns to the unlock form", async () => {
-    const query = vi.fn(async () => [
-      {
-        id: 7,
-        url: "https://example.com/login"
-      }
-    ]);
-
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query,
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([
-      {
-        id: "entry-1",
-        title: "Example Account",
-        username: "alice@example.com",
-        url: "https://example.com/login"
-      }
-    ]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-    runtimeClientMocks.lockSession.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.click(await screen.findByRole("button", { name: "Lock" }));
-
-    await waitFor(() => {
-      expect(runtimeClientMocks.lockSession).toHaveBeenCalledTimes(1);
-      expect(screen.getByRole("button", { name: "Unlock Vault" })).toBeInTheDocument();
-    });
-  });
-
-  it("clears popup unlock secrets after a successful unlock", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Personal",
-        sourceKind: "local",
-        sourceSummary: "personal.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockResolvedValue({
-      unlocked: true,
-      activeVaultId: "vault-1",
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listEntries.mockResolvedValue([]);
-    runtimeClientMocks.findFillCandidates.mockResolvedValue([]);
-    runtimeClientMocks.lockSession.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    fireEvent.change(await screen.findByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.change(screen.getByLabelText("Key File Path"), {
-      target: { value: "/tmp/demo.keyx" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    await screen.findByRole("button", { name: "Lock" });
-    fireEvent.click(screen.getByRole("button", { name: "Lock" }));
-
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Unlock Vault" })).toBeInTheDocument();
-    });
-    expect(screen.getByLabelText("Master Password")).toHaveValue("");
-    expect(screen.getByLabelText("Key File Path")).toHaveValue("");
   });
 
   it("swallows tab message failure without surfacing a raw rejection", async () => {
@@ -4595,125 +2383,7 @@ describe("PopupShell fill flow", () => {
 
     consoleWarn.mockRestore();
   });
-
-  it("shows native setup install help when the host is missing", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        id: "test-extension-id"
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Broken Vault",
-        sourceKind: "local",
-        sourceSummary: "broken.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockRejectedValue(
-      Object.assign(new Error("Specified native messaging host not found."), {
-        code: "native_host_missing"
-      })
-    );
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    await screen.findByText("Broken Vault");
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    expect(await screen.findByText("Install the VaultKern native host")).toBeInTheDocument();
-    expect(screen.getByText("Current extension ID: test-extension-id")).toBeInTheDocument();
-    expect(screen.getByText(/VaultKernNativeSetup\.exe/)).toBeInTheDocument();
-    expect(screen.getByText(/On Windows, run/).closest("li")).toHaveTextContent(
-      "If the extension ID field is empty"
-    );
-    expect(screen.getByText(/On Windows, run/).closest("li")).toHaveTextContent(
-      "Register / Repair for Chrome"
-    );
-    expect(
-      screen.getByText(
-        /HKCU\\Software\\Google\\Chrome\\NativeMessagingHosts\\com\.vaultkern\.runtime/
-      )
-    ).toBeInTheDocument();
-    expect(screen.getByText("chrome://extensions")).toBeInTheDocument();
-    expect(
-      screen.getByText(/tools\/vaultkern-runtime\/scripts\/install_native_host\.sh/)
-    ).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        /HKCU\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\com\.vaultkern\.runtime/
-      )
-    ).toBeInTheDocument();
-  });
-
-  it("keeps business errors as plain unlock failures without install help", async () => {
-    (globalThis as typeof globalThis & { chrome?: unknown }).chrome = {
-      runtime: {
-        id: "test-extension-id"
-      },
-      tabs: {
-        query: vi.fn(async () => []),
-        sendMessage: vi.fn(async () => undefined)
-      }
-    };
-
-    runtimeClientMocks.getSessionState.mockResolvedValue({
-      unlocked: false,
-      activeVaultId: null,
-      currentVaultRefId: "vault-ref-1"
-    });
-    runtimeClientMocks.listRecentVaults.mockResolvedValue([
-      {
-        vaultRefId: "vault-ref-1",
-        displayName: "Broken Vault",
-        sourceKind: "local",
-        sourceSummary: "broken.kdbx",
-        lastUsedAt: 1776500000,
-        availability: "ready",
-        supportsQuickUnlock: false,
-        isCurrent: true
-      }
-    ]);
-    runtimeClientMocks.unlockCurrentVault.mockRejectedValue(
-      new Error("vault file not found")
-    );
-
-    const { PopupShell } = await import("../popupShell");
-
-    render(createElement(PopupShell));
-
-    await screen.findByText("Broken Vault");
-    fireEvent.change(screen.getByLabelText("Master Password"), {
-      target: { value: "demo-password" }
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Unlock Vault" }));
-
-    expect(await screen.findByRole("alert")).toHaveTextContent("vault file not found");
-    expect(
-      screen.queryByText("Install the VaultKern native host")
-    ).not.toBeInTheDocument();
-  });
 });
-
 describe("content script fill message", () => {
   function allowSyntheticAutofillSubmitEvents() {
     (globalThis as typeof globalThis & {

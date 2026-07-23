@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { executePendingAutofillPersist } from "../pendingMutationExecutor";
-import type { PendingAutofillDesiredFields } from "../pendingSubmission";
+import type {
+  PendingAutofillDesiredFields,
+  PendingAutofillUpdateFields
+} from "../pendingSubmission";
 
 const TRANSACTION_ID = "00000000-0000-4000-8000-000000000101";
 const OPERATION_ID = "00000000-0000-4000-8000-000000000201";
@@ -24,6 +27,14 @@ function fields(password = "new-secret"): PendingAutofillDesiredFields {
       value: string;
       protected: boolean;
     }>
+  };
+}
+
+function updateFields(password = "new-secret"): PendingAutofillUpdateFields {
+  return {
+    username: "alice",
+    password,
+    url: "https://example.com/login"
   };
 }
 
@@ -70,8 +81,8 @@ describe("pending autofill atomic persist executor", () => {
     const plan = {
       mode: "update" as const,
       entryId: ENTRY_ID,
-      expectedFields: fields("old-secret"),
-      desiredFields: fields()
+      expectedFields: updateFields("old-secret"),
+      desiredFields: updateFields()
     };
     const client = {
       persistAutofillMutation: vi.fn(async () => durable(ENTRY_ID)),
@@ -180,8 +191,8 @@ describe("pending autofill atomic persist executor", () => {
     const plan = {
       mode: "update" as const,
       entryId: ENTRY_ID,
-      expectedFields: fields("old-secret"),
-      desiredFields: fields()
+      expectedFields: updateFields("old-secret"),
+      desiredFields: updateFields()
     };
     const conflict = {
       type: "autofill_persist_result" as const,
@@ -205,8 +216,8 @@ describe("pending autofill atomic persist executor", () => {
     const plan = {
       mode: "update" as const,
       entryId: "ENTRY-NOT-A-UUID",
-      expectedFields: fields("old-secret"),
-      desiredFields: fields()
+      expectedFields: updateFields("old-secret"),
+      desiredFields: updateFields()
     };
     const client = {
       persistAutofillMutation: vi.fn(async () => durable(ENTRY_ID))
@@ -226,8 +237,8 @@ describe("pending autofill atomic persist executor", () => {
     const plan = {
       mode: "update" as const,
       entryId: ENTRY_ID,
-      expectedFields: fields("old-secret"),
-      desiredFields: fields()
+      expectedFields: updateFields("old-secret"),
+      desiredFields: updateFields()
     };
     const client = {
       persistAutofillMutation: vi.fn(async () => durable(ENTRY_ID))
@@ -248,8 +259,8 @@ describe("pending autofill atomic persist executor", () => {
       const plan = {
         mode: "update" as const,
         entryId: ENTRY_ID,
-        expectedFields: fields("old-secret"),
-        desiredFields: fields()
+        expectedFields: updateFields("old-secret"),
+        desiredFields: updateFields()
       };
       const client = {
         persistAutofillMutation: vi.fn(async () => durable(ENTRY_ID))

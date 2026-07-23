@@ -28,26 +28,58 @@ export const popupTheme = {
   }
 } as const;
 
-export function popupErrorMessage(error: unknown, fallback: string): string {
-  if (error instanceof Error && error.message) {
-    return error.message;
-  }
+export const popupShellStyle = {
+  width: "460px",
+  maxWidth: "100%",
+  maxHeight: "600px",
+  minWidth: 0,
+  display: "grid",
+  gap: popupTheme.spacing.md,
+  padding: popupTheme.spacing.md,
+  background: `linear-gradient(180deg, ${popupTheme.colors.surface} 0%, ${popupTheme.colors.accentSoft} 100%)`,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  boxSizing: "border-box" as const,
+  overflowX: "hidden" as const,
+  overflowY: "auto" as const
+};
 
-  if (
-    typeof error === "object" &&
-    error !== null &&
-    "message" in error &&
-    typeof (error as { message?: unknown }).message === "string"
-  ) {
-    const message = (error as { message: string }).message.trim();
-    if (message) {
-      return message;
-    }
-  }
+export const popupPrimaryActionStyle = {
+  border: `1px solid ${popupTheme.colors.accentStrong}`,
+  borderRadius: popupTheme.radius.pill,
+  padding: `${popupTheme.spacing.sm} ${popupTheme.spacing.md}`,
+  background: popupTheme.colors.accentStrong,
+  color: "#fffaf2",
+  fontFamily: popupTheme.font.body,
+  cursor: "pointer"
+};
 
-  if (typeof error === "string" && error.trim()) {
-    return error;
-  }
+export const popupSecondaryActionStyle = {
+  border: `1px solid ${popupTheme.colors.line}`,
+  borderRadius: popupTheme.radius.pill,
+  padding: `${popupTheme.spacing.sm} ${popupTheme.spacing.md}`,
+  background: popupTheme.colors.surfaceMuted,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  cursor: "pointer"
+};
 
-  return fallback;
-}
+export const popupPromptStyle = {
+  display: "grid",
+  gap: popupTheme.spacing.xs,
+  border: `1px solid ${popupTheme.colors.accentStrong}`,
+  borderRadius: popupTheme.radius.panel,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surface,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body,
+  lineHeight: 1.45
+};
+
+export const popupMessagePanelStyle = {
+  borderRadius: popupTheme.radius.panel,
+  padding: popupTheme.spacing.sm,
+  background: popupTheme.colors.surfaceMuted,
+  color: popupTheme.colors.text,
+  fontFamily: popupTheme.font.body
+};

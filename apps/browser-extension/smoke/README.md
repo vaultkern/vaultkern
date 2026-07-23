@@ -1,6 +1,6 @@
 # Browser v0 Smoke Test
 
-This directory contains fixed pages used by the browser extension v0 smoke and autofill regression tests. The automated Chrome smoke currently drives the smallest autofill path: the extension recognizes a normal HTTP login page and fills the selected entry's username and password into the page.
+This directory contains fixed pages used by the browser extension autofill regression tests. The supported automated guard exercises the page and content-script behavior without pretending that the browser owns vault setup or unlock.
 
 This is not a product page and does not replace unit tests. Its value is providing a stable, repeatable browser scene for regression checks.
 
@@ -65,13 +65,7 @@ If the extension needs to connect to the native host, the native host manifest m
 chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/
 ```
 
-Linux / WSL Chrome native host manifest installation can use:
-
-```bash
-tools/vaultkern-runtime/scripts/install_native_host.sh kblgblkjghklighdgmejjfondchkjcgf /absolute/path/to/vaultkern-runtime
-```
-
-On Windows Chrome, use `vaultkern-native-setup` to register the `HKCU` native host. The setup utility extracts the embedded runtime and writes the browser manifest:
+On Windows Chrome, use the elevated `vaultkern-native-setup` utility to register the `HKCU` native host in both registry views. The registration leaf is protected from ordinary-user writes:
 
 ```text
 HKCU\Software\Google\Chrome\NativeMessagingHosts\com.vaultkern.runtime
@@ -80,26 +74,28 @@ HKCU\Software\Google\Chrome\NativeMessagingHosts\com.vaultkern.runtime
 Stable Windows manifest and runtime paths:
 
 ```text
-%LOCALAPPDATA%\vaultkern-runtime\com.vaultkern.runtime.chrome.json
-%LOCALAPPDATA%\vaultkern-runtime\vaultkern-runtime.exe
+%ProgramFiles%\VaultKern\Browser Integration\com.vaultkern.runtime.chrome.json
+%ProgramFiles%\VaultKern\Browser Integration\vaultkern-runtime.exe
 ```
 
-The browser native host isolates runtime state by extension id. For the current Chrome smoke extension, recent/current vault state, remote cache state, and OneDrive refresh tokens are stored under:
+On Windows the installed native host is a stateless shim: it authenticates the resident app over a per-user named pipe and forwards protocol requests to the app's single in-process runtime. It attempts to activate the packaged resident app when the pipe is absent and does not fall back to a per-port runtime. If activation fails, the popup reports `resident_unavailable`; open or restart VaultKern and retry.
+
+Recent/current vault state, remote cache state, and the Hello/DPAPI-protected OneDrive refresh token are owned by the resident app under:
 
 ```text
-C:\Users\<user>\AppData\Local\vaultkern-runtime\extensions\kblgblkjghklighdgmejjfondchkjcgf\
+C:\Users\<user>\AppData\Local\vaultkern-runtime\
 ```
 
-Older user-level state files may still exist, but a browser native host launched with an origin no longer shares them:
+Retired per-extension state directories may still exist after upgrading, but the Windows shim no longer reads or writes them:
 
 ```text
-C:\Users\<user>\AppData\Local\vaultkern-runtime\vault-references.json
+C:\Users\<user>\AppData\Local\vaultkern-runtime\extensions\<extension-id>\
 ```
 
 The manifest should contain:
 
 ```json
-{"name":"com.vaultkern.runtime","description":"VaultKern runtime native host","path":"C:\\Users\\<user>\\AppData\\Local\\vaultkern-runtime\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
+{"name":"com.vaultkern.runtime","description":"VaultKern resident app IPC shim","path":"C:\\Program Files\\VaultKern\\Browser Integration\\vaultkern-runtime.exe","type":"stdio","allowed_origins":["chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/"]}
 ```
 
 Open:
@@ -111,6 +107,8 @@ http://localhost:4174/basic-login.html
 Expected result:
 
 - the popup shows fillable entries for the current site context
+- an already-unlocked resident vault supplies the selected credential without another Windows Hello prompt
+- a locked resident vault exposes no credential and the popup opens the resident unlock UI
 - clicking fill writes the username into `#vaultkern-smoke-username`
 - clicking fill writes the password into `#vaultkern-smoke-password`
 - clicking the page's `Sign in` button shows `submitted:<username>:<password length>` at the bottom of the page
@@ -119,62 +117,16 @@ Expected result:
 
 `apps/browser-extension/src/__tests__/fill-flow.test.ts` reads this HTML file and fills it through the real `fillLoginForm` logic. If the smoke page DOM or content-script field selection rules become incompatible, the targeted `fill-flow` test fails.
 
-## Chrome E2E Automation
+## Resident E2E Status
 
-The real browser/native smoke path is available as a repository command:
-
-```bash
-npm run smoke:e2e --workspace @vaultkern/browser-extension
-```
-
-With no arguments, the command runs every required Chromium case. The registry is
-strict: `--case` requires a known name, and unknown or stray arguments exit nonzero
-instead of falling back to the native smoke.
-
-Run one case while developing with:
-
-```bash
-npm run smoke:e2e --workspace @vaultkern/browser-extension -- --case controlled-react-input
-```
-
-Required cases:
-
-```text
-native-kdbx-totp-passkey
-exact-origin-automatic-authorization
-autofill-shadow-visibility
-dynamic-shadow-submit
-nested-dynamic-shadow-submit
-trusted-spa-submit
-controlled-react-input
-large-dom-performance
-mv3-pending-session-reload
-```
-
-The full command:
-
-- builds an E2E extension with a dev/test manifest `key`
-- fixes the E2E extension id to `akgcahfkhhffgcafpbbeihpmniekohik`
-- builds `vaultkern-runtime`
-- creates a temporary KDBX with password `smoke-password`
-- starts a temporary HTTP smoke server
-- writes `NativeMessagingHosts/com.vaultkern.runtime.json` under a temporary Chrome for Testing profile
-- runs `open -> unlock -> create -> save -> find candidates -> fill` through the real extension background native bridge
-- proves a message without a fill capability releases nothing, then fills with a manual capability bound to the real entry id
-- verifies the final submit result: `submitted:smoke-user@example.com:12`
-- verifies automatic fill through the native/background/page-load/content chain for an exact origin while rejecting different ports, sibling hosts, and HTTPS-to-HTTP downgrade pages; a held page resource keeps load incomplete until the isolated probe and attempt-sequence baseline are installed, and every assertion waits for the correlated terminal background diagnostic
-- covers open, closed, nested dynamic, and unslotted shadow DOM plus real Chromium occlusion and hit-testing
-- bundles the repository's local React 19 into a temporary fixture and checks DOM value, React state, events, and rerender stability
-- measures seven fills after two warmups against 50,000 noise nodes and 20 credential fields, requiring a median at or below 500 ms and bounded hot-path DOM instrumentation
-- terminates and restarts the MV3 worker twice through CDP; after each recovery it verifies the same session key, no local/sync secret copy, denied ISOLATED-world access, and restoration through a newly opened popup
-
-Each successful invocation ends with an `executedCases` list. This makes it clear
-which named cases actually ran in CI logs.
-
-Chromium currently reuses the CDP target id and Playwright `Worker` wrapper when
-restarting the same service-worker version. The MV3 case therefore also requires
-an observed `stopped` lifecycle state and a fresh worker-realm nonce; the old nonce
-must be absent before the popup recovery assertion is allowed to pass.
+The former `smoke:e2e` command launched a per-extension runtime and drove
+`open -> unlock -> create` through native messaging. That topology is retired, so
+the command has been removed instead of preserving a test-only browser unlock
+backdoor. A replacement end-to-end harness must launch the signed Windows resident
+package, prepare its vault through the resident UI/control surface, and then verify
+popup fill and both passkey modes through the authenticated shim. Until that harness
+exists, the Vitest protocol/content tests and the manual Windows procedure above are
+the supported browser checks.
 
 Normal release builds still use:
 

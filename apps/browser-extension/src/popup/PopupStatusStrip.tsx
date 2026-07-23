@@ -5,13 +5,11 @@ import { popupTheme } from "./theme";
 export function PopupStatusStrip({
   siteLabel,
   unlocked,
-  onLock,
   onOpenManager,
   onOpenExtensionSettings
 }: {
   siteLabel: string;
   unlocked: boolean;
-  onLock?: () => void;
   onOpenManager?: () => void;
   onOpenExtensionSettings?: () => void;
 }) {
@@ -91,7 +89,7 @@ export function PopupStatusStrip({
             onClick={onOpenManager}
             style={buttonStyle}
           >
-            {text("Open Manager")}
+            {text("Open VaultKern")}
           </button>
         ) : null}
         {onOpenExtensionSettings ? (
@@ -100,16 +98,7 @@ export function PopupStatusStrip({
             onClick={onOpenExtensionSettings}
             style={buttonStyle}
           >
-            {text("Extension Settings")}
-          </button>
-        ) : null}
-        {unlocked && onLock ? (
-          <button
-            type="button"
-            onClick={onLock}
-            style={buttonStyle}
-          >
-            {text("Lock")}
+            {text("VaultKern Settings")}
           </button>
         ) : null}
       </div>

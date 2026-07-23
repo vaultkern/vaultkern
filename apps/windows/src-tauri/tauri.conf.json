@@ -26,6 +26,6 @@
   },
   "bundle": {
     "active": false,
-    "icon": ["icons/icon.ico"]
+    "icon": ["windows/Assets/Square150x150Logo.png", "icons/icon.ico"]
   }
 }

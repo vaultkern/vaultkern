@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-load-desktop-reconciliation-error"
+description = "Enables the load_desktop_reconciliation_error command without any pre-configured scope."
+commands.allow = ["load_desktop_reconciliation_error"]
+
+[[permission]]
+identifier = "deny-load-desktop-reconciliation-error"
+description = "Denies the load_desktop_reconciliation_error command without any pre-configured scope."
+commands.deny = ["load_desktop_reconciliation_error"]

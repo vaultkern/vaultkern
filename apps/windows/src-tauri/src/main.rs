@@ -7,15 +7,19 @@ use serde_json::Value;
 #[cfg(windows)]
 use std::sync::Arc;
 #[cfg(windows)]
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 #[cfg(windows)]
 use vaultkern_runtime::QuickUnlockReconciliationCredentials;
 #[cfg(windows)]
-use vaultkern_runtime_protocol::{ErrorDto, ProtocolEnvelope, RuntimeResponse, SensitiveString};
+use vaultkern_runtime::resident_ipc::start_windows_resident_ipc_server;
+#[cfg(windows)]
+use vaultkern_runtime_protocol::{
+    ErrorDto, ProtocolEnvelope, ResidentAppRouteDto, RuntimeResponse, SensitiveString,
+};
 #[cfg(windows)]
 use vaultkern_windows::{
-    DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge, SettingsReconciliationRequest,
-    launch_requests_visible_window,
+    DesktopDesiredState, DesktopSettingsStore, PasskeyPluginServer, RuntimeBridge,
+    SettingsReconciliationRequest, SettingsReconciliationStatus, launch_requests_visible_window,
 };
 
 #[cfg(windows)]
@@ -50,8 +54,8 @@ fn reconcile_desktop_settings(
         quick_unlock_credentials,
         quick_unlock_completion,
     } = request;
-    let desired = match settings.desired_state() {
-        Ok(desired) => desired,
+    let saved_settings = match settings.load() {
+        Ok(settings) => settings,
         Err(error) => {
             drop(quick_unlock_credentials);
             let error = error.to_string();
@@ -61,8 +65,15 @@ fn reconcile_desktop_settings(
             return Err(error);
         }
     };
+    let desired = DesktopDesiredState::from_settings(&saved_settings);
     let vault_unlocked = bridge.platform_passkey_is_unlocked();
     let mut failures = Vec::new();
+
+    let idle_timeout = (desired.idle_lock_minutes > 0)
+        .then(|| std::time::Duration::from_secs(desired.idle_lock_minutes.saturating_mul(60)));
+    if let Err(error) = bridge.set_idle_lock_timeout(idle_timeout) {
+        failures.push(error);
+    }
 
     let quick_unlock_result = bridge
         .reconcile_quick_unlock(desired.quick_unlock_enabled, quick_unlock_credentials)
@@ -75,9 +86,10 @@ fn reconcile_desktop_settings(
     }
 
     match passkey_plugin.reconcile_settings(desired.passkey_provider_enabled, vault_unlocked) {
-        Ok(true) | Ok(false) if !desired.passkey_provider_enabled => {}
-        Ok(true) => {}
-        Ok(false) => failures
+        Ok(None) => {}
+        Ok(Some(true)) | Ok(Some(false)) if !desired.passkey_provider_enabled => {}
+        Ok(Some(true)) => {}
+        Ok(Some(false)) => failures
             .push("passkey provider is registered but disabled in Windows Settings".to_owned()),
         Err(error) => failures.push(error),
     }
@@ -96,12 +108,34 @@ fn load_desktop_settings(settings: State<'_, Arc<DesktopSettingsStore>>) -> Resu
 
 #[cfg(windows)]
 #[tauri::command]
+fn load_desktop_reconciliation_error(
+    status: State<'_, SettingsReconciliationStatus>,
+) -> Option<String> {
+    status.error()
+}
+
+#[cfg(windows)]
+#[tauri::command]
+fn take_pending_resident_route(bridge: State<'_, RuntimeBridge>) -> Option<ResidentAppRouteDto> {
+    bridge.take_pending_resident_route()
+}
+
+#[cfg(windows)]
+#[tauri::command]
 fn save_desktop_settings(
     desired: Value,
     settings: State<'_, Arc<DesktopSettingsStore>>,
     bridge: State<'_, RuntimeBridge>,
+    passkey_plugin: State<'_, Arc<PasskeyPluginServer>>,
 ) -> Result<(), String> {
-    settings.save(&desired).map_err(|error| error.to_string())?;
+    settings
+        .save_and_publish(&desired, |committed| {
+            let desired_state = DesktopDesiredState::from_settings(committed);
+            bridge.set_quick_unlock_enabled(desired_state.quick_unlock_enabled);
+            passkey_plugin.apply_desired_state(desired_state.passkey_provider_enabled);
+            bridge.set_browser_integration_settings(&desired_state.browser_integration);
+        })
+        .map_err(|error| error.to_string())?;
     bridge.schedule_reconciliation();
     Ok(())
 }
@@ -120,12 +154,16 @@ struct QuickUnlockEnrollmentCredentialsDto {
 #[tauri::command]
 fn queue_quick_unlock_enrollment(
     credentials: QuickUnlockEnrollmentCredentialsDto,
+    expected_vault_ref_id: String,
     bridge: State<'_, RuntimeBridge>,
 ) -> Result<(), String> {
-    bridge.queue_quick_unlock_enrollment(QuickUnlockReconciliationCredentials::from_protocol_input(
-        credentials.password,
-        credentials.key_file_path,
-    ))
+    bridge.queue_quick_unlock_enrollment(
+        QuickUnlockReconciliationCredentials::from_protocol_input(
+            credentials.password,
+            credentials.key_file_path,
+        ),
+        expected_vault_ref_id,
+    )
 }
 
 #[cfg(windows)]
@@ -152,13 +190,21 @@ fn main() {
             },
         ))
         .setup(move |app| {
+            configure_main_window_parent(app.handle(), &window_bridge)
+                .map_err(std::io::Error::other)?;
             let settings_path = app
                 .path()
                 .app_data_dir()
                 .map_err(std::io::Error::other)?
                 .join("desktop-settings.json");
             let settings = Arc::new(DesktopSettingsStore::new(settings_path));
+            let initial_settings = settings.load().map_err(std::io::Error::other)?;
+            let initial_desired_state = DesktopDesiredState::from_settings(&initial_settings);
+            plugin_bridge.set_quick_unlock_enabled(initial_desired_state.quick_unlock_enabled);
+            plugin_bridge
+                .set_browser_integration_settings(&initial_desired_state.browser_integration);
             let plugin = Arc::new(PasskeyPluginServer::start(plugin_bridge.clone()));
+            plugin.apply_desired_state(initial_desired_state.passkey_provider_enabled);
             if let Some(error) = plugin.start_error() {
                 eprintln!("passkey COM server unavailable: {error}");
             }
@@ -169,24 +215,85 @@ fn main() {
             let reconciliation_settings = Arc::clone(&settings);
             let reconciliation_plugin = Arc::clone(&plugin);
             let reconciliation_bridge = plugin_bridge.clone();
+            let reconciliation_status = SettingsReconciliationStatus::default();
+            let worker_reconciliation_status = reconciliation_status.clone();
+            let reconciliation_app = app.handle().clone();
             std::thread::Builder::new()
                 .name("vaultkern-settings-reconciliation".to_owned())
                 .spawn(move || {
                     while let Ok(request) = reconciliation_requests.recv() {
-                        if let Err(error) = reconcile_desktop_settings(
+                        let result = reconcile_desktop_settings(
                             &reconciliation_settings,
                             &reconciliation_bridge,
                             &reconciliation_plugin,
                             request,
+                        );
+                        worker_reconciliation_status.record(result.clone());
+                        if let Err(error) = reconciliation_app.emit(
+                            "vaultkern-reconciliation-error",
+                            worker_reconciliation_status.error(),
                         ) {
+                            eprintln!("failed to publish reconciliation status: {error}");
+                        }
+                        if let Err(error) = result {
                             eprintln!("post-commit settings reconciliation failed: {error}");
                         }
                     }
                 })
                 .map_err(std::io::Error::other)?;
+            let (session_states, session_state_notifications) = std::sync::mpsc::channel();
+            plugin_bridge
+                .set_session_state_notifier(session_states)
+                .map_err(std::io::Error::other)?;
+            let session_state_app = app.handle().clone();
+            std::thread::Builder::new()
+                .name("vaultkern-session-state-events".to_owned())
+                .spawn(move || {
+                    while let Ok(state) = session_state_notifications.recv() {
+                        if let Err(error) = session_state_app.emit("vaultkern-session-state", state)
+                        {
+                            eprintln!("failed to publish resident session state: {error}");
+                        }
+                    }
+                })
+                .map_err(std::io::Error::other)?;
+            let (resident_activation, resident_activation_requests) = std::sync::mpsc::channel();
+            plugin_bridge
+                .set_resident_activation_notifier(resident_activation)
+                .map_err(std::io::Error::other)?;
+            let resident_activation_app = app.handle().clone();
+            let resident_activation_bridge = plugin_bridge.clone();
+            std::thread::Builder::new()
+                .name("vaultkern-resident-activation".to_owned())
+                .spawn(move || {
+                    while let Ok(route) = resident_activation_requests.recv() {
+                        if let Err(error) =
+                            show_main_window(&resident_activation_app, &resident_activation_bridge)
+                        {
+                            eprintln!("failed to show VaultKern for browser activation: {error}");
+                            continue;
+                        }
+                        resident_activation_bridge.queue_pending_resident_route(route);
+                        if let Err(error) = resident_activation_app.emit("vaultkern-open-route", ())
+                        {
+                            eprintln!("failed to route browser activation: {error}");
+                        }
+                    }
+                })
+                .map_err(std::io::Error::other)?;
             plugin_bridge.schedule_reconciliation();
+
+            let ipc_bridge = plugin_bridge.clone();
+            let ipc_handler = Arc::new(move |message, cancelled, parent_window| {
+                ipc_bridge.request_browser_cancellable(message, cancelled, parent_window)
+            });
+            let ipc_server =
+                start_windows_resident_ipc_server(ipc_handler).map_err(std::io::Error::other)?;
+
             app.manage(settings);
+            app.manage(reconciliation_status);
             app.manage(plugin);
+            app.manage(ipc_server);
             if show_window_on_start {
                 show_main_window(app.handle(), &window_bridge).map_err(std::io::Error::other)?;
             }
@@ -209,6 +316,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             runtime_send,
             load_desktop_settings,
+            load_desktop_reconciliation_error,
+            take_pending_resident_route,
             save_desktop_settings,
             queue_quick_unlock_enrollment
         ])
@@ -224,6 +333,17 @@ fn show_main_window(app: &tauri::AppHandle, bridge: &RuntimeBridge) -> Result<()
     window.show().map_err(|error| error.to_string())?;
     window.unminimize().map_err(|error| error.to_string())?;
     window.set_focus().map_err(|error| error.to_string())?;
+    configure_main_window_parent(app, bridge)
+}
+
+#[cfg(windows)]
+fn configure_main_window_parent(
+    app: &tauri::AppHandle,
+    bridge: &RuntimeBridge,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "VaultKern main window is unavailable".to_owned())?;
     let parent_window = window
         .hwnd()
         .map_err(|error| format!("failed to resolve VaultKern main window handle: {error}"))?

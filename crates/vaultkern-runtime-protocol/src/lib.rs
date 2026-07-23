@@ -4,7 +4,7 @@ use std::ops::Deref;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub struct SensitiveString(Zeroizing<String>);
 
@@ -125,6 +125,12 @@ pub struct ProtocolEnvelope {
     pub version: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(
+        default,
+        rename = "operationId",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub operation_id: Option<String>,
     pub command: RuntimeCommand,
 }
 
@@ -133,9 +139,18 @@ impl ProtocolEnvelope {
         Self {
             version: PROTOCOL_VERSION,
             request_id: None,
+            operation_id: None,
             command,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResidentAppRouteDto {
+    Unlock,
+    Vaults,
+    Settings,
 }
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
@@ -146,6 +161,10 @@ pub enum RuntimeCommand {
         capabilities: Vec<String>,
     },
     GetSessionState,
+    GetBrowserIntegrationSettings,
+    ActivateResidentApp {
+        route: ResidentAppRouteDto,
+    },
     ListRecentVaults,
     PreloadCurrentVault,
     AddLocalVaultReference {
@@ -189,6 +208,7 @@ pub enum RuntimeCommand {
         path: String,
     },
     LockSession,
+    RecordUserActivity,
     UnlockWithPassword {
         vault_id: String,
         password: SensitiveString,
@@ -220,6 +240,8 @@ pub enum RuntimeCommand {
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry_id: Option<String>,
         title: SensitiveString,
         username: SensitiveString,
         password: SensitiveString,
@@ -437,6 +459,19 @@ pub enum RuntimeCommand {
         vault_id: String,
         url: String,
     },
+    GetAutofillCredential {
+        vault_id: String,
+        entry_id: String,
+        url: String,
+    },
+    GetAutofillEntryFields {
+        vault_id: String,
+        entry_id: String,
+        url: String,
+    },
+    GetAutofillCreateContext {
+        vault_id: String,
+    },
     FindExactMatchingEntryIds {
         vault_id: String,
         fields: EntryFieldsDto,
@@ -456,6 +491,7 @@ impl ZeroizeOnDrop for RuntimeCommand {}
 pub enum RuntimeResponse {
     Handshake(HandshakeDto),
     SessionState(SessionStateDto),
+    BrowserIntegrationSettings(BrowserIntegrationSettingsDto),
     VaultReferenceList(VaultReferenceListDto),
     VaultReference(VaultReferenceDto),
     OneDriveAuthSession(OneDriveAuthSessionDto),
@@ -470,6 +506,9 @@ pub enum RuntimeResponse {
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
     FillCandidates(FillCandidateListDto),
+    AutofillCredential(AutofillCredentialDto),
+    AutofillEntryFields(AutofillEntryFieldsDto),
+    AutofillCreateContext(AutofillCreateContextDto),
     EntryIdList(EntryIdListDto),
     PasskeyAssertion(PasskeyAssertionDto),
     PasskeyRegistration(PasskeyRegistrationDto),
@@ -488,6 +527,7 @@ pub enum RuntimeResponse {
     Saved,
     SaveVaultResult(SaveVaultResultDto),
     AutofillPersistResult(AutofillPersistResultDto),
+    ResidentAppActivated,
     Error(ErrorDto),
 }
 
@@ -504,6 +544,14 @@ impl ZeroizeOnDrop for RuntimeResponse {}
 pub struct HandshakeDto {
     pub protocol_version: u32,
     pub capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserIntegrationSettingsDto {
+    pub language: String,
+    pub autofill_on_page_load_enabled: bool,
+    pub browser_passkey_proxy_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -817,6 +865,84 @@ impl ZeroizeOnDrop for EntryDetailDto {}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct AutofillCredentialDto {
+    pub id: String,
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub totp: Option<SensitiveString>,
+}
+
+impl fmt::Debug for AutofillCredentialDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillCredentialDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillCredentialDto {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.username.zeroize();
+        self.password.zeroize();
+        self.totp.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AutofillCredentialDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillEntryFieldsDto {
+    pub id: String,
+    pub fields: AutofillUpdateFieldsDto,
+}
+
+impl fmt::Debug for AutofillEntryFieldsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillEntryFieldsDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillEntryFieldsDto {
+    fn zeroize(&mut self) {
+        self.id.zeroize();
+        self.fields.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AutofillEntryFieldsDto {}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillUpdateFieldsDto {
+    pub username: SensitiveString,
+    pub password: SensitiveString,
+    pub url: SensitiveString,
+}
+
+impl fmt::Debug for AutofillUpdateFieldsDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AutofillUpdateFieldsDto([REDACTED])")
+    }
+}
+
+impl Zeroize for AutofillUpdateFieldsDto {
+    fn zeroize(&mut self) {
+        self.username.zeroize();
+        self.password.zeroize();
+        self.url.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for AutofillUpdateFieldsDto {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AutofillCreateContextDto {
+    pub root_group_id: String,
+}
+
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct EntryFieldsDto {
     pub title: SensitiveString,
     pub username: SensitiveString,
@@ -852,8 +978,8 @@ impl ZeroizeOnDrop for EntryFieldsDto {}
 pub enum AutofillPersistPlanDto {
     Update {
         entry_id: String,
-        expected_fields: EntryFieldsDto,
-        desired_fields: EntryFieldsDto,
+        expected_fields: AutofillUpdateFieldsDto,
+        desired_fields: AutofillUpdateFieldsDto,
     },
     Create {
         parent_group_id: String,

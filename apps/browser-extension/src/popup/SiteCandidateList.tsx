@@ -4,12 +4,10 @@ import { popupTheme } from "./theme";
 
 export function SiteCandidateList({
   candidates,
-  onFill,
-  onSelectEntry
+  onFill
 }: {
   candidates: EntrySummary[];
   onFill: (entryId: string) => void;
-  onSelectEntry: (entryId: string) => void;
 }) {
   const text = useText();
 
@@ -44,19 +42,12 @@ export function SiteCandidateList({
               minWidth: 0
             }}
           >
-            <button
-              type="button"
-              aria-label={entry.title}
-              onClick={() => onSelectEntry(entry.id)}
+            <div
               style={{
-                border: "none",
-                padding: 0,
                 minWidth: 0,
-                background: "transparent",
                 color: popupTheme.colors.text,
                 fontFamily: popupTheme.font.body,
-                textAlign: "left",
-                cursor: "pointer"
+                textAlign: "left"
               }}
             >
               <div
@@ -76,7 +67,7 @@ export function SiteCandidateList({
               >
                 {entry.username}
               </div>
-            </button>
+            </div>
             <button
               type="button"
               aria-label={`${text("Fill")} ${entry.title}`}

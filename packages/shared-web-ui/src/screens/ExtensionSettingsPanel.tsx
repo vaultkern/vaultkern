@@ -3,12 +3,11 @@ import type { CSSProperties } from "react";
 import type { UnlockCredentials } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "../designTokens";
-import type { ExtensionSettings, SettingsSurface } from "../extensionSettings";
+import type { ExtensionSettings } from "../extensionSettings";
 import { useText } from "../i18n";
 
 interface ExtensionSettingsPanelProps {
   settings: ExtensionSettings;
-  surface?: SettingsSurface;
   saving: boolean;
   error: string | null;
   quickUnlockSupported?: boolean;
@@ -17,6 +16,7 @@ interface ExtensionSettingsPanelProps {
   quickUnlockVaultUnlocked?: boolean;
   quickUnlockBusy?: boolean;
   quickUnlockError?: string | null;
+  quickUnlockCredentialResetKey?: number;
   reconciliationError?: string | null;
   onEnrollQuickUnlock?(credentials: UnlockCredentials): Promise<void>;
   onSave(settings: ExtensionSettings): void;
@@ -25,7 +25,6 @@ interface ExtensionSettingsPanelProps {
 
 export function ExtensionSettingsPanel({
   settings,
-  surface = "windows",
   saving,
   error,
   quickUnlockSupported = true,
@@ -34,6 +33,7 @@ export function ExtensionSettingsPanel({
   quickUnlockVaultUnlocked = false,
   quickUnlockBusy = false,
   quickUnlockError = null,
+  quickUnlockCredentialResetKey = 0,
   reconciliationError = null,
   onEnrollQuickUnlock,
   onSave,
@@ -44,10 +44,6 @@ export function ExtensionSettingsPanel({
   const [quickUnlockPassword, setQuickUnlockPassword] = useState("");
   const [quickUnlockKeyFilePath, setQuickUnlockKeyFilePath] = useState("");
   const quickUnlockAvailable = quickUnlockSupported !== false;
-  const providerEnabled =
-    surface === "browser"
-      ? draft.browserPasskeyProxyEnabled
-      : draft.windowsPasskeyProviderEnabled;
 
   useEffect(() => {
     setDraft(toDraft(settings));
@@ -59,6 +55,11 @@ export function ExtensionSettingsPanel({
       setQuickUnlockKeyFilePath("");
     }
   }, [quickUnlockEnrolled]);
+
+  useLayoutEffect(() => {
+    setQuickUnlockPassword("");
+    setQuickUnlockKeyFilePath("");
+  }, [quickUnlockCredentialResetKey]);
 
   useLayoutEffect(() => {
     const nextSettings = settingsFromDraft(
@@ -86,24 +87,14 @@ export function ExtensionSettingsPanel({
       <div style={titleRowStyle}>
         <div>
           <h2 style={headingStyle}>
-            {text(surface === "browser" ? "Browser Extension Settings" : "Windows Settings")}
+            {text("Windows Settings")}
           </h2>
           <p style={descriptionStyle}>
-            {text(
-              surface === "browser"
-                ? "Local browser extension preferences. These are not stored in the KDBX database."
-                : "Local Windows app preferences. These are not stored in the KDBX database."
-            )}
+            {text("Local Windows app preferences. These are not stored in the KDBX database.")}
           </p>
         </div>
         <button type="submit" disabled={saving} style={primaryButtonStyle}>
-          {saving
-            ? text("Saving...")
-            : text(
-                surface === "browser"
-                  ? "Save Extension Settings"
-                  : "Save Windows Settings"
-              )}
+          {saving ? text("Saving...") : text("Save Windows Settings")}
         </button>
       </div>
 
@@ -139,20 +130,6 @@ export function ExtensionSettingsPanel({
             style={inputStyle}
           />
         </label>
-        <label style={fieldStyle}>
-          {text("Clear Clipboard Seconds")}
-          <input
-            aria-label={text("Clear Clipboard Seconds")}
-            type="number"
-            min={0}
-            max={3600}
-            value={draft.clearClipboardSeconds}
-            onChange={(event) =>
-              setDraft({ ...draft, clearClipboardSeconds: event.target.value })
-            }
-            style={inputStyle}
-          />
-        </label>
         <div style={fieldStyle}>
           {text("Language")}
           <div style={segmentedStyle} role="group" aria-label={text("Language")}>
@@ -174,34 +151,38 @@ export function ExtensionSettingsPanel({
         </div>
         <label style={checkboxFieldStyle}>
           <input
-            aria-label={text(
-              surface === "browser"
-                ? "Browser passkey proxy"
-                : "Windows passkey provider"
-            )}
+            aria-label={text("Windows passkey provider")}
             type="checkbox"
-            checked={providerEnabled}
+            checked={draft.windowsPasskeyProviderEnabled}
             onChange={(event) =>
-              setDraft(
-                surface === "browser"
-                  ? {
-                      ...draft,
-                      browserPasskeyProxyEnabled: event.target.checked
-                    }
-                  : {
-                      ...draft,
-                      windowsPasskeyProviderEnabled: event.target.checked
-                    }
-              )
+              setDraft({
+                ...draft,
+                windowsPasskeyProviderEnabled: event.target.checked,
+                browserPasskeyProxyEnabled: event.target.checked
+                  ? false
+                  : draft.browserPasskeyProxyEnabled
+              })
             }
           />
-          {text(
-            surface === "browser"
-              ? "Browser passkey proxy"
-              : "Windows passkey provider"
-          )}
+          {text("Windows passkey provider")}
         </label>
-        {surface === "browser" ? (
+        <label style={checkboxFieldStyle}>
+          <input
+            aria-label={text("Browser passkey proxy")}
+            type="checkbox"
+            checked={draft.browserPasskeyProxyEnabled}
+            onChange={(event) =>
+              setDraft({
+                ...draft,
+                browserPasskeyProxyEnabled: event.target.checked,
+                windowsPasskeyProviderEnabled: event.target.checked
+                  ? false
+                  : draft.windowsPasskeyProviderEnabled
+              })
+            }
+          />
+          {text("Browser passkey proxy")}
+        </label>
         <label style={checkboxFieldStyle}>
           <input
             aria-label={text("Page-load autofill")}
@@ -216,9 +197,7 @@ export function ExtensionSettingsPanel({
           />
           {text("Page-load autofill")}
         </label>
-        ) : null}
       </div>
-      {surface === "windows" ? (
       <label style={toggleRowStyle}>
         <input
           aria-label={text("Quick Unlock")}
@@ -231,9 +210,7 @@ export function ExtensionSettingsPanel({
         />
         <span>{text("Quick Unlock")}</span>
       </label>
-      ) : null}
-      {surface === "windows" &&
-      quickUnlockAvailable &&
+      {quickUnlockAvailable &&
       quickUnlockEnabled &&
       draft.quickUnlockEnabled &&
       !quickUnlockEnrolled ? (
@@ -296,9 +273,6 @@ export function ExtensionSettingsPanel({
       ) : null}
       </fieldset>
       {quickUnlockError ? <div role="alert">{quickUnlockError}</div> : null}
-      <p style={noteStyle}>
-        {text("Clipboard clearing writes an empty string after the delay. Browser APIs do not allow reliable background verification that the clipboard still contains the copied secret.")}
-      </p>
       {error ? <div role="alert">{error}</div> : null}
     </form>
   );
@@ -309,7 +283,6 @@ function toDraft(settings: ExtensionSettings) {
     recentVaultLimit: String(settings.recentVaultLimit),
     language: settings.language,
     idleLockMinutes: String(settings.idleLockMinutes),
-    clearClipboardSeconds: String(settings.clearClipboardSeconds),
     autofillOnPageLoadEnabled: settings.autofillOnPageLoadEnabled,
     browserPasskeyProxyEnabled: settings.browserPasskeyProxyEnabled,
     windowsPasskeyProviderEnabled: settings.windowsPasskeyProviderEnabled,
@@ -326,12 +299,6 @@ function settingsFromDraft(
     recentVaultLimit: parseBoundedInteger(draft.recentVaultLimit, 1, 50, 10),
     language: draft.language,
     idleLockMinutes: parseBoundedInteger(draft.idleLockMinutes, 0, 240, 10),
-    clearClipboardSeconds: parseBoundedInteger(
-      draft.clearClipboardSeconds,
-      0,
-      3600,
-      30
-    ),
     autofillOnPageLoadEnabled: draft.autofillOnPageLoadEnabled,
     browserPasskeyProxyEnabled: draft.browserPasskeyProxyEnabled,
     windowsPasskeyProviderEnabled: draft.windowsPasskeyProviderEnabled,

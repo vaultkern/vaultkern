@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-queue-quick-unlock-enrollment"
+description = "Enables the queue_quick_unlock_enrollment command without any pre-configured scope."
+commands.allow = ["queue_quick_unlock_enrollment"]
+
+[[permission]]
+identifier = "deny-queue-quick-unlock-enrollment"
+description = "Denies the queue_quick_unlock_enrollment command without any pre-configured scope."
+commands.deny = ["queue_quick_unlock_enrollment"]

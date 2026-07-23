@@ -4,6 +4,7 @@ use p256::{
     pkcs8::DecodePrivateKey,
 };
 use sha2::{Digest, Sha256};
+use std::sync::{Arc, atomic::AtomicBool};
 use vaultkern_core::{
     Attachment, CompositeKey, CustomField, Entry, EntryFieldProtection, Group, KeepassCore,
     PasskeyRecord, SaveProfile, TotpSpec, Vault,
@@ -187,14 +188,14 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
     let fill = runtime
         .handle(RuntimeCommand::FindFillCandidates {
             vault_id: handle.vault_id.clone(),
-            url: "https://example.com/dashboard".into(),
+            url: "https://app.example.com/dashboard".into(),
         })
         .unwrap();
     assert_eq!(
         fill,
         RuntimeResponse::FillCandidates(vaultkern_runtime_protocol::FillCandidateListDto {
             entries: vec![vaultkern_runtime_protocol::EntrySummaryDto {
-                id: entry_id,
+                id: entry_id.clone(),
                 title: "Example".into(),
                 username: "alice".into(),
                 url: "https://app.example.com/login".into(),
@@ -203,6 +204,167 @@ fn runtime_returns_group_tree_entry_list_detail_and_fill_candidates_for_unlocked
             }],
         })
     );
+
+    let credential = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://app.example.com/dashboard".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        credential,
+        RuntimeResponse::AutofillCredential(vaultkern_runtime_protocol::AutofillCredentialDto {
+            id: entry_id.clone(),
+            username: "alice".into(),
+            password: "secret".into(),
+            totp: Some("287082".into()),
+        })
+    );
+
+    let scoped_fields = runtime
+        .handle(RuntimeCommand::GetAutofillEntryFields {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://app.example.com/dashboard".into(),
+        })
+        .unwrap();
+    let RuntimeResponse::AutofillEntryFields(scoped_fields) = scoped_fields else {
+        panic!("expected candidate-scoped autofill fields");
+    };
+    assert_eq!(scoped_fields.id, entry_id);
+    assert_eq!(scoped_fields.fields.username, "alice");
+    assert_eq!(scoped_fields.fields.password, "secret");
+    let scoped_json = serde_json::to_value(&scoped_fields).unwrap();
+    let fields = scoped_json["fields"].as_object().unwrap();
+    assert!(!fields.contains_key("notes"));
+    assert!(!fields.contains_key("totpUri"));
+    assert!(!fields.contains_key("customFields"));
+
+    let create_context = runtime
+        .handle(RuntimeCommand::GetAutofillCreateContext {
+            vault_id: handle.vault_id.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        create_context,
+        RuntimeResponse::AutofillCreateContext(
+            vaultkern_runtime_protocol::AutofillCreateContextDto {
+                root_group_id: root_id,
+            }
+        )
+    );
+
+    let sibling_origin = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://attacker.example.net/login".into(),
+        })
+        .unwrap();
+    assert!(matches!(sibling_origin, RuntimeResponse::Error(_)));
+    let sibling_fields = runtime
+        .handle(RuntimeCommand::GetAutofillEntryFields {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://attacker.example.net/login".into(),
+        })
+        .unwrap();
+    assert!(matches!(sibling_fields, RuntimeResponse::Error(_)));
+
+    runtime.handle(RuntimeCommand::LockSession).unwrap();
+    let locked = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id,
+            entry_id,
+            url: "https://app.example.com/dashboard".into(),
+        })
+        .unwrap();
+    assert!(matches!(locked, RuntimeResponse::Error(_)));
+}
+
+#[test]
+fn runtime_releases_autofill_secrets_only_to_the_exact_http_origin() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+
+    let mut vault = Vault::empty("demo");
+    let mut entry = Entry::new("Admin");
+    entry.username = "alice".into();
+    entry.password = "secret".into();
+    entry.url = "https://admin.example.com/login".into();
+    let entry_id = entry.id.to_string();
+    vault.root.entries.push(entry);
+
+    let bytes = core
+        .save_kdbx(&vault, &key, SaveProfile::recommended())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("origin-scoped.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+
+    let exact_origin = runtime
+        .handle(RuntimeCommand::GetAutofillCredential {
+            vault_id: handle.vault_id.clone(),
+            entry_id: entry_id.clone(),
+            url: "https://ADMIN.EXAMPLE.COM:443/account".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        exact_origin,
+        RuntimeResponse::AutofillCredential(_)
+    ));
+
+    for cross_origin_url in [
+        "https://evil.example.com/login",
+        "http://admin.example.com/login",
+        "https://admin.example.com:444/login",
+    ] {
+        let candidates = runtime
+            .handle(RuntimeCommand::FindFillCandidates {
+                vault_id: handle.vault_id.clone(),
+                url: cross_origin_url.into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(
+                candidates,
+                RuntimeResponse::FillCandidates(ref candidates) if candidates.entries.is_empty()
+            ),
+            "credential summaries crossed into {cross_origin_url}"
+        );
+
+        let credential = runtime
+            .handle(RuntimeCommand::GetAutofillCredential {
+                vault_id: handle.vault_id.clone(),
+                entry_id: entry_id.clone(),
+                url: cross_origin_url.into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(credential, RuntimeResponse::Error(_)),
+            "credential secret crossed into {cross_origin_url}"
+        );
+
+        let fields = runtime
+            .handle(RuntimeCommand::GetAutofillEntryFields {
+                vault_id: handle.vault_id.clone(),
+                entry_id: entry_id.clone(),
+                url: cross_origin_url.into(),
+            })
+            .unwrap();
+        assert!(
+            matches!(fields, RuntimeResponse::Error(_)),
+            "editable secret fields crossed into {cross_origin_url}"
+        );
+    }
 }
 
 #[test]
@@ -227,15 +389,22 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
     runtime
         .unlock_with_password(&handle.vault_id, "demo-password")
         .unwrap();
+    let vault_ref_id = runtime
+        .session_state()
+        .current_vault_ref_id
+        .expect("current vault reference");
 
     assert!(
         runtime
             .reconcile_quick_unlock(
                 true,
-                Some(QuickUnlockReconciliationCredentials::from_protocol_input(
-                    Some("demo-password".into()),
-                    None,
-                )),
+                Some(
+                    QuickUnlockReconciliationCredentials::from_protocol_input(
+                        Some("demo-password".into()),
+                        None,
+                    )
+                    .bound_to_vault_ref(&vault_ref_id)
+                ),
             )
             .unwrap()
     );
@@ -279,6 +448,7 @@ fn runtime_unlocks_current_vault_with_device_quick_unlock() {
         })
     );
 
+    runtime.bind_quick_unlock_policy_gate(Arc::new(AtomicBool::new(false)));
     assert!(runtime.reconcile_quick_unlock(false, None).unwrap());
     let recent = runtime.handle(RuntimeCommand::ListRecentVaults).unwrap();
     let RuntimeResponse::VaultReferenceList(recent) = recent else {
@@ -391,7 +561,7 @@ fn runtime_deletes_quick_unlock_credentials_when_stored_password_is_stale() {
 }
 
 #[test]
-fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
+fn runtime_scopes_fill_candidates_to_exact_origin_then_sorts_by_path_similarity() {
     let core = KeepassCore::new();
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -402,7 +572,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let mut descendant = Entry::new("Descendant Host");
     descendant.username = "descendant".into();
     descendant.url = "https://auth.app.example.com/login/reset".into();
-    let descendant_id = descendant.id.to_string();
     vault.root.entries.push(descendant);
 
     let mut exact_path = Entry::new("Exact Path");
@@ -414,7 +583,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let mut ancestor = Entry::new("Parent Domain");
     ancestor.username = "ancestor".into();
     ancestor.url = "https://example.com/login/reset".into();
-    let ancestor_id = ancestor.id.to_string();
     vault.root.entries.push(ancestor);
 
     let mut exact_host_broader_path = Entry::new("Broader Path");
@@ -426,7 +594,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
     let mut sibling = Entry::new("Sibling Host");
     sibling.username = "sibling".into();
     sibling.url = "https://admin.example.com/login/reset".into();
-    let sibling_id = sibling.id.to_string();
     vault.root.entries.push(sibling);
 
     let mut invalid = Entry::new("Invalid Url");
@@ -471,30 +638,6 @@ fn runtime_sorts_fill_candidates_by_host_then_path_similarity() {
                     title: "Broader Path".into(),
                     username: "broad".into(),
                     url: "https://app.example.com/login".into(),
-                    group_id: root_id.clone(),
-                    has_totp: false,
-                },
-                vaultkern_runtime_protocol::EntrySummaryDto {
-                    id: ancestor_id,
-                    title: "Parent Domain".into(),
-                    username: "ancestor".into(),
-                    url: "https://example.com/login/reset".into(),
-                    group_id: root_id.clone(),
-                    has_totp: false,
-                },
-                vaultkern_runtime_protocol::EntrySummaryDto {
-                    id: descendant_id,
-                    title: "Descendant Host".into(),
-                    username: "descendant".into(),
-                    url: "https://auth.app.example.com/login/reset".into(),
-                    group_id: root_id.clone(),
-                    has_totp: false,
-                },
-                vaultkern_runtime_protocol::EntrySummaryDto {
-                    id: sibling_id,
-                    title: "Sibling Host".into(),
-                    username: "sibling".into(),
-                    url: "https://admin.example.com/login/reset".into(),
                     group_id: root_id,
                     has_totp: false,
                 },
@@ -780,6 +923,7 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -846,6 +990,68 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         })
         .unwrap();
     assert_eq!(deleted, RuntimeResponse::Saved);
+}
+
+#[test]
+fn runtime_replays_a_create_with_the_same_planned_entry_id_without_duplication() {
+    let core = KeepassCore::new();
+    let mut key = CompositeKey::default();
+    key.add_password("demo-password");
+    let bytes = core
+        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
+        .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("demo.kdbx");
+    std::fs::write(&path, bytes).unwrap();
+    let mut runtime = Runtime::for_tests();
+    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
+    runtime
+        .unlock_with_password(&handle.vault_id, "demo-password")
+        .unwrap();
+    let root_id = runtime.list_groups(&handle.vault_id).unwrap().root.id;
+    let entry_id = "11111111-1111-4111-8111-111111111111";
+
+    for _ in 0..2 {
+        let response = runtime
+            .handle(RuntimeCommand::CreateEntry {
+                vault_id: handle.vault_id.clone(),
+                parent_group_id: root_id.clone(),
+                entry_id: Some(entry_id.into()),
+                title: "Original".into(),
+                username: "alice".into(),
+                password: "secret".into(),
+                url: "https://example.com".into(),
+                notes: String::new().into(),
+                totp_uri: None,
+            })
+            .unwrap();
+        let RuntimeResponse::EntryDetail(detail) = response else {
+            panic!("expected entry detail");
+        };
+        assert_eq!(detail.id, entry_id);
+        assert_eq!(detail.title, "Original");
+    }
+
+    let collision = runtime.handle(RuntimeCommand::CreateEntry {
+        vault_id: handle.vault_id.clone(),
+        parent_group_id: root_id,
+        entry_id: Some(entry_id.into()),
+        title: "must not overwrite the committed entry".into(),
+        username: "alice".into(),
+        password: "secret".into(),
+        url: "https://example.com".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    });
+    assert!(
+        collision
+            .unwrap_err()
+            .to_string()
+            .contains("planned entry id collision")
+    );
+
+    let entries = runtime.list_entries(&handle.vault_id).unwrap();
+    assert_eq!(entries.len(), 1);
 }
 
 #[test]
@@ -1180,7 +1386,7 @@ fn runtime_creates_passkey_assertion_for_matching_relying_party() {
 }
 
 #[test]
-fn preferred_uv_ceremony_cannot_release_a_passkey_without_fresh_verification() {
+fn preferred_uv_ceremony_falls_back_to_presence_without_fresh_verification() {
     let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
     let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXByZWZlcnJlZA","origin":"https://example.com","crossOrigin":false}"#;
     let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
@@ -1208,14 +1414,55 @@ fn preferred_uv_ceremony_cannot_release_a_passkey_without_fresh_verification() {
         })
         .unwrap();
 
-    let RuntimeResponse::Error(error) = response else {
-        panic!("expected fresh UV error, got {response:?}");
+    let RuntimeResponse::PasskeyAssertion(assertion) = response else {
+        panic!("expected presence-only assertion, got {response:?}");
     };
-    assert!(
-        error
-            .message
-            .contains("passkey user verification was not verified")
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x01, 0);
+    assert_eq!(authenticator_data[32] & 0x04, 0);
+}
+
+#[test]
+fn discouraged_uv_registration_uses_presence_without_setting_uv() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.create","challenge":"cmVnaXN0ZXItZGlzY291cmFnZWQ","origin":"https://example.com","crossOrigin":false}"#;
+    register_ceremony_at_s4_with_user_verification(
+        &mut runtime,
+        "registration-token-discouraged-no-uv",
+        PasskeyCeremonyKindDto::Create,
+        "https://example.com",
+        "example.com",
+        "cmVnaXN0ZXItZGlzY291cmFnZWQ",
+        false,
+        PasskeyUserVerificationRequirementDto::Discouraged,
     );
+
+    let response = runtime
+        .handle(RuntimeCommand::CreatePasskeyRegistration {
+            ceremony_token: "registration-token-discouraged-no-uv".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            user_name: "bob@example.com".into(),
+            user_display_name: Some("Bob".into()),
+            user_handle_base64url: "dXNlci0y".into(),
+            public_key_algorithm: -7,
+            related_origin_verified: false,
+            client_data_json_base64url: URL_SAFE_NO_PAD.encode(client_data_json),
+        })
+        .unwrap();
+
+    let RuntimeResponse::PasskeyRegistration(registration) = response else {
+        panic!("expected presence-only registration, got {response:?}");
+    };
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(registration.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x01, 0);
+    assert_eq!(authenticator_data[32] & 0x04, 0);
 }
 
 #[test]
@@ -1331,6 +1578,78 @@ fn runtime_sets_assertion_uv_flag_after_master_password_user_verification() {
             .message
             .contains("passkey user verification was not verified")
     );
+}
+
+#[test]
+fn unknown_allow_credential_does_not_consume_required_user_verification() {
+    let (mut runtime, _dir, vault_id) = runtime_with_example_passkey();
+    let client_data_json = br#"{"type":"webauthn.get","challenge":"Y2hhbGxlbmdlLXV2LXN0YWxl","origin":"https://example.com","crossOrigin":false}"#;
+    let client_data_json_base64url = URL_SAFE_NO_PAD.encode(client_data_json);
+    register_ceremony_at_s1_with_user_verification(
+        &mut runtime,
+        "assertion-token-uv-stale-credential",
+        PasskeyCeremonyKindDto::Get,
+        "Y2hhbGxlbmdlLXV2LXN0YWxl",
+        PasskeyUserVerificationRequirementDto::Required,
+    );
+    let verified = runtime
+        .handle(RuntimeCommand::VerifyPasskeyUser {
+            ceremony_token: "assertion-token-uv-stale-credential".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::UserAuthorization,
+            vault_id: vault_id.clone(),
+            method: PasskeyUserVerificationMethodDto::MasterPassword,
+            password: Some("demo-password".into()),
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyUserVerified(verified) = verified else {
+        panic!("expected UV proof, got {verified:?}");
+    };
+    assert!(verified.verified);
+    advance_ceremony_from_s1_to_s4(&mut runtime, "assertion-token-uv-stale-credential");
+
+    let stale = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-uv-stale-credential".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id: vault_id.clone(),
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("c3RhbGUtY3JlZGVudGlhbA".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url: client_data_json_base64url.clone(),
+        })
+        .unwrap();
+    let RuntimeResponse::Error(error) = stale else {
+        panic!("expected stale credential error, got {stale:?}");
+    };
+    assert!(
+        error.message.contains("passkey credential"),
+        "unexpected stale credential error: {error:?}"
+    );
+
+    let valid = runtime
+        .handle(RuntimeCommand::CreatePasskeyAssertion {
+            ceremony_token: "assertion-token-uv-stale-credential".into(),
+            expected_phase: PasskeyCeremonyPhaseDto::CompletionAndMutation,
+            vault_id,
+            relying_party: "example.com".into(),
+            origin: "https://example.com".into(),
+            credential_id: Some("Y3JlZGVudGlhbC0x".into()),
+            discoverable: false,
+            user_presence_verified: true,
+            related_origin_verified: false,
+            client_data_json_base64url,
+        })
+        .unwrap();
+    let RuntimeResponse::PasskeyAssertion(assertion) = valid else {
+        panic!("expected assertion after stale candidate, got {valid:?}");
+    };
+    let authenticator_data = URL_SAFE_NO_PAD
+        .decode(assertion.authenticator_data_base64url)
+        .unwrap();
+    assert_ne!(authenticator_data[32] & 0x04, 0);
 }
 
 #[test]
@@ -4510,6 +4829,7 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -4752,6 +5072,7 @@ fn runtime_updates_entry_modified_time_after_manager_mutations() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: vault.vault_id.clone(),
             parent_group_id: root_id,
+            entry_id: None,
             title: "Created".into(),
             username: "alice".into(),
             password: "secret".into(),

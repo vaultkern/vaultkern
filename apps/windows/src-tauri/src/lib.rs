@@ -3,13 +3,16 @@ mod desktop_settings;
 mod plugin_operation_state;
 mod runtime_bridge;
 
-pub use desktop_settings::{DesktopDesiredState, DesktopSettingsStore, DesktopSettingsStoreError};
+pub use desktop_settings::{
+    DesktopDesiredState, DesktopSettingsStore, DesktopSettingsStoreError,
+    SettingsReconciliationStatus,
+};
 pub use runtime_bridge::{RuntimeBridge, SettingsReconciliationRequest};
 
 pub fn launch_requests_visible_window(arguments: &[String]) -> bool {
     !arguments
         .iter()
-        .any(|argument| argument == "-PluginActivated")
+        .any(|argument| argument == "-PluginActivated" || argument == "-BrowserActivated")
 }
 
 #[cfg(any(windows, test))]
@@ -33,6 +36,10 @@ mod tests {
         assert!(launch_requests_visible_window(&[
             "vaultkern-windows.exe".into(),
             "--webview-debug-port=9222".into(),
+        ]));
+        assert!(!launch_requests_visible_window(&[
+            "vaultkern-windows.exe".into(),
+            "-BrowserActivated".into(),
         ]));
     }
 
@@ -73,6 +80,7 @@ mod tests {
         for command in [
             "allow-runtime-send",
             "allow-load-desktop-settings",
+            "allow-load-desktop-reconciliation-error",
             "allow-save-desktop-settings",
             "allow-queue-quick-unlock-enrollment",
         ] {
@@ -85,11 +93,12 @@ mod tests {
 
         let build = include_str!("../build.rs");
         assert!(build.contains("\"queue_quick_unlock_enrollment\""));
+        assert!(build.contains("\"load_desktop_reconciliation_error\""));
         assert!(!build.contains("\"reconcile_settings\""));
     }
 
     #[test]
-    fn native_startup_reconciliation_includes_quick_unlock_without_the_webview() {
+    fn native_reconciliation_converges_side_effects_without_republishing_desired_state() {
         let main = include_str!("main.rs");
         let reconciliation_start = main
             .find("fn reconcile_desktop_settings(")
@@ -103,6 +112,12 @@ mod tests {
         assert!(
             reconciliation.contains("reconcile_quick_unlock"),
             "native reconciliation must converge unlock-blob presence before the WebView starts"
+        );
+        assert!(
+            !reconciliation.contains("set_browser_integration_settings")
+                && !reconciliation.contains("set_quick_unlock_enabled")
+                && !reconciliation.contains("apply_desired_state"),
+            "a stale reconciliation snapshot must never overwrite desired-state gates or projections"
         );
         assert!(
             reconciliation.find("reconcile_quick_unlock").unwrap()
@@ -139,6 +154,40 @@ mod tests {
     }
 
     #[test]
+    fn provider_callbacks_recheck_desired_state_after_runtime_work() {
+        let source = include_str!("passkey_plugin.rs");
+        for (start, end, runtime_call) in [
+            (
+                "extern \"system\" fn prepare_operation_callback(",
+                "extern \"system\" fn make_credential_callback(",
+                "context.bridge.prepare_platform_passkey_operation",
+            ),
+            (
+                "extern \"system\" fn make_credential_callback(",
+                "extern \"system\" fn commit_registration_callback(",
+                "context.bridge.register_platform_passkey",
+            ),
+            (
+                "extern \"system\" fn get_assertion_callback(",
+                "fn callback_available(",
+                "context.bridge.create_platform_passkey_assertion",
+            ),
+        ] {
+            let start = source.find(start).expect("provider callback start");
+            let end = source[start..]
+                .find(end)
+                .map(|offset| start + offset)
+                .expect("provider callback end");
+            let callback = &source[start..end];
+            let runtime_call = callback.find(runtime_call).expect("runtime callback call");
+            assert!(
+                callback[runtime_call..].contains("provider_disabled_after_runtime_work"),
+                "provider desired state must be checked again before releasing callback output"
+            );
+        }
+    }
+
+    #[test]
     fn successful_settings_commit_schedules_the_single_reconciliation_entry_point() {
         let main = include_str!("main.rs");
         let save_start = main
@@ -151,9 +200,41 @@ mod tests {
         let save = &main[save_start..save_end];
 
         assert!(
-            save.find("settings.save(&desired)").unwrap()
+            save.find(".save_and_publish(&desired").unwrap()
                 < save.find("bridge.schedule_reconciliation()").unwrap(),
             "desired state must commit before reconciliation is scheduled"
+        );
+        assert!(
+            save.find(".save_and_publish(&desired").unwrap()
+                < save.find("passkey_plugin.apply_desired_state").unwrap(),
+            "the committed provider preference must close the callback gate immediately"
+        );
+        assert!(
+            save.find("passkey_plugin.apply_desired_state").unwrap()
+                < save.find("bridge.schedule_reconciliation()").unwrap(),
+            "OS registration reconciliation must run only after the callback gate reflects desired state"
+        );
+        assert!(
+            save.find("bridge.set_quick_unlock_enabled").unwrap()
+                < save.find("bridge.schedule_reconciliation()").unwrap(),
+            "the committed quick-unlock preference must close its runtime gate before reconciliation"
+        );
+    }
+
+    #[test]
+    fn browser_activation_shows_the_resident_window_and_forwards_only_a_fixed_route() {
+        let main = include_str!("main.rs");
+
+        assert!(main.contains("set_resident_activation_notifier"));
+        assert!(main.contains("vaultkern-open-route"));
+        let activation_loop = main
+            .find("while let Ok(route) = resident_activation_requests.recv()")
+            .expect("resident activation loop");
+        let activation = &main[activation_loop..];
+        assert!(
+            activation.find("show_main_window").unwrap()
+                < activation.find("vaultkern-open-route").unwrap(),
+            "the window must be visible before its fixed route is delivered"
         );
     }
 }

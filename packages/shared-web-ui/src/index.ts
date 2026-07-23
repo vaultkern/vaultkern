@@ -1,4 +1,9 @@
 export { App } from "./App";
+export type {
+  ResidentAppRouteSubscriber,
+  SessionStateLike,
+  SessionStateSubscriber
+} from "./App";
 export { archiveTheme } from "./designTokens";
 export { errorMessage } from "./error";
 export { ExtensionSettingsPanel } from "./screens/ExtensionSettingsPanel";
@@ -14,8 +19,7 @@ export type {
   ExtensionSettings,
   ExtensionSettingsReconciliationReason,
   ExtensionSettingsStore,
-  RecentVaultRetentionRecord,
-  SettingsSurface
+  RecentVaultRetentionRecord
 } from "./extensionSettings";
 export { I18nProvider, showMoreText, translate, useLanguage, useText } from "./i18n";
 export {
