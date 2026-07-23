@@ -6523,7 +6523,11 @@ public object FfiConverterTypeSensitiveBytes: FfiConverter<SensitiveBytes, RustB
 
     override fun lower(value: SensitiveBytes): RustBuffer.ByValue {
         val builtinValue = value.copyBytes()
-        return FfiConverterByteArray.lower(builtinValue)
+        return try {
+            FfiConverterByteArray.lower(builtinValue)
+        } finally {
+            builtinValue.fill(0)
+        }
     }
 
     override fun read(buf: ByteBuffer): SensitiveBytes {
@@ -6533,12 +6537,20 @@ public object FfiConverterTypeSensitiveBytes: FfiConverter<SensitiveBytes, RustB
 
     override fun allocationSize(value: SensitiveBytes): ULong {
         val builtinValue = value.copyBytes()
-        return FfiConverterByteArray.allocationSize(builtinValue)
+        return try {
+            FfiConverterByteArray.allocationSize(builtinValue)
+        } finally {
+            builtinValue.fill(0)
+        }
     }
 
     override fun write(value: SensitiveBytes, buf: ByteBuffer) {
         val builtinValue = value.copyBytes()
-        FfiConverterByteArray.write(builtinValue, buf)
+        try {
+            FfiConverterByteArray.write(builtinValue, buf)
+        } finally {
+            builtinValue.fill(0)
+        }
     }
 }
 
@@ -6557,28 +6569,60 @@ public typealias SensitiveString = VaultKernSensitiveString
  * @suppress
  */
 public object FfiConverterTypeSensitiveString: FfiConverter<SensitiveString, RustBuffer.ByValue> {
-    override fun lift(value: RustBuffer.ByValue): SensitiveString {
-        val builtinValue = FfiConverterString.lift(value)
-        return VaultKernSensitiveString.fromString(builtinValue)
+    override fun lift(value: RustBuffer.ByValue): SensitiveString = try {
+        val bytes = ByteArray(value.len.toInt())
+        try {
+            value.asByteBuffer()!!.get(bytes)
+            VaultKernSensitiveString.fromUtf8Bytes(bytes)
+        } finally {
+            bytes.fill(0)
+        }
+    } finally {
+        RustBuffer.free(value)
     }
 
     override fun lower(value: SensitiveString): RustBuffer.ByValue {
-        val builtinValue = value.reveal()
-        return FfiConverterString.lower(builtinValue)
+        val bytes = value.copyUtf8Bytes()
+        return try {
+            val buffer = RustBuffer.alloc(bytes.size.toULong())
+            try {
+                buffer.asByteBuffer()!!.put(bytes)
+                buffer
+            } catch (error: Throwable) {
+                RustBuffer.free(buffer)
+                throw error
+            }
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     override fun read(buf: ByteBuffer): SensitiveString {
-        val builtinValue = FfiConverterString.read(buf)
-        return VaultKernSensitiveString.fromString(builtinValue)
+        val bytes = ByteArray(buf.getInt())
+        return try {
+            buf.get(bytes)
+            VaultKernSensitiveString.fromUtf8Bytes(bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     override fun allocationSize(value: SensitiveString): ULong {
-        val builtinValue = value.reveal()
-        return FfiConverterString.allocationSize(builtinValue)
+        val bytes = value.copyUtf8Bytes()
+        return try {
+            4UL + bytes.size.toULong()
+        } finally {
+            bytes.fill(0)
+        }
     }
 
     override fun write(value: SensitiveString, buf: ByteBuffer) {
-        val builtinValue = value.reveal()
-        FfiConverterString.write(builtinValue, buf)
+        val bytes = value.copyUtf8Bytes()
+        try {
+            buf.putInt(bytes.size)
+            buf.put(bytes)
+        } finally {
+            bytes.fill(0)
+        }
     }
 }
