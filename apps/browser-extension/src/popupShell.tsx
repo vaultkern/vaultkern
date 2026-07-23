@@ -9,7 +9,6 @@ import { createPendingLoginWorkflow } from "./popup/pendingLoginWorkflow";
 import { extensionTransport } from "./runtimeBridge";
 import {
   pendingAutofillTransactionFromUnknown,
-  type PendingAutofillPlanInput,
   type PendingAutofillTransaction
 } from "./autofill/pendingSubmission";
 import { PENDING_AUTOFILL_TRANSACTION_TTL_MS } from "./autofill/pendingSubmissionStore";
@@ -203,54 +202,13 @@ export async function loadPendingAutofillSubmission() {
   if ((response as { ok?: unknown } | null)?.ok !== true) {
     throw new Error("Pending login save state is unavailable");
   }
-  const candidate = response as {
-    pending?: unknown;
-    recovery?: unknown;
-  } | null;
-  const pending = candidate?.pending;
-  const recoveryTabId =
-    candidate?.recovery === true &&
-    typeof pending === "object" &&
-    pending !== null &&
-    Number.isSafeInteger((pending as { tabId?: unknown }).tabId) &&
-    ((pending as { tabId: number }).tabId) >= 0
-      ? (pending as { tabId: number }).tabId
-      : undefined;
+  const pending = (response as { pending?: unknown } | null)?.pending;
   return pendingAutofillTransactionFromUnknown(
     pending,
-    recoveryTabId ?? tabId ?? -1,
+    tabId ?? -1,
     Date.now(),
     PENDING_AUTOFILL_TRANSACTION_TTL_MS
   );
-}
-
-export async function planPendingAutofillSubmission(
-  transactionId: string,
-  tabId: number,
-  vaultId: string,
-  plan: PendingAutofillPlanInput
-) {
-  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
-  if (typeof chromeApi?.runtime?.sendMessage !== "function") {
-    return null;
-  }
-  const response = await chromeApi.runtime.sendMessage({
-    type: "vaultkern_autofill_pending_confirm",
-    transactionId,
-    tabId,
-    vaultId,
-    plan
-  });
-  const pending = pendingAutofillTransactionFromUnknown(
-    (response as { pending?: unknown } | null)?.pending,
-    tabId,
-    Date.now(),
-    PENDING_AUTOFILL_TRANSACTION_TTL_MS
-  );
-  if (pending?.transactionId === transactionId) {
-    return pending;
-  }
-  return null;
 }
 
 export async function dismissPendingAutofillSubmission(
@@ -277,122 +235,6 @@ export async function dismissPendingAutofillSubmission(
       throw error;
     }
     return true;
-  }
-}
-
-export async function executePendingAutofillMutation(
-  transactionId: string,
-  tabId: number
-) {
-  const chromeApi = (globalThis as typeof globalThis & { chrome?: any }).chrome;
-  if (typeof chromeApi?.runtime?.sendMessage !== "function") {
-    return { ok: false, errorMessage: "Background login save is unavailable" };
-  }
-  let response: unknown;
-  try {
-    response = await chromeApi.runtime.sendMessage({
-      type: "vaultkern_autofill_pending_execute",
-      transactionId,
-      tabId
-    });
-  } catch (error) {
-    const readback = await readPendingAutofillExecution(
-      chromeApi,
-      tabId,
-      transactionId
-    );
-    if (readback.settled) {
-      return { ok: true };
-    }
-    if ("expired" in readback && readback.expired) {
-      return { ok: false, expired: true };
-    }
-    return {
-      ok: false,
-      ...(readback.pending ? { pending: readback.pending } : {}),
-      errorMessage: error instanceof Error ? error.message : "Login save failed"
-    };
-  }
-  const candidate = response as {
-    ok?: unknown;
-    pending?: unknown;
-    expired?: unknown;
-    conflict?: unknown;
-    error?: { message?: unknown };
-  } | null;
-  if (candidate?.ok === true) {
-    return { ok: true };
-  }
-  if (candidate?.expired === true) {
-    return { ok: false, expired: true };
-  }
-  const responsePending =
-    pendingAutofillTransactionFromUnknown(
-      candidate?.pending,
-      tabId,
-      Date.now(),
-      PENDING_AUTOFILL_TRANSACTION_TTL_MS
-    );
-  const matchingResponsePending =
-    responsePending?.transactionId === transactionId ? responsePending : null;
-  const readback = await readPendingAutofillExecution(
-    chromeApi,
-    tabId,
-    transactionId
-  );
-  if (readback.settled) {
-    return { ok: true };
-  }
-  if ("expired" in readback && readback.expired) {
-    return { ok: false, expired: true };
-  }
-  const pending = readback.pending ?? matchingResponsePending;
-  return {
-    ok: false,
-    ...(candidate?.conflict === true ? { conflict: true } : {}),
-    ...(pending ? { pending } : {}),
-    ...(typeof candidate?.error?.message === "string"
-      ? { errorMessage: candidate.error.message }
-      : {})
-  };
-}
-
-async function readPendingAutofillExecution(
-  chromeApi: any,
-  tabId: number,
-  transactionId: string
-) {
-  try {
-    const response = await chromeApi.runtime.sendMessage({
-      type: "vaultkern_autofill_pending_status",
-      tabId,
-      transactionId
-    });
-    if ((response as { ok?: unknown } | null)?.ok !== true) {
-      return { settled: false as const, pending: null };
-    }
-    const outcome = (response as { outcome?: unknown } | null)?.outcome;
-    if (outcome === "persisted") {
-      return { settled: true as const, pending: null };
-    }
-    if (outcome === "expired" || outcome === "expired_unknown") {
-      return {
-        settled: false as const,
-        expired: true as const,
-        pending: null
-      };
-    }
-    const pending = pendingAutofillTransactionFromUnknown(
-      (response as { pending?: unknown } | null)?.pending,
-      tabId,
-      Date.now(),
-      PENDING_AUTOFILL_TRANSACTION_TTL_MS
-    );
-    return pending?.transactionId === transactionId
-      ? { settled: false as const, pending }
-      : { settled: false as const, pending: null };
-  } catch {
-    return { settled: false as const, pending: null };
   }
 }
 

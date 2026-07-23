@@ -324,6 +324,9 @@ pub enum RuntimeCommand {
         expected_fields: AutofillUpdateFieldsDto,
         desired_fields: AutofillUpdateFieldsDto,
     },
+    /// Deprecated wire-only compatibility form.
+    ///
+    /// Current runtimes return `unsupported` without touching a vault or source.
     PersistAutofillMutation {
         transaction_id: String,
         operation_id: String,
@@ -586,6 +589,7 @@ pub enum RuntimeResponse {
     DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto),
     Saved,
     SaveVaultResult(SaveVaultResultDto),
+    /// Deprecated response shape retained only for protocol decoding compatibility.
     AutofillPersistResult(AutofillPersistResultDto),
     ResidentAppActivated,
     Error(ErrorDto),
@@ -1036,6 +1040,7 @@ impl ZeroizeOnDrop for EntryFieldsDto {}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case")]
+/// Deprecated plan shape retained only for protocol decoding compatibility.
 pub enum AutofillPersistPlanDto {
     Update {
         entry_id: String,
@@ -1381,6 +1386,7 @@ pub struct VaultMutationResultDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+/// Deprecated result shape retained only for protocol decoding compatibility.
 pub struct AutofillPersistResultDto {
     pub transaction_id: String,
     pub operation_id: String,

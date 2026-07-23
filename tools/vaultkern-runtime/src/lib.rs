@@ -1,4 +1,3 @@
-mod autofill_persist;
 mod command_loop;
 mod match_fill;
 pub mod native_host;

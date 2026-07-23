@@ -1544,7 +1544,6 @@ fn command_persists_vault_id(command: &RuntimeCommand) -> Option<&str> {
         | RuntimeCommand::RestoreRecycledEntry { vault_id, .. }
         | RuntimeCommand::CreateAutofillEntry { vault_id, .. }
         | RuntimeCommand::UpdateAutofillEntryFields { vault_id, .. }
-        | RuntimeCommand::PersistAutofillMutation { vault_id, .. }
         | RuntimeCommand::SavePasskeyRegistration { vault_id, .. } => Some(vault_id),
         _ => None,
     }
@@ -1614,10 +1613,6 @@ fn response_recoverably_persists_active_vault(response: &RuntimeResponse) -> boo
         RuntimeResponse::VaultMutationResult(result) => {
             recoverable_save_status(&result.publication.status)
         }
-        RuntimeResponse::AutofillPersistResult(result) => matches!(
-            &result.outcome,
-            vaultkern_runtime_protocol::AutofillPersistOutcomeDto::Durable { .. }
-        ),
         _ => false,
     }
 }
@@ -2444,7 +2439,7 @@ mod tests {
     }
 
     #[test]
-    fn atomic_persistence_commands_supersede_an_older_inline_save_receipt() {
+    fn resident_persistence_commands_supersede_an_older_inline_save_receipt() {
         assert_eq!(
             super::command_persists_vault_id(&RuntimeCommand::CreateAutofillEntry {
                 vault_id: "vault-1".into(),
@@ -2455,28 +2450,6 @@ mod tests {
                 url: "https://example.com".into(),
                 notes: "".into(),
                 totp_uri: None,
-            }),
-            Some("vault-1")
-        );
-        assert_eq!(
-            super::command_persists_vault_id(&RuntimeCommand::PersistAutofillMutation {
-                transaction_id: "transaction-1".into(),
-                operation_id: "operation-1".into(),
-                vault_id: "vault-1".into(),
-                plan: vaultkern_runtime_protocol::AutofillPersistPlanDto::Create {
-                    parent_group_id: "group-1".into(),
-                    expected_matching_entry_ids: Vec::new(),
-                    planned_entry_id: "entry-1".into(),
-                    desired_fields: vaultkern_runtime_protocol::EntryFieldsDto {
-                        title: "Title".into(),
-                        username: "alice".into(),
-                        password: "secret".into(),
-                        url: "https://example.com".into(),
-                        notes: "".into(),
-                        totp_uri: None,
-                        custom_fields: Vec::new(),
-                    },
-                },
             }),
             Some("vault-1")
         );

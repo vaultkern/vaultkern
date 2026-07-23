@@ -24,9 +24,53 @@ pub use vaultkern_model::{
     GroupTimes, MemoryProtection, ModelError, PasskeyRecord, ThreeWayPatchError,
     ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, ThreeWayPatchResult, TotpAlgorithm,
     TotpSpec, Vault, is_totp_persistent_attribute_key, prepare_entry_history_snapshot,
-    three_way_field_patch,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Vault metadata written by the retired browser atomic-persist implementation.
+///
+/// This key is migration-only. New candidates must never retain or create it.
+pub const RETIRED_AUTOFILL_RECEIPT_KEY: &str = "io.vaultkern.autofill.persist.receipts.v1";
+
+/// Removes retired Runtime-owned metadata before a vault participates in
+/// reconciliation or serialization.
+pub fn strip_retired_runtime_metadata(vault: &mut Vault) {
+    let removed = vault
+        .meta_custom_data
+        .remove(RETIRED_AUTOFILL_RECEIPT_KEY)
+        .is_some();
+    let retained_in_blocks = vault.meta_custom_data_blocks.iter().any(|block| {
+        block
+            .items
+            .iter()
+            .any(|item| item.key == RETIRED_AUTOFILL_RECEIPT_KEY)
+    });
+    if removed || retained_in_blocks {
+        canonicalize_custom_data_blocks(
+            &mut vault.meta_custom_data_blocks,
+            &mut vault.meta_opaque_xml,
+            &mut vault.meta_raw_state.node_order,
+            &vault.meta_custom_data,
+            None,
+        );
+    }
+}
+
+/// Applies the local field patch while excluding retired Runtime bookkeeping
+/// from all three domain snapshots.
+pub fn three_way_field_patch(
+    base: &Vault,
+    local: &Vault,
+    remote: &Vault,
+) -> Result<ThreeWayPatchResult, ThreeWayPatchError> {
+    let mut base = base.clone();
+    let mut local = local.clone();
+    let mut remote = remote.clone();
+    for vault in [&mut base, &mut local, &mut remote] {
+        strip_retired_runtime_metadata(vault);
+    }
+    vaultkern_model::three_way_field_patch(&base, &local, &remote)
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Attachment {
@@ -5946,6 +5990,37 @@ mod internal_tests {
             url: "https://example.com/login".into(),
             notes: "planned UUID".into(),
         }
+    }
+
+    #[test]
+    fn retired_autofill_receipts_do_not_participate_in_domain_reconciliation() {
+        let mut base = Vault::empty("Retired runtime metadata");
+        base.meta_custom_data.insert(
+            super::RETIRED_AUTOFILL_RECEIPT_KEY.into(),
+            r#"{"version":1,"receipts":[{"operationId":"base"}]}"#.into(),
+        );
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        local.meta_custom_data.insert(
+            super::RETIRED_AUTOFILL_RECEIPT_KEY.into(),
+            r#"{"version":1,"receipts":[{"operationId":"local"}]}"#.into(),
+        );
+        remote.meta_custom_data.insert(
+            super::RETIRED_AUTOFILL_RECEIPT_KEY.into(),
+            r#"{"version":1,"receipts":[{"operationId":"remote"}]}"#.into(),
+        );
+        local.name = "Local edit".into();
+
+        let patched = super::three_way_field_patch(&base, &local, &remote)
+            .expect("retired runtime metadata must not conflict");
+
+        assert_eq!(patched.vault.name, "Local edit");
+        assert!(
+            !patched
+                .vault
+                .meta_custom_data
+                .contains_key(super::RETIRED_AUTOFILL_RECEIPT_KEY)
+        );
     }
 }
 

@@ -1363,7 +1363,7 @@ fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
 }
 
 #[test]
-fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() {
+fn protocol_decodes_deprecated_autofill_persist_plans_for_compatibility() {
     fn fields(password: &str) -> EntryFieldsDto {
         EntryFieldsDto {
             title: "Example".into(),
@@ -1414,7 +1414,7 @@ fn protocol_roundtrips_atomic_autofill_persist_plans_with_snake_case_commands() 
 }
 
 #[test]
-fn protocol_roundtrips_atomic_autofill_durable_results_with_camel_case_fields() {
+fn protocol_decodes_deprecated_autofill_results_for_compatibility() {
     for disposition in [
         AutofillPersistDispositionDto::Committed,
         AutofillPersistDispositionDto::Replayed,
@@ -1462,7 +1462,7 @@ fn protocol_roundtrips_atomic_autofill_durable_results_with_camel_case_fields() 
 }
 
 #[test]
-fn protocol_roundtrips_every_atomic_autofill_conflict_code() {
+fn protocol_preserves_deprecated_autofill_conflict_codes_for_compatibility() {
     let codes = [
         AutofillPersistConflictCodeDto::ActiveVaultMismatch,
         AutofillPersistConflictCodeDto::UpdatePreconditionFailed,
@@ -1498,7 +1498,7 @@ fn protocol_roundtrips_every_atomic_autofill_conflict_code() {
 }
 
 #[test]
-fn protocol_rejects_unknown_or_malformed_atomic_autofill_results() {
+fn protocol_rejects_unknown_or_malformed_deprecated_autofill_results() {
     let unknown_outcome = serde_json::json!({
         "type": "autofill_persist_result",
         "transactionId": "transaction-1",

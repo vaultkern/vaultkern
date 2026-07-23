@@ -250,8 +250,7 @@ function shouldCancelActivePreload(
 // The Rust runtime owns and exhaustively enforces the authorization policy.
 const FRESH_VERIFICATION_COMMANDS = new Set([
   "create_autofill_entry",
-  "update_autofill_entry_fields",
-  "persist_autofill_mutation"
+  "update_autofill_entry_fields"
 ]);
 
 function commandRequiresFreshVerification(command: Record<string, unknown>) {
