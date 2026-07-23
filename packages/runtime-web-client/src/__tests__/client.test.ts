@@ -20,6 +20,18 @@ function committedEntryMutation(
   };
 }
 
+function committedVaultMutation(createdGroupId?: string) {
+  return {
+    type: "vault_mutation_result",
+    commit: "committed",
+    publication: {
+      status: "saved",
+      mergeSummary: null
+    },
+    ...(createdGroupId === undefined ? {} : { createdGroupId })
+  };
+}
+
 describe("RuntimeClient", () => {
   it("does not expose the superseded conditional create command", () => {
     const client = new RuntimeClient({ send: vi.fn() });
@@ -1666,6 +1678,196 @@ describe("RuntimeClient", () => {
       }
     });
     expect(transport.send).toHaveBeenCalledTimes(3);
+  });
+
+  it("commits group, tree, history, and recycle mutations without follow-up saves", async () => {
+    const transport = {
+      send: vi.fn(
+        async (request: {
+          operationId?: string;
+          command: { type: string };
+        }) =>
+        request.command.type === "create_group"
+          ? committedVaultMutation("group-created")
+          : committedVaultMutation()
+      )
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.createGroup("vault-1", "group-root", "Work", "create-operation")
+    ).resolves.toMatchObject({ createdGroupId: "group-created" });
+    await client.renameGroup(
+      "vault-1",
+      "group-created",
+      "Archive",
+      "rename-operation"
+    );
+    await client.moveGroup(
+      "vault-1",
+      "group-created",
+      "group-parent",
+      "move-group-operation"
+    );
+    await client.moveEntryToGroup(
+      "vault-1",
+      "entry-1",
+      "group-created",
+      "move-entry-operation"
+    );
+    await client.restoreEntryHistory(
+      "vault-1",
+      "entry-1",
+      2,
+      "restore-history-operation"
+    );
+    await client.clearEntryHistory(
+      "vault-1",
+      "entry-1",
+      "clear-history-operation"
+    );
+    await client.recycleEntry("vault-1", "entry-1", "recycle-operation");
+    await client.restoreRecycledEntry(
+      "vault-1",
+      "entry-1",
+      "group-root",
+      "restore-recycled-operation"
+    );
+    await client.deleteGroup(
+      "vault-1",
+      "group-created",
+      "delete-group-operation"
+    );
+
+    expect(
+      transport.send.mock.calls.map(([request]) => ({
+        operationId: request.operationId,
+        command: request.command
+      }))
+    ).toEqual([
+      {
+        operationId: "create-operation",
+        command: {
+          type: "create_group",
+          vault_id: "vault-1",
+          parent_group_id: "group-root",
+          title: "Work"
+        }
+      },
+      {
+        operationId: "rename-operation",
+        command: {
+          type: "rename_group",
+          vault_id: "vault-1",
+          group_id: "group-created",
+          title: "Archive"
+        }
+      },
+      {
+        operationId: "move-group-operation",
+        command: {
+          type: "move_group",
+          vault_id: "vault-1",
+          group_id: "group-created",
+          target_parent_group_id: "group-parent"
+        }
+      },
+      {
+        operationId: "move-entry-operation",
+        command: {
+          type: "move_entry_to_group",
+          vault_id: "vault-1",
+          entry_id: "entry-1",
+          target_group_id: "group-created"
+        }
+      },
+      {
+        operationId: "restore-history-operation",
+        command: {
+          type: "restore_entry_history",
+          vault_id: "vault-1",
+          entry_id: "entry-1",
+          history_index: 2
+        }
+      },
+      {
+        operationId: "clear-history-operation",
+        command: {
+          type: "clear_entry_history",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      },
+      {
+        operationId: "recycle-operation",
+        command: {
+          type: "recycle_entry",
+          vault_id: "vault-1",
+          entry_id: "entry-1"
+        }
+      },
+      {
+        operationId: "restore-recycled-operation",
+        command: {
+          type: "restore_recycled_entry",
+          vault_id: "vault-1",
+          entry_id: "entry-1",
+          target_group_id: "group-root"
+        }
+      },
+      {
+        operationId: "delete-group-operation",
+        command: {
+          type: "delete_group",
+          vault_id: "vault-1",
+          group_id: "group-created"
+        }
+      }
+    ]);
+    expect(
+      transport.send.mock.calls.some(
+        ([request]) => request.command.type === "save_vault"
+      )
+    ).toBe(false);
+  });
+
+  it("normalizes the publication bundled with a database settings commit", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        type: "database_settings_commit_result",
+        commit: "committed",
+        settings: {},
+        saveResult: {
+          status: "saved_to_cache",
+          mergeSummary: null
+        }
+      })
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.updateDatabaseSettings(
+        "vault-1",
+        { autosaveDelaySeconds: 20 },
+        "settings-operation"
+      )
+    ).resolves.toMatchObject({
+      commit: "committed",
+      saveResult: {
+        type: "save_vault_result",
+        status: "saved_to_cache"
+      }
+    });
+    expect(transport.send).toHaveBeenCalledWith({
+      version: 2,
+      operationId: "settings-operation",
+      command: {
+        type: "update_database_settings",
+        vault_id: "vault-1",
+        update: { autosaveDelaySeconds: 20 }
+      }
+    });
+    expect(transport.send).toHaveBeenCalledTimes(1);
   });
 
   it("saves a vault and returns the save status", async () => {

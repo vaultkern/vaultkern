@@ -425,15 +425,10 @@ fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
             "custom_fields": []
         }
     }));
-    assert_eq!(updated["type"], "entry_detail");
-    assert_eq!(updated["title"], "After Edit");
-
-    let saved = bridge.request(json!({
-        "version": 2,
-        "command": { "type": "save_vault", "vault_id": vault_id }
-    }));
-    assert_eq!(saved["type"], "save_vault_result");
-    assert_eq!(saved["status"], "saved");
+    assert_eq!(updated["type"], "entry_mutation_result");
+    assert_eq!(updated["commit"], "committed");
+    assert_eq!(updated["publication"]["status"], "saved");
+    assert_eq!(updated["entry"]["title"], "After Edit");
 
     let persisted = core
         .load_kdbx(&std::fs::read(&database_path).unwrap(), &key)

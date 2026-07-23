@@ -58,6 +58,7 @@ export interface DatabaseSettings {
 
 export interface DatabaseSettingsCommitResult {
   type: "database_settings_commit_result";
+  commit: "committed";
   settings: DatabaseSettings;
   saveResult: SaveVaultResult;
 }
@@ -248,11 +249,31 @@ export interface CommittedMutation<T> {
   operationId: string;
 }
 
+export interface CommittedVaultMutation {
+  saveResult: SaveVaultResult;
+  operationId: string;
+  createdGroupId?: string;
+}
+
 interface EntryMutationResponse<T> {
   type: "entry_mutation_result";
   commit: "committed";
   publication: Omit<SaveVaultResult, "type">;
   entry?: T;
+}
+
+interface VaultMutationResponse {
+  type: "vault_mutation_result";
+  commit: "committed";
+  publication: Omit<SaveVaultResult, "type">;
+  createdGroupId?: string;
+}
+
+interface DatabaseSettingsMutationResponse {
+  type: "database_settings_commit_result";
+  commit: "committed";
+  settings: DatabaseSettings;
+  saveResult: Omit<SaveVaultResult, "type">;
 }
 
 export interface EntryHistoryItem {
@@ -633,6 +654,93 @@ export class RuntimeClient {
     });
   }
 
+  async createGroup(
+    vaultId: string,
+    parentGroupId: string,
+    title: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation & { createdGroupId: string }> {
+    const result = await this.sendVaultMutationCommand(
+      {
+        type: "create_group",
+        vault_id: vaultId,
+        parent_group_id: parentGroupId,
+        title
+      },
+      operationId
+    );
+    if (result.createdGroupId === undefined) {
+      throw new TypeError("runtime omitted the created group id");
+    }
+    return { ...result, createdGroupId: result.createdGroupId };
+  }
+
+  async renameGroup(
+    vaultId: string,
+    groupId: string,
+    title: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "rename_group",
+        vault_id: vaultId,
+        group_id: groupId,
+        title
+      },
+      operationId
+    );
+  }
+
+  async moveGroup(
+    vaultId: string,
+    groupId: string,
+    targetParentGroupId: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "move_group",
+        vault_id: vaultId,
+        group_id: groupId,
+        target_parent_group_id: targetParentGroupId
+      },
+      operationId
+    );
+  }
+
+  async deleteGroup(
+    vaultId: string,
+    groupId: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "delete_group",
+        vault_id: vaultId,
+        group_id: groupId
+      },
+      operationId
+    );
+  }
+
+  async moveEntryToGroup(
+    vaultId: string,
+    entryId: string,
+    targetGroupId: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "move_entry_to_group",
+        vault_id: vaultId,
+        entry_id: entryId,
+        target_group_id: targetGroupId
+      },
+      operationId
+    );
+  }
+
   async getEntryDetail(
     vaultId: string,
     entryId: string
@@ -850,13 +958,17 @@ export class RuntimeClient {
 
   async updateDatabaseSettings(
     vaultId: string,
-    update: DatabaseSettingsUpdate
+    update: DatabaseSettingsUpdate,
+    operationId?: string
   ): Promise<DatabaseSettingsCommitResult> {
-    return this.sendCommand<DatabaseSettingsCommitResult>({
-      type: "update_database_settings",
-      vault_id: vaultId,
-      update
-    });
+    return this.sendDatabaseSettingsMutationCommand(
+      {
+        type: "update_database_settings",
+        vault_id: vaultId,
+        update
+      },
+      operationId
+    );
   }
 
   async getEntryAttachmentContent(
@@ -972,6 +1084,70 @@ export class RuntimeClient {
       entry_id: entryId,
       history_index: historyIndex
     });
+  }
+
+  async restoreEntryHistory(
+    vaultId: string,
+    entryId: string,
+    historyIndex: number,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "restore_entry_history",
+        vault_id: vaultId,
+        entry_id: entryId,
+        history_index: historyIndex
+      },
+      operationId
+    );
+  }
+
+  async clearEntryHistory(
+    vaultId: string,
+    entryId: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "clear_entry_history",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      operationId
+    );
+  }
+
+  async recycleEntry(
+    vaultId: string,
+    entryId: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "recycle_entry",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      operationId
+    );
+  }
+
+  async restoreRecycledEntry(
+    vaultId: string,
+    entryId: string,
+    targetGroupId?: string,
+    operationId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand(
+      {
+        type: "restore_recycled_entry",
+        vault_id: vaultId,
+        entry_id: entryId,
+        target_group_id: targetGroupId
+      },
+      operationId
+    );
   }
 
   async findFillCandidates(
@@ -1090,6 +1266,78 @@ export class RuntimeClient {
       },
       operationId
     };
+  }
+
+  private async sendVaultMutationCommand(
+    command: Record<string, unknown>,
+    requestedOperationId?: string
+  ): Promise<CommittedVaultMutation> {
+    const operationId = requestedOperationId ?? createLogicalOperationId();
+    const response = await this.sendCommittedCommand<VaultMutationResponse>(
+      command,
+      operationId
+    );
+    if (
+      response.type !== "vault_mutation_result" ||
+      response.commit !== "committed"
+    ) {
+      throw new TypeError("runtime returned an invalid committed vault mutation");
+    }
+    return {
+      saveResult: {
+        type: "save_vault_result",
+        ...response.publication
+      },
+      operationId,
+      ...(response.createdGroupId === undefined
+        ? {}
+        : { createdGroupId: response.createdGroupId })
+    };
+  }
+
+  private async sendDatabaseSettingsMutationCommand(
+    command: Record<string, unknown>,
+    requestedOperationId?: string
+  ): Promise<DatabaseSettingsCommitResult> {
+    const operationId = requestedOperationId ?? createLogicalOperationId();
+    const response =
+      await this.sendCommittedCommand<DatabaseSettingsMutationResponse>(
+        command,
+        operationId
+      );
+    if (
+      response.type !== "database_settings_commit_result" ||
+      response.commit !== "committed"
+    ) {
+      throw new TypeError(
+        "runtime returned an invalid committed database settings mutation"
+      );
+    }
+    return {
+      ...response,
+      saveResult: {
+        type: "save_vault_result",
+        ...response.saveResult
+      }
+    };
+  }
+
+  private async sendCommittedCommand<T>(
+    command: Record<string, unknown>,
+    operationId: string
+  ): Promise<T> {
+    try {
+      return await this.sendCommand<T>(command, operationId);
+    } catch (error) {
+      if (!isAmbiguousMutationFailure(error)) {
+        throw error;
+      }
+      try {
+        return await this.sendCommand<T>(command, operationId);
+      } catch (retryError) {
+        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
+      }
+    }
   }
 
   private async sendMutationSave(

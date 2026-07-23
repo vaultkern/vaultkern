@@ -1533,6 +1533,15 @@ fn command_persists_vault_id(command: &RuntimeCommand) -> Option<&str> {
     match command {
         RuntimeCommand::SaveVault { vault_id }
         | RuntimeCommand::UpdateDatabaseSettings { vault_id, .. }
+        | RuntimeCommand::CreateGroup { vault_id, .. }
+        | RuntimeCommand::RenameGroup { vault_id, .. }
+        | RuntimeCommand::MoveGroup { vault_id, .. }
+        | RuntimeCommand::DeleteGroup { vault_id, .. }
+        | RuntimeCommand::MoveEntryToGroup { vault_id, .. }
+        | RuntimeCommand::RestoreEntryHistory { vault_id, .. }
+        | RuntimeCommand::ClearEntryHistory { vault_id, .. }
+        | RuntimeCommand::RecycleEntry { vault_id, .. }
+        | RuntimeCommand::RestoreRecycledEntry { vault_id, .. }
         | RuntimeCommand::PersistAutofillMutation { vault_id, .. }
         | RuntimeCommand::SavePasskeyRegistration { vault_id, .. } => Some(vault_id),
         _ => None,
@@ -1600,6 +1609,9 @@ fn response_recoverably_persists_active_vault(response: &RuntimeResponse) -> boo
         RuntimeResponse::DatabaseSettingsCommitResult(result) => {
             recoverable_save_status(&result.save_result.status)
         }
+        RuntimeResponse::VaultMutationResult(result) => {
+            recoverable_save_status(&result.publication.status)
+        }
         RuntimeResponse::AutofillPersistResult(result) => matches!(
             &result.outcome,
             vaultkern_runtime_protocol::AutofillPersistOutcomeDto::Durable { .. }
@@ -1633,6 +1645,7 @@ fn response_commits_active_vault(value: &RuntimeResponse) -> bool {
     let status = match value {
         RuntimeResponse::SaveVaultResult(result) => Some(&result.status),
         RuntimeResponse::DatabaseSettingsCommitResult(result) => Some(&result.save_result.status),
+        RuntimeResponse::VaultMutationResult(result) => Some(&result.publication.status),
         _ => None,
     };
     matches!(
@@ -1680,8 +1693,8 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use vaultkern_runtime_protocol::{
-        ProtocolEnvelope, ResidentAppRouteDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-        SaveVaultStatusDto, VaultSourceStatusDto,
+        CommitStatusDto, ProtocolEnvelope, ResidentAppRouteDto, RuntimeCommand, RuntimeResponse,
+        SaveVaultResultDto, SaveVaultStatusDto, VaultMutationResultDto, VaultSourceStatusDto,
     };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
@@ -2461,6 +2474,30 @@ mod tests {
             }),
             Some("vault-1")
         );
+        assert_eq!(
+            super::command_persists_vault_id(&RuntimeCommand::CreateGroup {
+                vault_id: "vault-1".into(),
+                parent_group_id: "group-root".into(),
+                title: "Work".into(),
+            }),
+            Some("vault-1")
+        );
+    }
+
+    #[test]
+    fn vault_mutation_commit_updates_resident_persistence_state() {
+        let response = RuntimeResponse::VaultMutationResult(VaultMutationResultDto {
+            commit: CommitStatusDto::Committed,
+            publication: SaveVaultResultDto {
+                status: SaveVaultStatusDto::SavedToCache,
+                merge_summary: None,
+                conflict_copy_path: None,
+            },
+            created_group_id: Some("group-created".into()),
+        });
+
+        assert!(super::response_recoverably_persists_active_vault(&response));
+        assert!(super::response_commits_active_vault(&response));
     }
 
     #[test]

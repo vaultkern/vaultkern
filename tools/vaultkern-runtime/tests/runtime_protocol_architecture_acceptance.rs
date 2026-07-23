@@ -2,12 +2,15 @@ mod support;
 
 use support::RuntimeProtocolHarness;
 use vaultkern_core::{
-    CompositeKey, EntryCreate, EntryCustomFieldInput, KeepassCore, PasskeyRecord, SaveProfile,
-    TotpAlgorithm, TotpSpec, Vault, derive_transformed_key, save_kdbx_with_transformed_key,
+    CompositeKey, EntryCreate, EntryCustomFieldInput, EntryUpdate, KeepassCore, PasskeyRecord,
+    SaveProfile, TotpAlgorithm, TotpSpec, Vault, derive_transformed_key,
+    save_kdbx_with_transformed_key,
 };
 use vaultkern_runtime_protocol::{
-    CommitStatusDto, EntryCustomFieldDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse,
-    SaveVaultStatusDto,
+    CommitStatusDto, DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto,
+    DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
+    DatabaseSettingsUpdateDto, EntryCustomFieldDto, OptionalSettingUpdateDto, PROTOCOL_VERSION,
+    RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
 };
 
 fn key() -> CompositeKey {
@@ -149,6 +152,44 @@ fn vault_with_entry_adjacent_data_bytes() -> (Vec<u8>, String) {
     (bytes, entry_id)
 }
 
+fn vault_with_remaining_mutation_data_bytes() -> (Vec<u8>, String, String) {
+    let core = KeepassCore::new();
+    let mut vault = Vault::empty("Remaining Mutation Acceptance");
+    let root_id = vault.root.id.to_string();
+    let entry_id = core
+        .add_entry(
+            &mut vault,
+            &root_id,
+            EntryCreate {
+                title: "Historic account".into(),
+                username: "historic-user".into(),
+                password: "historic-password".into(),
+                url: "https://history.example".into(),
+                notes: "history snapshot".into(),
+            },
+        )
+        .expect("create history restoration entry")
+        .id;
+    core.snapshot_entry_to_history(&mut vault, &entry_id)
+        .expect("seed entry history");
+    core.update_entry_fields(
+        &mut vault,
+        &entry_id,
+        EntryUpdate {
+            title: Some("Current account".into()),
+            username: Some("current-user".into()),
+            password: Some("current-password".into()),
+            url: Some("https://current.example".into()),
+            notes: Some("current state".into()),
+        },
+    )
+    .expect("seed current entry state");
+    let bytes = core
+        .save_kdbx(&vault, &key(), SaveProfile::recommended())
+        .expect("encode remaining-mutation acceptance vault");
+    (bytes, root_id, entry_id)
+}
+
 fn expect_adjacent_commit(
     response: RuntimeResponse,
     expected_status: SaveVaultStatusDto,
@@ -169,6 +210,45 @@ fn expect_adjacent_commit(
     result
         .entry
         .expect("entry-adjacent mutation returns detail")
+}
+
+fn expect_vault_commit(
+    response: RuntimeResponse,
+    expected_status: SaveVaultStatusDto,
+) -> Option<String> {
+    let RuntimeResponse::VaultMutationResult(result) = response else {
+        panic!("expected committed vault mutation");
+    };
+    assert_eq!(result.commit, CommitStatusDto::Committed);
+    assert_eq!(result.publication.status, expected_status);
+    result.created_group_id
+}
+
+fn group_tree_contains(
+    group: &vaultkern_runtime_protocol::GroupNodeDto,
+    group_id: &str,
+    title: &str,
+) -> bool {
+    (group.id == group_id && group.title == title)
+        || group
+            .children
+            .iter()
+            .any(|child| group_tree_contains(child, group_id, title))
+}
+
+fn expect_history_len(
+    harness: &mut RuntimeProtocolHarness,
+    vault_id: &str,
+    entry_id: &str,
+    expected: usize,
+) {
+    match harness.command(RuntimeCommand::ListEntryHistory {
+        vault_id: vault_id.into(),
+        entry_id: entry_id.into(),
+    }) {
+        RuntimeResponse::EntryHistoryList(history) => assert_eq!(history.items.len(), expected),
+        other => panic!("expected entry history list, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1294,6 +1374,531 @@ fn entry_adjacent_pending_commits_survive_restart_and_publish_in_receive_order()
 }
 
 #[test]
+fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
+    let core = KeepassCore::new();
+    let (bytes, root_id, entry_id) = vault_with_remaining_mutation_data_bytes();
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+            "database-settings".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+    let writes_before = harness.provider_write_count();
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateDatabaseSettings {
+            vault_id: vault_id.clone(),
+            update: DatabaseSettingsUpdateDto {
+                credentials: Some(DatabaseCredentialsUpdateDto {
+                    new_password: Some("not-an-implicit-settings-write".into()),
+                    remove_password: false,
+                }),
+                ..DatabaseSettingsUpdateDto::default()
+            },
+        }),
+        RuntimeResponse::Error(error)
+            if error.message.contains("fresh authenticated credential-update flow")
+    ));
+    assert_eq!(
+        harness.provider_write_count(),
+        writes_before,
+        "credential invariants reject an implicit settings write before Publication"
+    );
+
+    let parent_group_id = expect_vault_commit(
+        harness.command(RuntimeCommand::CreateGroup {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id.clone(),
+            title: "Working Parent".into(),
+        }),
+        SaveVaultStatusDto::Saved,
+    )
+    .expect("create parent group returns its id");
+    let group_id = expect_vault_commit(
+        harness.command(RuntimeCommand::CreateGroup {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id.clone(),
+            title: "Working".into(),
+        }),
+        SaveVaultStatusDto::Saved,
+    )
+    .expect("create child group returns its id");
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RenameGroup {
+            vault_id: vault_id.clone(),
+            group_id: group_id.clone(),
+            title: "Archive".into(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_vault_commit(
+        harness.command(RuntimeCommand::MoveGroup {
+            vault_id: vault_id.clone(),
+            group_id: group_id.clone(),
+            target_parent_group_id: parent_group_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_vault_commit(
+        harness.command(RuntimeCommand::MoveEntryToGroup {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            target_group_id: group_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RestoreEntryHistory {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            history_index: 0,
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_vault_commit(
+        harness.command(RuntimeCommand::ClearEntryHistory {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_history_len(&mut harness, &vault_id, &entry_id, 0);
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RecycleEntry {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_history_len(&mut harness, &vault_id, &entry_id, 0);
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RestoreRecycledEntry {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            target_group_id: Some(root_id.clone()),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_history_len(&mut harness, &vault_id, &entry_id, 0);
+    expect_vault_commit(
+        harness.command(RuntimeCommand::DeleteGroup {
+            vault_id: vault_id.clone(),
+            group_id: parent_group_id.clone(),
+        }),
+        SaveVaultStatusDto::Saved,
+    );
+    expect_history_len(&mut harness, &vault_id, &entry_id, 0);
+
+    let current_settings = match harness.command(RuntimeCommand::GetDatabaseSettings {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::DatabaseSettings(settings) => settings,
+        other => panic!("expected current database settings, got {other:?}"),
+    };
+    let settings_result = match harness.command(RuntimeCommand::UpdateDatabaseSettings {
+        vault_id: vault_id.clone(),
+        update: DatabaseSettingsUpdateDto {
+            metadata: Some(DatabaseMetadataSettingsDto {
+                name: "Published Settings".into(),
+                description: Some("committed with the vault".into()),
+                default_username: Some("settings-user".into()),
+            }),
+            history: Some(DatabaseHistorySettingsDto {
+                max_items_per_entry: Some(7),
+                max_total_size_bytes: Some(70_000),
+            }),
+            recycle_bin: Some(DatabaseRecycleBinSettingsDto { enabled: false }),
+            encryption: Some(DatabaseEncryptionSettingsDto {
+                compression: "none".into(),
+                cipher: "chacha20".into(),
+                kdf: current_settings.encryption.kdf,
+            }),
+            autosave_delay_seconds: OptionalSettingUpdateDto::Set(15),
+            ..DatabaseSettingsUpdateDto::default()
+        },
+    }) {
+        RuntimeResponse::DatabaseSettingsCommitResult(result) => result,
+        other => panic!("expected committed database settings, got {other:?}"),
+    };
+    assert_eq!(settings_result.commit, CommitStatusDto::Committed);
+    assert_eq!(
+        settings_result.save_result.status,
+        SaveVaultStatusDto::Saved
+    );
+    expect_history_len(&mut harness, &vault_id, &entry_id, 0);
+    assert_eq!(harness.provider_write_count(), writes_before + 11);
+
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode published remaining mutations");
+    assert_eq!(published.vault.name, "Published Settings");
+    assert_eq!(published.vault.history_max_items, Some(7));
+    assert_eq!(published.vault.recycle_bin_enabled, Some(false));
+    assert!(
+        core.find_group_view_by_id(&published.vault, &group_id)
+            .is_none()
+    );
+    assert!(
+        core.find_group_view_by_id(&published.vault, &parent_group_id)
+            .is_none()
+    );
+    let restored = core
+        .project_entry_detail(&published.vault, &entry_id)
+        .expect("project restored entry");
+    assert_eq!(restored.title, "Historic account");
+    assert!(
+        core.list_entry_history(&published.vault, &entry_id)
+            .expect("project cleared history")
+            .is_empty()
+    );
+    assert!(
+        core.list_deleted_objects(&published.vault)
+            .iter()
+            .all(|deleted| deleted.id != entry_id)
+    );
+    assert_eq!(
+        published.inspection.header.compression,
+        vaultkern_core::Compression::None
+    );
+    assert_eq!(
+        published.inspection.header.cipher,
+        vaultkern_core::KdbxCipher::ChaCha20
+    );
+}
+
+#[test]
+fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
+    let core = KeepassCore::new();
+    let (bytes, root_id, entry_id) = vault_with_remaining_mutation_data_bytes();
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+            "database-settings".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+    let remote_before = harness.provider_snapshot();
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    let group_id = expect_vault_commit(
+        harness.command(RuntimeCommand::CreateGroup {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id,
+            title: "Pending Group".into(),
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    )
+    .expect("pending group creation returns its id");
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_vault_commit(
+        harness.command(RuntimeCommand::MoveEntryToGroup {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            target_group_id: group_id.clone(),
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RestoreEntryHistory {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            history_index: 0,
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RecycleEntry {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    expect_vault_commit(
+        harness.command(RuntimeCommand::RestoreRecycledEntry {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            target_group_id: Some(group_id.clone()),
+        }),
+        SaveVaultStatusDto::SavedToCache,
+    );
+
+    let current_settings = match harness.command(RuntimeCommand::GetDatabaseSettings {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::DatabaseSettings(settings) => settings,
+        other => panic!("expected current settings, got {other:?}"),
+    };
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    let settings_result = match harness.command(RuntimeCommand::UpdateDatabaseSettings {
+        vault_id: vault_id.clone(),
+        update: DatabaseSettingsUpdateDto {
+            metadata: Some(DatabaseMetadataSettingsDto {
+                name: "Pending Settings".into(),
+                description: Some("survives restart".into()),
+                default_username: Some("pending-user".into()),
+            }),
+            history: Some(DatabaseHistorySettingsDto {
+                max_items_per_entry: Some(5),
+                max_total_size_bytes: Some(50_000),
+            }),
+            recycle_bin: Some(DatabaseRecycleBinSettingsDto { enabled: true }),
+            encryption: Some(DatabaseEncryptionSettingsDto {
+                compression: "none".into(),
+                cipher: "chacha20".into(),
+                kdf: current_settings.encryption.kdf,
+            }),
+            ..DatabaseSettingsUpdateDto::default()
+        },
+    }) {
+        RuntimeResponse::DatabaseSettingsCommitResult(result) => result,
+        other => panic!("expected pending settings commit, got {other:?}"),
+    };
+    assert_eq!(settings_result.commit, CommitStatusDto::Committed);
+    assert_eq!(
+        settings_result.save_result.status,
+        SaveVaultStatusDto::SavedToCache
+    );
+    assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
+
+    harness.command(RuntimeCommand::LockSession);
+    harness.restart_resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+            "database-settings".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            assert!(state.unlocked);
+            assert!(
+                state
+                    .source_status
+                    .is_some_and(|status| status.remote_state == "pending_sync")
+            );
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted pending session, got {other:?}"),
+    };
+
+    let groups = match harness.command(RuntimeCommand::ListGroups {
+        vault_id: restarted_vault_id.clone(),
+    }) {
+        RuntimeResponse::GroupTree(groups) => groups,
+        other => panic!("expected recovered group tree, got {other:?}"),
+    };
+    assert!(group_tree_contains(
+        &groups.root,
+        &group_id,
+        "Pending Group"
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::ListEntries {
+            vault_id: restarted_vault_id.clone(),
+        }),
+        RuntimeResponse::EntryList(entries)
+            if entries.entries.iter().any(|entry| {
+                entry.id == entry_id
+                    && entry.title == "Historic account"
+                    && entry.group_id == group_id
+            })
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::GetDatabaseSettings {
+            vault_id: restarted_vault_id.clone(),
+        }),
+        RuntimeResponse::DatabaseSettings(settings)
+            if settings.metadata.name == "Pending Settings"
+                && settings.history.max_items_per_entry == Some(5)
+                && settings.encryption.cipher == "chacha20"
+    ));
+
+    match harness.command(RuntimeCommand::RetryVaultSourceSync {
+        vault_id: restarted_vault_id.clone(),
+    }) {
+        RuntimeResponse::VaultSourceStatus(status) => {
+            assert_eq!(status.remote_state, "pending_sync", "{status:?}");
+        }
+        other => panic!("expected pending retry status, got {other:?}"),
+    }
+    assert!(matches!(
+        harness.command(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: restarted_vault_id,
+        }),
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
+
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode restarted remaining-mutation publication");
+    assert_eq!(published.vault.name, "Pending Settings");
+    assert_eq!(published.vault.history_max_items, Some(5));
+    assert!(
+        core.find_group_view_by_id(&published.vault, &group_id)
+            .is_some_and(|group| group.title == "Pending Group")
+    );
+    let restored = core
+        .project_entry_detail(&published.vault, &entry_id)
+        .expect("project restarted restored entry");
+    assert_eq!(restored.title, "Historic account");
+    assert_eq!(
+        core.find_entry_view_by_id(&published.vault, &entry_id)
+            .expect("project restarted entry group-independent view")
+            .id,
+        entry_id
+    );
+    assert_eq!(
+        published.inspection.header.cipher,
+        vaultkern_core::KdbxCipher::ChaCha20
+    );
+}
+
+#[test]
+fn remaining_kdbx_mutation_reconciles_repeated_stale_heads_from_fixed_base() {
+    let core = KeepassCore::new();
+    let (base_bytes, root_id, _) = vault_with_remaining_mutation_data_bytes();
+    let mut first_remote = core
+        .load_database(&base_bytes, &key())
+        .expect("decode remaining-mutation Base")
+        .vault;
+    let first_remote_id = core
+        .add_entry(
+            &mut first_remote,
+            &root_id,
+            EntryCreate {
+                title: "First remote tree edit".into(),
+                username: "remote-one".into(),
+                password: "remote-one-password".into(),
+                url: "https://remote-one.example".into(),
+                notes: String::new(),
+            },
+        )
+        .expect("create first remote tree edit")
+        .id;
+    let first_remote_bytes = core
+        .save_kdbx(&first_remote, &key(), SaveProfile::recommended())
+        .expect("encode first remaining-mutation Remote Head");
+
+    let mut second_remote = first_remote;
+    let second_remote_id = core
+        .add_entry(
+            &mut second_remote,
+            &root_id,
+            EntryCreate {
+                title: "Second remote tree edit".into(),
+                username: "remote-two".into(),
+                password: "remote-two-password".into(),
+                url: "https://remote-two.example".into(),
+                notes: String::new(),
+            },
+        )
+        .expect("create second remote tree edit")
+        .id;
+    let second_remote_bytes = core
+        .save_kdbx(&second_remote, &key(), SaveProfile::recommended())
+        .expect("encode second remaining-mutation Remote Head");
+
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+    harness.reject_next_publication_as_stale(first_remote_bytes);
+    harness.reject_next_publication_as_stale(second_remote_bytes);
+
+    let group_id = expect_vault_commit(
+        harness.command(RuntimeCommand::CreateGroup {
+            vault_id,
+            parent_group_id: root_id,
+            title: "Local reconciled group".into(),
+        }),
+        SaveVaultStatusDto::Merged,
+    )
+    .expect("reconciled group creation returns its id");
+
+    let published = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode reconciled remaining-mutation Publication")
+        .vault;
+    assert!(
+        core.find_group_view_by_id(&published, &group_id)
+            .is_some_and(|group| group.title == "Local reconciled group")
+    );
+    assert!(
+        core.find_entry_view_by_id(&published, &first_remote_id)
+            .is_some_and(|entry| entry.title == "First remote tree edit")
+    );
+    assert!(
+        core.find_entry_view_by_id(&published, &second_remote_id)
+            .is_some_and(|entry| entry.title == "Second remote tree edit")
+    );
+}
+
+#[test]
 fn harness_keeps_browser_commands_behind_the_protocol_session_boundary() {
     let mut harness = RuntimeProtocolHarness::browser_with_in_memory_vault(empty_vault_bytes());
     harness.command(RuntimeCommand::Handshake {
@@ -1308,6 +1913,14 @@ fn harness_keeps_browser_commands_behind_the_protocol_session_boundary() {
     assert!(matches!(
         harness.command(RuntimeCommand::OpenLocalVault {
             path: "/not-authorized.kdbx".into(),
+        }),
+        RuntimeResponse::Error(error) if error.code == "browser_command_forbidden"
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateGroup {
+            vault_id: "not-authorized".into(),
+            parent_group_id: "not-authorized".into(),
+            title: "not-authorized".into(),
         }),
         RuntimeResponse::Error(error) if error.code == "browser_command_forbidden"
     ));

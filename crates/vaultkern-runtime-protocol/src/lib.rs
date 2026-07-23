@@ -237,6 +237,48 @@ pub enum RuntimeCommand {
         entry_id: String,
         history_index: usize,
     },
+    CreateGroup {
+        vault_id: String,
+        parent_group_id: String,
+        title: String,
+    },
+    RenameGroup {
+        vault_id: String,
+        group_id: String,
+        title: String,
+    },
+    MoveGroup {
+        vault_id: String,
+        group_id: String,
+        target_parent_group_id: String,
+    },
+    DeleteGroup {
+        vault_id: String,
+        group_id: String,
+    },
+    MoveEntryToGroup {
+        vault_id: String,
+        entry_id: String,
+        target_group_id: String,
+    },
+    RestoreEntryHistory {
+        vault_id: String,
+        entry_id: String,
+        history_index: usize,
+    },
+    ClearEntryHistory {
+        vault_id: String,
+        entry_id: String,
+    },
+    RecycleEntry {
+        vault_id: String,
+        entry_id: String,
+    },
+    RestoreRecycledEntry {
+        vault_id: String,
+        entry_id: String,
+        target_group_id: Option<String>,
+    },
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
@@ -503,6 +545,7 @@ pub enum RuntimeResponse {
     EntryList(EntryListDto),
     EntryDetail(EntryDetailDto),
     EntryMutationResult(EntryMutationResultDto),
+    VaultMutationResult(VaultMutationResultDto),
     EntryHistoryList(EntryHistoryListDto),
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
@@ -649,6 +692,7 @@ pub struct DatabaseSettingsDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseSettingsCommitResultDto {
+    pub commit: CommitStatusDto,
     pub settings: DatabaseSettingsDto,
     pub save_result: SaveVaultResultDto,
 }
@@ -1309,6 +1353,15 @@ impl Zeroize for EntryMutationResultDto {
 }
 
 impl ZeroizeOnDrop for EntryMutationResultDto {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultMutationResultDto {
+    pub commit: CommitStatusDto,
+    pub publication: SaveVaultResultDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_group_id: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

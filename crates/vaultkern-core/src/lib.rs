@@ -3400,7 +3400,29 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
-        entry.history.clear();
+        prepare_entry_history_snapshot(entry);
+        Ok(project_entry(entry))
+    }
+
+    pub fn restore_entry_history(
+        &self,
+        vault: &mut Vault,
+        entry_id: &str,
+        history_index: usize,
+    ) -> Result<EntryView, MutationError> {
+        let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
+            .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        let mut restored = entry
+            .history
+            .get(history_index)
+            .cloned()
+            .ok_or(MutationError::HistoryIndexOutOfBounds(history_index))?;
+        let retained_history = std::mem::take(&mut entry.history);
+        restored.id = entry.id;
+        restored.previous_parent = entry.previous_parent;
+        restored.location_changed_at = entry.location_changed_at;
+        restored.history = retained_history;
+        *entry = restored;
         Ok(project_entry(entry))
     }
 
@@ -5297,6 +5319,131 @@ mod internal_tests {
         assert_eq!(
             snapshot.opaque_xml[0].after.as_ref(),
             Some(&auto_type_anchor)
+        );
+    }
+
+    #[test]
+    fn history_clear_removes_history_fidelity_with_anchor_mapping() {
+        let auto_type_anchor = vaultkern_model::OpaqueXmlAnchor {
+            element_name: "AutoType".into(),
+            occurrence: 1,
+        };
+        let mut entry = Entry::new("current");
+        let entry_id = entry.id.to_string();
+        let mut snapshot = entry.clone();
+        super::prepare_entry_history_snapshot(&mut snapshot);
+        entry.history.push(snapshot);
+        entry.raw_state.has_history_node = true;
+        entry.raw_state.node_order = vec!["AutoType".into(), "History".into()];
+        entry.opaque_xml = vec![vaultkern_model::OpaqueXmlFragment {
+            xml: "<AfterHistory />".into(),
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "History".into(),
+                occurrence: 1,
+            }),
+        }];
+        let mut vault = Vault::empty("clear");
+        vault.root.entries.push(entry);
+
+        KeepassCore::new()
+            .clear_entry_history(&mut vault, &entry_id)
+            .expect("clear entry history");
+
+        let entry = &vault.root.entries[0];
+        assert!(entry.history.is_empty());
+        assert!(!entry.raw_state.has_history_node);
+        assert_eq!(entry.raw_state.node_order, ["AutoType"]);
+        assert_eq!(entry.opaque_xml[0].after.as_ref(), Some(&auto_type_anchor));
+    }
+
+    #[test]
+    fn history_restore_keeps_current_entry_lineage() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("History");
+        let mut entry = Entry::new("Current");
+        let entry_id = entry.id.to_string();
+        let current_id = entry.id;
+        let current_previous_parent = Uuid::from_u128(10);
+        entry.previous_parent = Some(current_previous_parent);
+        entry.location_changed_at = Some(200);
+        let mut snapshot = entry.clone();
+        snapshot.id = Uuid::from_u128(20);
+        snapshot.title = "Older".into();
+        snapshot.username = "historic-user".into();
+        snapshot.previous_parent = Some(Uuid::from_u128(30));
+        snapshot.location_changed_at = Some(100);
+        snapshot.history.clear();
+        entry.history.push(snapshot);
+        vault.root.entries.push(entry);
+
+        let restored = core
+            .restore_entry_history(&mut vault, &entry_id, 0)
+            .expect("restore history");
+        let entry = &vault.root.entries[0];
+
+        assert_eq!(restored.id, entry_id);
+        assert_eq!(restored.title, "Older");
+        assert_eq!(restored.history_count, 1);
+        assert_eq!(entry.id, current_id);
+        assert_eq!(entry.username, "historic-user");
+        assert_eq!(entry.previous_parent, Some(current_previous_parent));
+        assert_eq!(entry.location_changed_at, Some(200));
+        assert_eq!(entry.history.len(), 1);
+        assert_eq!(entry.history[0].title, "Older");
+    }
+
+    #[test]
+    fn invalid_history_restore_is_atomic() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("History");
+        let mut entry = Entry::new("Current");
+        let entry_id = entry.id.to_string();
+        let mut snapshot = entry.clone();
+        snapshot.title = "Older".into();
+        snapshot.history.clear();
+        entry.history.push(snapshot);
+        vault.root.entries.push(entry);
+        let before = vault.clone();
+
+        assert_eq!(
+            core.restore_entry_history(&mut vault, &entry_id, 1),
+            Err(MutationError::HistoryIndexOutOfBounds(1))
+        );
+        assert_eq!(vault, before);
+    }
+
+    #[test]
+    fn restored_then_cleared_history_stays_empty_after_kdbx_roundtrip() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("History");
+        let mut entry = Entry::new("Historic");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry.clone());
+        core.snapshot_entry_to_history(&mut vault, &entry_id)
+            .expect("snapshot historic state");
+        entry = vault.root.entries.remove(0);
+        entry.title = "Current".into();
+        vault.root.entries.push(entry);
+        core.snapshot_entry_to_history(&mut vault, &entry_id)
+            .expect("snapshot current state");
+        core.restore_entry_history(&mut vault, &entry_id, 0)
+            .expect("restore historic state");
+        core.clear_entry_history(&mut vault, &entry_id)
+            .expect("clear restored history");
+
+        let mut key = CompositeKey::default();
+        key.add_password("history-clear");
+        let bytes = core
+            .save_kdbx(&vault, &key, SaveProfile::recommended())
+            .expect("save cleared history");
+        let loaded = core
+            .load_kdbx(&bytes, &key)
+            .expect("reload cleared history");
+
+        assert!(
+            core.list_entry_history(&loaded, &entry_id)
+                .expect("list cleared history")
+                .is_empty()
         );
     }
 

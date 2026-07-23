@@ -18,7 +18,8 @@ use vaultkern_runtime_protocol::{
     PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
     PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
     RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
-    VaultHandleDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
+    VaultHandleDto, VaultMutationResultDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 
 static_assertions::assert_not_impl_any!(RuntimeResponse: Clone);
@@ -235,6 +236,7 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
 
     let commit_response =
         RuntimeResponse::DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto {
+            commit: CommitStatusDto::Committed,
             settings,
             save_result: SaveVaultResultDto {
                 status: SaveVaultStatusDto::Saved,
@@ -244,11 +246,90 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
         });
     let value = serde_json::to_value(&commit_response).expect("serialize commit response");
     assert_eq!(value["type"], "database_settings_commit_result");
+    assert_eq!(value["commit"], "committed");
     assert_eq!(value["settings"]["metadata"]["name"], "Project Vault");
     assert_eq!(value["saveResult"]["status"], "saved");
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(value).expect("deserialize commit response"),
         commit_response
+    );
+}
+
+#[test]
+fn protocol_roundtrips_remaining_vault_mutations_and_commit_result() {
+    let commands = [
+        RuntimeCommand::CreateGroup {
+            vault_id: "vault-1".into(),
+            parent_group_id: "group-root".into(),
+            title: "Work".into(),
+        },
+        RuntimeCommand::RenameGroup {
+            vault_id: "vault-1".into(),
+            group_id: "group-1".into(),
+            title: "Archive".into(),
+        },
+        RuntimeCommand::MoveGroup {
+            vault_id: "vault-1".into(),
+            group_id: "group-1".into(),
+            target_parent_group_id: "group-2".into(),
+        },
+        RuntimeCommand::DeleteGroup {
+            vault_id: "vault-1".into(),
+            group_id: "group-1".into(),
+        },
+        RuntimeCommand::MoveEntryToGroup {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+            target_group_id: "group-1".into(),
+        },
+        RuntimeCommand::RestoreEntryHistory {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+            history_index: 2,
+        },
+        RuntimeCommand::ClearEntryHistory {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        },
+        RuntimeCommand::RecycleEntry {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+        },
+        RuntimeCommand::RestoreRecycledEntry {
+            vault_id: "vault-1".into(),
+            entry_id: "entry-1".into(),
+            target_group_id: Some("group-root".into()),
+        },
+    ];
+    for command in commands {
+        let envelope = ProtocolEnvelope::new(command);
+        assert_eq!(
+            serde_json::from_value::<ProtocolEnvelope>(
+                serde_json::to_value(&envelope).expect("serialize vault mutation command")
+            )
+            .expect("deserialize vault mutation command"),
+            envelope
+        );
+    }
+
+    let response = RuntimeResponse::VaultMutationResult(VaultMutationResultDto {
+        commit: CommitStatusDto::Committed,
+        publication: SaveVaultResultDto {
+            status: SaveVaultStatusDto::SavedToCache,
+            merge_summary: None,
+            conflict_copy_path: None,
+        },
+        created_group_id: Some("group-created".into()),
+    });
+    let value = serde_json::to_value(&response).expect("serialize vault mutation result");
+    assert_eq!(value["type"], "vault_mutation_result");
+    assert_eq!(value["commit"], "committed");
+    assert_eq!(value["publication"]["status"], "saved_to_cache");
+    assert_eq!(value["createdGroupId"], "group-created");
+    assert_eq!(
+        serde_json::from_value::<RuntimeResponse>(value)
+            .expect("deserialize vault mutation result"),
+        response
     );
 }
 

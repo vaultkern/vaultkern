@@ -20,9 +20,9 @@ use uuid::Uuid;
 use vaultkern_core::{
     AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, CustomDataItemInput, Entry,
     EntryAttachmentInput, EntryCreate, EntryCustomDataInput, EntryCustomFieldInput,
-    EntryTimesUpdate, EntryUpdate, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher,
-    KdbxError, KdbxVaultCodec, KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf, SaveProfile,
-    ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, TotpSpec, TransformedKey,
+    EntryTimesUpdate, EntryUpdate, ExternalKdfConfirmation, ExternalKdfPolicy, GroupMetadataUpdate,
+    KdbxCipher, KdbxError, KdbxVaultCodec, KdbxVersion, KeepassCore, PasskeyRecord, SaveKdf,
+    SaveProfile, ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, TotpSpec, TransformedKey,
     VAULTKERN_KDBX_GENERATOR, Vault, VaultBinTemplateMetadataUpdate, VaultCodec,
     VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate, VaultMetadataUpdate,
     enforce_history_limits, parse_key_file_bytes, retained_or_recommended_save_kdf,
@@ -48,8 +48,8 @@ use vaultkern_runtime_protocol::{
     PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
     PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
     PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
-    SaveVaultResultDto, SaveVaultStatusDto, SensitiveString, VaultHandleDto, VaultReferenceDto,
-    VaultReferenceListDto, VaultSourceStatusDto,
+    SaveVaultResultDto, SaveVaultStatusDto, SensitiveString, VaultHandleDto,
+    VaultMutationResultDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -2645,6 +2645,7 @@ impl Runtime {
                 .get_database_settings(vault_id)
                 .unwrap_or(updated_settings);
             Ok(DatabaseSettingsCommitResultDto {
+                commit: CommitStatusDto::Committed,
                 settings,
                 save_result,
             })
@@ -2654,6 +2655,35 @@ impl Runtime {
             self.restore_loaded_after_failed_commit(vault_id, previous);
         }
 
+        result
+    }
+
+    fn commit_vault_mutation(
+        &mut self,
+        vault_id: &str,
+        mutation: impl FnOnce(&mut Self) -> Result<Option<String>>,
+    ) -> Result<VaultMutationResultDto> {
+        let previous = self
+            .vault_session
+            .find_loaded(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?
+            .clone();
+
+        let result = (|| {
+            let created_group_id = mutation(self)?;
+            let RuntimeResponse::SaveVaultResult(publication) = self.save_vault(vault_id)? else {
+                anyhow::bail!("vault mutation save returned an unexpected response");
+            };
+            Ok(VaultMutationResultDto {
+                commit: CommitStatusDto::Committed,
+                publication,
+                created_group_id,
+            })
+        })();
+
+        if result.is_err() {
+            self.restore_loaded_after_failed_commit(vault_id, previous);
+        }
         result
     }
 
@@ -2881,6 +2911,121 @@ impl Runtime {
                     protect_in_memory: attachment.protect_in_memory,
                 })
                 .collect(),
+        })
+    }
+
+    fn mutate_loaded_vault<T>(
+        &mut self,
+        vault_id: &str,
+        mutation: impl FnOnce(&KeepassCore, &mut Vault) -> Result<T>,
+    ) -> Result<T> {
+        let loaded = self
+            .vault_session
+            .find_loaded_mut(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        let vault = loaded
+            .vault
+            .as_mut()
+            .with_context(|| format!("vault is locked: {vault_id}"))?;
+        mutation(&self.core, vault)
+    }
+
+    pub fn create_group(
+        &mut self,
+        vault_id: &str,
+        parent_group_id: &str,
+        title: String,
+    ) -> Result<String> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            Ok(core.add_group(vault, parent_group_id, title)?.id)
+        })
+    }
+
+    pub fn rename_group(&mut self, vault_id: &str, group_id: &str, title: String) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.update_group_metadata(
+                vault,
+                group_id,
+                GroupMetadataUpdate {
+                    title: Some(title),
+                    ..GroupMetadataUpdate::default()
+                },
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn move_group(
+        &mut self,
+        vault_id: &str,
+        group_id: &str,
+        target_parent_group_id: &str,
+    ) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.move_group(vault, group_id, target_parent_group_id)?;
+            Ok(())
+        })
+    }
+
+    pub fn delete_group(&mut self, vault_id: &str, group_id: &str) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.delete_group(vault, group_id)?;
+            Ok(())
+        })
+    }
+
+    pub fn move_entry_to_group(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        target_group_id: &str,
+    ) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.move_entry(vault, entry_id, target_group_id)?;
+            Ok(())
+        })
+    }
+
+    pub fn restore_entry_history(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        history_index: usize,
+    ) -> Result<()> {
+        let modified_at = self.current_unix_time();
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.project_entry_history_detail(vault, entry_id, history_index)?;
+            core.snapshot_entry_to_history(vault, entry_id)?;
+            core.restore_entry_history(vault, entry_id, history_index)?;
+            touch_entry_modified_at(core, vault, entry_id, modified_at)?;
+            enforce_history_limits(vault);
+            Ok(())
+        })
+    }
+
+    pub fn clear_entry_history(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.clear_entry_history(vault, entry_id)?;
+            Ok(())
+        })
+    }
+
+    pub fn recycle_entry(&mut self, vault_id: &str, entry_id: &str) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.soft_delete_entry_to_recycle_bin(vault, entry_id)?;
+            Ok(())
+        })
+    }
+
+    pub fn restore_recycled_entry(
+        &mut self,
+        vault_id: &str,
+        entry_id: &str,
+        target_group_id: Option<&str>,
+    ) -> Result<()> {
+        self.mutate_loaded_vault(vault_id, |core, vault| {
+            core.restore_entry_from_recycle_bin(vault, entry_id, target_group_id)?;
+            Ok(())
         })
     }
 
@@ -5096,6 +5241,89 @@ impl Runtime {
                 self.remember_quick_unlock_enrollment(password, key_file_path);
                 Ok(RuntimeResponse::SessionState(self.session_state()))
             }
+            RuntimeCommand::CreateGroup {
+                vault_id,
+                parent_group_id,
+                title,
+            } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime
+                        .create_group(&vault_id, &parent_group_id, title)
+                        .map(Some)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::RenameGroup {
+                vault_id,
+                group_id,
+                title,
+            } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.rename_group(&vault_id, &group_id, title)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::MoveGroup {
+                vault_id,
+                group_id,
+                target_parent_group_id,
+            } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.move_group(&vault_id, &group_id, &target_parent_group_id)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::DeleteGroup { vault_id, group_id } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.delete_group(&vault_id, &group_id)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::MoveEntryToGroup {
+                vault_id,
+                entry_id,
+                target_group_id,
+            } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.move_entry_to_group(&vault_id, &entry_id, &target_group_id)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::RestoreEntryHistory {
+                vault_id,
+                entry_id,
+                history_index,
+            } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.restore_entry_history(&vault_id, &entry_id, history_index)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::ClearEntryHistory { vault_id, entry_id } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.clear_entry_history(&vault_id, &entry_id)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::RecycleEntry { vault_id, entry_id } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.recycle_entry(&vault_id, &entry_id)?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
+            RuntimeCommand::RestoreRecycledEntry {
+                vault_id,
+                entry_id,
+                target_group_id,
+            } => self
+                .commit_vault_mutation(&vault_id, |runtime| {
+                    runtime.restore_recycled_entry(
+                        &vault_id,
+                        &entry_id,
+                        target_group_id.as_deref(),
+                    )?;
+                    Ok(None)
+                })
+                .map(RuntimeResponse::VaultMutationResult),
             RuntimeCommand::CreateEntry {
                 vault_id,
                 parent_group_id,

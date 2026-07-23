@@ -134,6 +134,7 @@ function committedDatabaseSettings(
 ): DatabaseSettingsCommitResult {
   return {
     type: "database_settings_commit_result",
+    commit: "committed",
     settings,
     saveResult
   };
