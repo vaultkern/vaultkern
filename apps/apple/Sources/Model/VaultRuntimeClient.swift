@@ -10,12 +10,12 @@ protocol VaultRuntimeClient: Sendable {
     kdfConfirmed: Bool
   ) throws -> SessionStateDto
   func unlockWithBlob(kdfConfirmed: Bool) throws -> UnlockBlobResultDto
-  func enroll(
+  func reconcileQuickUnlock(
+    enabled: Bool,
     password: VaultKernSensitiveString?,
     keyFilePath: String?,
     kdfConfirmed: Bool
   ) throws -> SessionStateDto
-  func revoke() throws -> SessionStateDto
   func lockSession() throws -> SessionStateDto
   func closeVault(vaultID: String) throws -> SessionStateDto
   func listEntries(vaultID: String) throws -> [EntrySummaryDto]
@@ -70,20 +70,18 @@ final class LiveVaultRuntimeClient: VaultRuntimeClient, @unchecked Sendable {
     try unlock.unlockWithBlob(kdfConfirmed: kdfConfirmed)
   }
 
-  func enroll(
+  func reconcileQuickUnlock(
+    enabled: Bool,
     password: VaultKernSensitiveString?,
     keyFilePath: String?,
     kdfConfirmed: Bool
   ) throws -> SessionStateDto {
-    try unlock.enroll(
+    try unlock.reconcile(
+      enabled: enabled,
       password: password,
       keyFilePath: keyFilePath,
       kdfConfirmed: kdfConfirmed
     )
-  }
-
-  func revoke() throws -> SessionStateDto {
-    try unlock.revoke()
   }
 
   func lockSession() throws -> SessionStateDto {

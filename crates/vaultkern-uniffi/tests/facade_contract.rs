@@ -21,6 +21,17 @@ fn session_config(root: &std::path::Path, platform: ResidentPlatform) -> VaultSe
     }
 }
 
+fn resident_test_platform() -> ResidentPlatform {
+    #[cfg(target_os = "macos")]
+    {
+        return ResidentPlatform::Macos;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ResidentPlatform::Android
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum FakeLoadFailure {
     Cancelled,
@@ -150,10 +161,14 @@ impl UnlockBlobAdapter for FakeUnlockBlobAdapter {
     }
 
     fn store_blob(&self, key: String, value: SensitiveBytes) -> Result<(), PlatformAdapterError> {
-        self.blobs
+        if let Some(mut previous) = self
+            .blobs
             .lock()
             .unwrap()
-            .insert(key, value.as_slice().to_vec());
+            .insert(key, value.as_slice().to_vec())
+        {
+            previous.fill(0);
+        }
         Ok(())
     }
 
@@ -177,8 +192,20 @@ impl UnlockBlobAdapter for FakeUnlockBlobAdapter {
     }
 
     fn delete_blob(&self, key: String) -> Result<(), PlatformAdapterError> {
-        self.blobs.lock().unwrap().remove(&key);
+        if let Some(mut removed) = self.blobs.lock().unwrap().remove(&key) {
+            removed.fill(0);
+        }
         Ok(())
+    }
+
+    fn purge_quick_unlock_records(&self) -> Result<u64, PlatformAdapterError> {
+        let mut blobs = self.blobs.lock().unwrap();
+        let count = blobs.len() as u64;
+        for value in blobs.values_mut() {
+            value.fill(0);
+        }
+        blobs.clear();
+        Ok(count)
     }
 }
 
@@ -195,7 +222,7 @@ fn copied_fixture() -> (tempfile::TempDir, String) {
 fn resident_runtime_requires_explicit_absolute_host_directories() {
     let adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let invalid = VaultSessionConfig {
-        platform: ResidentPlatform::Android,
+        platform: resident_test_platform(),
         state_directory: "relative-state".into(),
         temporary_directory: "relative-temporary".into(),
     };
@@ -245,7 +272,7 @@ fn opened_session() -> (
     let (dir, path) = copied_fixture();
     let adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let session = VaultSession::new(
-        session_config(dir.path(), ResidentPlatform::Android),
+        session_config(dir.path(), resident_test_platform()),
         adapter.clone(),
         Arc::new(FakeOneDriveTokenAdapter::default()),
     )
@@ -341,6 +368,35 @@ fn ffi_unlock_blob_roundtrip_uses_the_platform_adapter_and_revoke_removes_it() {
         UnlockBlobStatusDto::NotEnrolled
     );
     assert_eq!(adapter.authorization_reasons.lock().unwrap().len(), 3);
+}
+
+#[test]
+fn ffi_quick_unlock_reconciliation_converges_to_the_saved_desired_state() {
+    let (_dir, session, adapter, vault_id) = opened_session();
+    let unlock = session.unlock();
+
+    let enabled = unlock
+        .reconcile(true, Some(FIXTURE_PASSWORD.into()), None, false)
+        .unwrap();
+    assert!(enabled.unlocked);
+    assert_eq!(adapter.blobs.lock().unwrap().len(), 1);
+
+    session.lock_session().unwrap();
+    let unlocked = unlock.unlock_with_blob(false).unwrap();
+    assert_eq!(unlocked.status, UnlockBlobStatusDto::Unlocked);
+    assert_eq!(
+        unlocked.state.active_vault_id.as_deref(),
+        Some(vault_id.as_str())
+    );
+
+    let disabled = unlock.reconcile(false, None, None, false).unwrap();
+    assert!(disabled.unlocked);
+    assert!(adapter.blobs.lock().unwrap().is_empty());
+    session.lock_session().unwrap();
+    assert_eq!(
+        unlock.unlock_with_blob(false).unwrap().status,
+        UnlockBlobStatusDto::NotEnrolled
+    );
 }
 
 #[test]
@@ -678,7 +734,7 @@ fn independent_platform_thread_fails_fast_while_an_adapter_callback_is_active() 
     let root = tempfile::tempdir().unwrap();
     let adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let session = VaultSession::new(
-        session_config(root.path(), ResidentPlatform::Android),
+        session_config(root.path(), resident_test_platform()),
         adapter.clone(),
         Arc::new(FakeOneDriveTokenAdapter::default()),
     )
@@ -712,7 +768,7 @@ fn foreign_callback_reentry_returns_without_deadlocking_the_runtime() {
     let root = tempfile::tempdir().unwrap();
     let adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let session = VaultSession::new(
-        session_config(root.path(), ResidentPlatform::Android),
+        session_config(root.path(), resident_test_platform()),
         adapter.clone(),
         Arc::new(FakeOneDriveTokenAdapter::default()),
     )
@@ -738,13 +794,13 @@ fn foreign_callback_may_call_an_independent_session_on_the_same_thread() {
     let first_adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let second_adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let first = VaultSession::new(
-        session_config(first_root.path(), ResidentPlatform::Android),
+        session_config(first_root.path(), resident_test_platform()),
         first_adapter.clone(),
         Arc::new(FakeOneDriveTokenAdapter::default()),
     )
     .unwrap();
     let second = VaultSession::new(
-        session_config(second_root.path(), ResidentPlatform::Android),
+        session_config(second_root.path(), resident_test_platform()),
         second_adapter,
         Arc::new(FakeOneDriveTokenAdapter::default()),
     )
@@ -760,7 +816,7 @@ fn cross_thread_foreign_callback_reentry_fails_fast_instead_of_deadlocking() {
     let root = tempfile::tempdir().unwrap();
     let adapter = Arc::new(FakeUnlockBlobAdapter::default());
     let session = VaultSession::new(
-        session_config(root.path(), ResidentPlatform::Android),
+        session_config(root.path(), resident_test_platform()),
         adapter.clone(),
         Arc::new(FakeOneDriveTokenAdapter::default()),
     )

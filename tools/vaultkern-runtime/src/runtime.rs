@@ -1918,6 +1918,19 @@ impl Runtime {
         enabled: bool,
         credentials: Option<QuickUnlockReconciliationCredentials>,
     ) -> Result<bool> {
+        self.reconcile_quick_unlock_with_kdf_confirmation(
+            enabled,
+            credentials,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
+    }
+
+    pub fn reconcile_quick_unlock_with_kdf_confirmation(
+        &mut self,
+        enabled: bool,
+        credentials: Option<QuickUnlockReconciliationCredentials>,
+        confirmation: ExternalKdfConfirmation,
+    ) -> Result<bool> {
         if !enabled {
             self.pending_quick_unlock_enrollment = None;
             return Ok(self.secure_storage.purge_quick_unlock_records()? > 0);
@@ -1942,9 +1955,10 @@ impl Runtime {
         let Some(credentials) = credentials else {
             return Ok(false);
         };
-        self.enable_quick_unlock_for_current_vault(
+        self.enroll_quick_unlock_for_current_vault_with_kdf_confirmation(
             credentials.password(),
             credentials.key_file_path(),
+            confirmation,
         )?;
         self.pending_quick_unlock_enrollment = None;
         Ok(true)
@@ -2687,7 +2701,25 @@ impl Runtime {
     ) -> Result<EntryDetailDto> {
         let modified_at = self.current_unix_time();
         let requested_totp = parse_totp_uri(totp_uri.as_deref())?;
-        {
+        let mut custom_field_keys = Vec::<Zeroizing<String>>::new();
+        for field in &custom_fields {
+            if field.key.trim().is_empty() {
+                anyhow::ensure!(
+                    field.value.is_empty(),
+                    "custom field with a value must have a name"
+                );
+                continue;
+            }
+            anyhow::ensure!(
+                !custom_field_keys
+                    .iter()
+                    .any(|key| key.as_str() == field.key.as_str()),
+                "duplicate custom field key"
+            );
+            custom_field_keys.push(Zeroizing::new(field.key.clone()));
+        }
+
+        let rollback_entry = {
             let loaded = self
                 .vault_session
                 .find_loaded_mut(vault_id)
@@ -2696,83 +2728,118 @@ impl Runtime {
                 .vault
                 .as_mut()
                 .with_context(|| format!("vault is locked: {vault_id}"))?;
-            let mut candidate = vault.clone();
+            let rollback_entry = find_entry_by_id(&vault.root, entry_id)
+                .cloned()
+                .with_context(|| format!("entry not found: {entry_id}"))?;
 
-            let current_totp = self.core.project_entry_totp(&candidate, entry_id)?;
-            let totp_is_unchanged = match (current_totp.as_ref(), totp_uri.as_deref()) {
-                (Some(current), Some(requested)) => {
-                    let entry = find_entry_by_id(&candidate.root, entry_id)
-                        .with_context(|| format!("entry not found: {entry_id}"))?;
-                    let current_uri =
-                        Zeroizing::new(totp_to_uri(&entry.title, &entry.username, current));
-                    current_uri.as_str() == requested
-                }
-                (None, None) => true,
-                _ => false,
-            };
-            self.core
-                .snapshot_entry_to_history(&mut candidate, entry_id)?;
-            self.core.update_entry_fields(
-                &mut candidate,
-                entry_id,
-                EntryUpdate {
-                    title: Some(take_sensitive_string(title)),
-                    username: Some(take_sensitive_string(username)),
-                    password: Some(take_sensitive_string(password)),
-                    url: Some(take_sensitive_string(url)),
-                    notes: Some(take_sensitive_string(notes)),
-                },
-            )?;
+            let mutation = (|| {
+                let current_totp = self.core.project_entry_totp(vault, entry_id)?;
+                let totp_is_unchanged = match (current_totp.as_ref(), totp_uri.as_deref()) {
+                    (Some(current), Some(requested)) => {
+                        let entry = find_entry_by_id(&vault.root, entry_id)
+                            .with_context(|| format!("entry not found: {entry_id}"))?;
+                        let current_uri =
+                            Zeroizing::new(totp_to_uri(&entry.title, &entry.username, current));
+                        current_uri.as_str() == requested
+                    }
+                    (None, None) => true,
+                    _ => false,
+                };
+                self.core.snapshot_entry_to_history(vault, entry_id)?;
+                self.core.update_entry_fields(
+                    vault,
+                    entry_id,
+                    EntryUpdate {
+                        title: Some(take_sensitive_string(title)),
+                        username: Some(take_sensitive_string(username)),
+                        password: Some(take_sensitive_string(password)),
+                        url: Some(take_sensitive_string(url)),
+                        notes: Some(take_sensitive_string(notes)),
+                    },
+                )?;
 
-            match requested_totp {
-                Some(_) if totp_is_unchanged => {}
-                Some(totp) => {
-                    self.core.set_entry_totp(&mut candidate, entry_id, totp)?;
+                match requested_totp {
+                    Some(_) if totp_is_unchanged => {}
+                    Some(totp) => {
+                        self.core.set_entry_totp(vault, entry_id, totp)?;
+                    }
+                    None if current_totp.is_some() => {
+                        self.core.clear_entry_totp(vault, entry_id)?;
+                    }
+                    None => {}
                 }
-                None if current_totp.is_some() => {
-                    self.core.clear_entry_totp(&mut candidate, entry_id)?;
+
+                let existing_keys = self
+                    .core
+                    .list_entry_custom_fields(vault, entry_id)?
+                    .into_iter()
+                    .map(|mut field| Zeroizing::new(std::mem::take(&mut field.key)))
+                    .collect::<Vec<_>>();
+
+                for key in existing_keys {
+                    if !custom_field_keys
+                        .iter()
+                        .any(|next_key| next_key.as_str() == key.as_str())
+                    {
+                        self.core.delete_entry_custom_field(vault, entry_id, &key)?;
+                    }
                 }
-                None => {}
+
+                for field in custom_fields {
+                    if !field.key.trim().is_empty() {
+                        self.core.upsert_entry_custom_field(
+                            vault,
+                            entry_id,
+                            EntryCustomFieldInput {
+                                key: field.key,
+                                value: take_sensitive_string(field.value),
+                                protected: field.protected,
+                            },
+                        )?;
+                    }
+                }
+
+                touch_entry_modified_at(&self.core, vault, entry_id, modified_at)?;
+                Ok(())
+            })();
+
+            if let Err(error) = mutation {
+                replace_entry_by_id(&mut vault.root, entry_id, rollback_entry)
+                    .with_context(|| format!("failed to roll back entry mutation: {entry_id}"))?;
+                return Err(error);
             }
+            rollback_entry
+        };
 
-            let existing_keys = self
-                .core
-                .list_entry_custom_fields(&candidate, entry_id)?
-                .into_iter()
-                .map(|mut field| std::mem::take(&mut field.key))
-                .collect::<Vec<_>>();
-            let next_keys = custom_fields
-                .iter()
-                .map(|field| field.key.as_str())
-                .collect::<std::collections::BTreeSet<_>>();
-
-            for key in existing_keys {
-                if !next_keys.contains(key.as_str()) {
-                    self.core
-                        .delete_entry_custom_field(&mut candidate, entry_id, &key)?;
-                }
+        match self.get_entry_detail(vault_id, entry_id) {
+            Ok(detail) => {
+                let loaded = self
+                    .vault_session
+                    .find_loaded_mut(vault_id)
+                    .with_context(|| {
+                        format!("vault not opened after entry mutation: {vault_id}")
+                    })?;
+                let vault = loaded
+                    .vault
+                    .as_mut()
+                    .with_context(|| format!("vault locked after entry mutation: {vault_id}"))?;
+                enforce_history_limits(vault);
+                Ok(detail)
             }
-
-            for field in custom_fields {
-                if !field.key.trim().is_empty() {
-                    self.core.upsert_entry_custom_field(
-                        &mut candidate,
-                        entry_id,
-                        EntryCustomFieldInput {
-                            key: field.key,
-                            value: take_sensitive_string(field.value),
-                            protected: field.protected,
-                        },
-                    )?;
-                }
+            Err(error) => {
+                let loaded = self
+                    .vault_session
+                    .find_loaded_mut(vault_id)
+                    .with_context(|| format!("vault not opened during rollback: {vault_id}"))?;
+                let vault = loaded
+                    .vault
+                    .as_mut()
+                    .with_context(|| format!("vault locked during rollback: {vault_id}"))?;
+                replace_entry_by_id(&mut vault.root, entry_id, rollback_entry)
+                    .with_context(|| format!("failed to roll back entry projection: {entry_id}"))?;
+                Err(error)
             }
-
-            touch_entry_modified_at(&self.core, &mut candidate, entry_id, modified_at)?;
-            enforce_history_limits(&mut candidate);
-            *vault = candidate;
         }
-
-        self.get_entry_detail(vault_id, entry_id)
     }
 
     pub fn compare_and_update_entry_fields(
@@ -9926,6 +9993,41 @@ fn find_entry_by_id<'a>(group: &'a vaultkern_core::Group, entry_id: &str) -> Opt
     None
 }
 
+fn replace_entry_by_id(
+    group: &mut vaultkern_core::Group,
+    entry_id: &str,
+    replacement: Entry,
+) -> Result<()> {
+    let mut replacement = Some(replacement);
+    if replace_entry_by_id_inner(group, entry_id, &mut replacement) {
+        Ok(())
+    } else {
+        anyhow::bail!("entry not found: {entry_id}")
+    }
+}
+
+fn replace_entry_by_id_inner(
+    group: &mut vaultkern_core::Group,
+    entry_id: &str,
+    replacement: &mut Option<Entry>,
+) -> bool {
+    if let Some(entry) = group
+        .entries
+        .iter_mut()
+        .find(|entry| entry.id.to_string() == entry_id)
+    {
+        *entry = replacement
+            .take()
+            .expect("entry replacement is consumed exactly once");
+        return true;
+    }
+
+    group
+        .children
+        .iter_mut()
+        .any(|child| replace_entry_by_id_inner(child, entry_id, replacement))
+}
+
 fn restore_entry_from_snapshot(
     group: &mut vaultkern_core::Group,
     entry_id: &str,
@@ -14461,6 +14563,87 @@ mod tests {
             .expect_err("reserved custom field must fail");
 
         assert!(format!("{error:#}").contains("reserved custom field key"));
+        assert_eq!(
+            runtime
+                .loaded_vault(&opened.vault_id)
+                .expect("loaded vault"),
+            &before
+        );
+    }
+
+    #[test]
+    fn unnamed_custom_field_value_is_rejected_without_mutation() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        let before = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .clone();
+
+        let error = runtime
+            .update_entry_fields(
+                &opened.vault_id,
+                &created.id,
+                created.title,
+                created.username,
+                created.password,
+                created.url,
+                created.notes,
+                created.totp_uri,
+                vec![EntryCustomFieldDto {
+                    key: "  ".into(),
+                    value: "must not be dropped".into(),
+                    protected: true,
+                }],
+            )
+            .expect_err("unnamed custom field value must fail");
+
+        assert!(format!("{error:#}").contains("must have a name"));
+        assert_eq!(
+            runtime
+                .loaded_vault(&opened.vault_id)
+                .expect("loaded vault"),
+            &before
+        );
+    }
+
+    #[test]
+    fn duplicate_custom_field_update_is_rejected_without_mutation() {
+        let mut runtime = Runtime::for_tests();
+        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
+        let created = create_demo_entry(&mut runtime, &opened.vault_id);
+        let before = runtime
+            .loaded_vault(&opened.vault_id)
+            .expect("loaded vault")
+            .clone();
+
+        let error = runtime
+            .update_entry_fields(
+                &opened.vault_id,
+                &created.id,
+                created.title,
+                created.username,
+                created.password,
+                created.url,
+                created.notes,
+                created.totp_uri,
+                vec![
+                    EntryCustomFieldDto {
+                        key: "API Token".into(),
+                        value: "one".into(),
+                        protected: true,
+                    },
+                    EntryCustomFieldDto {
+                        key: "API Token".into(),
+                        value: "two".into(),
+                        protected: true,
+                    },
+                ],
+            )
+            .expect_err("duplicate custom field key must fail");
+
+        assert!(format!("{error:#}").contains("duplicate custom field key"));
         assert_eq!(
             runtime
                 .loaded_vault(&opened.vault_id)

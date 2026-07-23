@@ -1,5 +1,19 @@
 import SwiftUI
 
+enum CredentialSubmission {
+  static func password(
+    taking owner: VaultKernSensitiveString,
+    hasKeyFile: Bool,
+    includesEmptyPassword: Bool
+  ) -> VaultKernSensitiveString? {
+    guard !owner.isEmpty || !hasKeyFile || includesEmptyPassword else {
+      owner.close()
+      return nil
+    }
+    return owner
+  }
+}
+
 struct ContentView: View {
   @ObservedObject var model: VaultAppModel
 
@@ -15,6 +29,7 @@ struct ContentView: View {
         vaultWorkspace
       }
     }
+    .task { await model.reconcileStartupSettings() }
     .onReceive(NotificationCenter.default.publisher(for: .openVaultPicker)) { _ in
       guard model.canChangeVault, model.currentVault == nil else { return }
       openVault()
@@ -191,14 +206,16 @@ struct ContentView: View {
 
 private struct UnlockView: View {
   @ObservedObject var model: VaultAppModel
-  @State private var password = ""
+  @State private var password = VaultKernSensitiveString("")
   @State private var keyFileURL: URL?
+  @State private var includesEmptyPassword = false
   @State private var presentsKeyFileImporter = false
+  @State private var isSubmitting = false
 
   var body: some View {
     Form {
       Section("Unlock") {
-        SecureField("Master password", text: $password)
+        SecureField("Master password", text: passwordBinding)
           .textContentType(.password)
           .onSubmit(unlock)
 
@@ -223,15 +240,19 @@ private struct UnlockView: View {
           }
         }
 
+        if keyFileURL != nil && password.isEmpty {
+          Toggle("Use empty password with key file", isOn: $includesEmptyPassword)
+        }
+
         HStack {
           Button("Unlock", systemImage: "lock.open") { unlock() }
             .buttonStyle(.borderedProminent)
-            .disabled(model.isBusy || (password.isEmpty && keyFileURL == nil))
+            .disabled(model.isBusy || isSubmitting)
           if model.supportsBiometricUnlock {
             Button("Touch ID", systemImage: "touchid") {
-              Task { await model.unlockWithBiometrics() }
+              submitBiometricUnlock()
             }
-            .disabled(model.isBusy)
+            .disabled(model.isBusy || isSubmitting)
           }
         }
       }
@@ -253,25 +274,61 @@ private struct UnlockView: View {
       }
       clearKeyFileURL()
       keyFileURL = url
+      includesEmptyPassword = false
     }
     .onDisappear {
-      password.removeAll(keepingCapacity: false)
+      password.close()
       clearKeyFileURL()
     }
   }
 
   private func unlock() {
-    guard !password.isEmpty || keyFileURL != nil else { return }
+    guard !isSubmitting, model.registerCredentialSubmission() else { return }
+    isSubmitting = true
     let selectedKeyFileURL = keyFileURL
     keyFileURL = nil
-    let owner = password.isEmpty ? nil : VaultKernSensitiveString(password)
-    password.removeAll(keepingCapacity: false)
-    Task { await model.unlockWithPassword(owner, keyFileURL: selectedKeyFileURL) }
+    let owner = takePassword(keyFileURL: selectedKeyFileURL)
+    includesEmptyPassword = false
+    Task {
+      await model.unlockWithPassword(owner, keyFileURL: selectedKeyFileURL)
+      isSubmitting = false
+    }
+  }
+
+  private func submitBiometricUnlock() {
+    guard !isSubmitting, model.registerCredentialSubmission() else { return }
+    isSubmitting = true
+    Task {
+      await model.unlockWithBiometrics()
+      isSubmitting = false
+    }
+  }
+
+  private var passwordBinding: Binding<String> {
+    Binding(
+      get: { password.reveal() },
+      set: { value in
+        let replacement = VaultKernSensitiveString(value)
+        password.close()
+        password = replacement
+      }
+    )
+  }
+
+  private func takePassword(keyFileURL: URL?) -> VaultKernSensitiveString? {
+    let owner = password
+    password = VaultKernSensitiveString("")
+    return CredentialSubmission.password(
+      taking: owner,
+      hasKeyFile: keyFileURL != nil,
+      includesEmptyPassword: includesEmptyPassword
+    )
   }
 
   private func clearKeyFileURL() {
     keyFileURL?.stopAccessingSecurityScopedResource()
     keyFileURL = nil
+    includesEmptyPassword = false
   }
 }
 
@@ -336,7 +393,7 @@ private struct EntryEditorView: View {
           Section("Attachments") {
             ForEach(draft.attachments) { attachment in
               LabeledContent(
-                attachment.name,
+                attachment.name.reveal(),
                 value: ByteCountFormatter.string(
                   fromByteCount: Int64(attachment.size),
                   countStyle: .file
@@ -347,7 +404,7 @@ private struct EntryEditorView: View {
 
         if let relyingParty = draft.passkeyRelyingParty {
           Section("Passkey") {
-            LabeledContent("Relying party", value: relyingParty)
+            LabeledContent("Relying party", value: relyingParty.reveal())
           }
         }
       }
@@ -357,11 +414,14 @@ private struct EntryEditorView: View {
           Button("Enable Touch ID", systemImage: "touchid") {
             presentsEnrollment = true
           }
-          .disabled(model.isBusy || !model.supportsBiometricUnlock)
+          .disabled(
+            model.isBusy || !model.supportsBiometricUnlock
+              || (model.quickUnlockDesiredEnabled && model.quickUnlockKnownEnrolled == true)
+          )
           Button("Disable", systemImage: "trash", role: .destructive) {
-            Task { await model.revokeQuickUnlock() }
+            Task { await model.disableQuickUnlock() }
           }
-          .disabled(model.isBusy)
+          .disabled(model.isBusy || !model.quickUnlockDesiredEnabled)
         }
       }
     }
@@ -395,9 +455,11 @@ private struct EntryEditorView: View {
     }
   }
 
-  private func draftBinding(_ keyPath: WritableKeyPath<EntryDraft, String>) -> Binding<String> {
+  private func draftBinding(
+    _ keyPath: KeyPath<EntryDraft, VaultKernSensitiveString>
+  ) -> Binding<String> {
     Binding(
-      get: { model.draft?[keyPath: keyPath] ?? "" },
+      get: { model.draft?[keyPath: keyPath].reveal() ?? "" },
       set: { model.updateDraft(keyPath, value: $0) }
     )
   }
@@ -410,12 +472,12 @@ private struct CustomFieldRow: View {
 
   var body: some View {
     HStack {
-      TextField("Name", text: fieldBinding(\.key))
+      TextField("Name", text: sensitiveFieldBinding(\.key))
       Group {
         if field.isProtected && !revealsProtectedValue {
-          SecureField("Value", text: fieldBinding(\.value))
+          SecureField("Value", text: sensitiveFieldBinding(\.value))
         } else {
-          TextField("Value", text: fieldBinding(\.value))
+          TextField("Value", text: sensitiveFieldBinding(\.value))
         }
       }
       if field.isProtected {
@@ -427,7 +489,7 @@ private struct CustomFieldRow: View {
         .buttonStyle(.plain)
         .help(revealsProtectedValue ? "Hide Protected Value" : "Show Protected Value")
       }
-      Toggle("Protected", isOn: fieldBinding(\.isProtected))
+      Toggle("Protected", isOn: protectionBinding)
         .labelsHidden()
         .help("Protected Field")
       Button(role: .destructive) {
@@ -443,16 +505,19 @@ private struct CustomFieldRow: View {
     }
   }
 
-  private func fieldBinding<Value>(
-    _ keyPath: WritableKeyPath<EntryCustomFieldDraft, Value>
-  ) -> Binding<Value> {
+  private func sensitiveFieldBinding(
+    _ keyPath: KeyPath<EntryCustomFieldDraft, VaultKernSensitiveString>
+  ) -> Binding<String> {
     Binding(
-      get: { field[keyPath: keyPath] },
-      set: { value in
-        var updated = field
-        updated[keyPath: keyPath] = value
-        model.updateCustomField(updated)
-      }
+      get: { field[keyPath: keyPath].reveal() },
+      set: { model.updateCustomField(id: field.id, keyPath, value: $0) }
+    )
+  }
+
+  private var protectionBinding: Binding<Bool> {
+    Binding(
+      get: { field.isProtected },
+      set: { model.updateCustomFieldProtection(id: field.id, isProtected: $0) }
     )
   }
 }
@@ -460,15 +525,17 @@ private struct CustomFieldRow: View {
 private struct QuickUnlockEnrollmentView: View {
   @ObservedObject var model: VaultAppModel
   @Binding var isPresented: Bool
-  @State private var password = ""
+  @State private var password = VaultKernSensitiveString("")
   @State private var keyFileURL: URL?
+  @State private var includesEmptyPassword = false
   @State private var presentsKeyFileImporter = false
+  @State private var isSubmitting = false
 
   var body: some View {
     VStack(alignment: .leading, spacing: 16) {
       Text("Enable Touch ID")
         .font(.title2.weight(.semibold))
-      SecureField("Current master password", text: $password)
+      SecureField("Current master password", text: passwordBinding)
         .textContentType(.password)
       HStack {
         Text(keyFileURL?.lastPathComponent ?? "No key file")
@@ -479,25 +546,31 @@ private struct QuickUnlockEnrollmentView: View {
           presentsKeyFileImporter = true
         }
       }
+      if keyFileURL != nil && password.isEmpty {
+        Toggle("Use empty password with key file", isOn: $includesEmptyPassword)
+      }
       HStack {
         Spacer()
         Button("Cancel") {
-          password.removeAll(keepingCapacity: false)
+          password.close()
           clearKeyFileURL()
           isPresented = false
         }
         Button("Enable", systemImage: "touchid") {
+          guard !isSubmitting, model.registerCredentialSubmission() else { return }
+          isSubmitting = true
           let selectedKeyFileURL = keyFileURL
           keyFileURL = nil
-          let owner = password.isEmpty ? nil : VaultKernSensitiveString(password)
-          password.removeAll(keepingCapacity: false)
+          let owner = takePassword(keyFileURL: selectedKeyFileURL)
+          includesEmptyPassword = false
           isPresented = false
           Task {
-            await model.enrollQuickUnlock(password: owner, keyFileURL: selectedKeyFileURL)
+            await model.enableQuickUnlock(password: owner, keyFileURL: selectedKeyFileURL)
+            isSubmitting = false
           }
         }
         .buttonStyle(.borderedProminent)
-        .disabled(model.isBusy || (password.isEmpty && keyFileURL == nil))
+        .disabled(model.isBusy || isSubmitting)
       }
     }
     .padding(24)
@@ -516,16 +589,39 @@ private struct QuickUnlockEnrollmentView: View {
       }
       clearKeyFileURL()
       keyFileURL = url
+      includesEmptyPassword = false
     }
     .interactiveDismissDisabled(model.isBusy)
     .onDisappear {
-      password.removeAll(keepingCapacity: false)
+      password.close()
       clearKeyFileURL()
     }
+  }
+
+  private var passwordBinding: Binding<String> {
+    Binding(
+      get: { password.reveal() },
+      set: { value in
+        let replacement = VaultKernSensitiveString(value)
+        password.close()
+        password = replacement
+      }
+    )
+  }
+
+  private func takePassword(keyFileURL: URL?) -> VaultKernSensitiveString? {
+    let owner = password
+    password = VaultKernSensitiveString("")
+    return CredentialSubmission.password(
+      taking: owner,
+      hasKeyFile: keyFileURL != nil,
+      includesEmptyPassword: includesEmptyPassword
+    )
   }
 
   private func clearKeyFileURL() {
     keyFileURL?.stopAccessingSecurityScopedResource()
     keyFileURL = nil
+    includesEmptyPassword = false
   }
 }

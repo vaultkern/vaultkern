@@ -211,14 +211,17 @@
     public func deleteBlob(key: String) throws {
       try withLock {
         let identifier = try itemIdentifier(for: key)
-        let blobStatus = SecItemDelete(blobQuery(identifier: identifier) as CFDictionary)
-        let keyStatus = SecItemDelete(keyQuery(identifier: identifier) as CFDictionary)
-        guard blobStatus == errSecSuccess || blobStatus == errSecItemNotFound else {
-          throw Self.statusError(blobStatus, operation: "SecItemDelete(unlock blob)")
+        try deleteRecord(identifier: identifier)
+      }
+    }
+
+    public func purgeQuickUnlockRecords() throws -> UInt64 {
+      try withLock {
+        let identifiers = try copyBlobIdentifiers()
+        for identifier in identifiers {
+          try deleteRecord(identifier: identifier)
         }
-        guard keyStatus == errSecSuccess || keyStatus == errSecItemNotFound else {
-          throw Self.statusError(keyStatus, operation: "SecItemDelete(unlock key)")
-        }
+        return UInt64(identifiers.count)
       }
     }
 
@@ -238,10 +241,15 @@
     }
 
     private func blobQuery(identifier: String) -> [CFString: Any] {
+      var query = blobCollectionQuery()
+      query[kSecAttrAccount] = identifier
+      return query
+    }
+
+    private func blobCollectionQuery() -> [CFString: Any] {
       [
         kSecClass: kSecClassGenericPassword,
         kSecAttrService: service,
-        kSecAttrAccount: identifier,
         kSecAttrAccessGroup: accessGroup,
         kSecUseDataProtectionKeychain: true,
       ]
@@ -370,6 +378,41 @@
         return nil
       default:
         throw Self.statusError(status, operation: "SecItemCopyMatching(unlock blob)")
+      }
+    }
+
+    private func copyBlobIdentifiers() throws -> [String] {
+      var query = blobCollectionQuery()
+      query[kSecReturnAttributes] = true
+      query[kSecMatchLimit] = kSecMatchLimitAll
+      var result: CFTypeRef?
+      let status = SecItemCopyMatching(query as CFDictionary, &result)
+      switch status {
+      case errSecSuccess:
+        guard let items = result as? [NSDictionary] else {
+          throw PlatformAdapterError.Unexpected
+        }
+        return try items.map { item in
+          guard let identifier = item[kSecAttrAccount] as? String else {
+            throw PlatformAdapterError.Unexpected
+          }
+          return identifier
+        }
+      case errSecItemNotFound:
+        return []
+      default:
+        throw Self.statusError(status, operation: "SecItemCopyMatching(all unlock blobs)")
+      }
+    }
+
+    private func deleteRecord(identifier: String) throws {
+      let keyStatus = SecItemDelete(keyQuery(identifier: identifier) as CFDictionary)
+      guard keyStatus == errSecSuccess || keyStatus == errSecItemNotFound else {
+        throw Self.statusError(keyStatus, operation: "SecItemDelete(unlock key)")
+      }
+      let blobStatus = SecItemDelete(blobQuery(identifier: identifier) as CFDictionary)
+      guard blobStatus == errSecSuccess || blobStatus == errSecItemNotFound else {
+        throw Self.statusError(blobStatus, operation: "SecItemDelete(unlock blob)")
       }
     }
 

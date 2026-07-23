@@ -3,50 +3,30 @@ import XCTest
 @testable import VaultKern
 
 final class EntryDraftValidationTests: XCTestCase {
-  func testRejectsReservedCustomFieldFamilies() {
-    for key in ["Password", "otp", "TimeOtp-Period", "HmacOtp-Counter", "KPEX_PASSKEY_PRIVATE_KEY"]
-    {
-      var draft = testDraft()
-      draft.customFields = [
-        EntryCustomFieldDraft(key: key, value: "value", isProtected: true)
-      ]
+  func testOwnedEntryFieldsHaveAnIndependentTransferLifetime() {
+    let draft = testDraft()
+    let fields = OwnedEntryFields(draft: draft)
 
-      XCTAssertThrowsError(try draft.validateForSave(), "reserved key: \(key)") { error in
-        XCTAssertEqual(
-          error as? EntryDraftValidationError,
-          .reservedCustomFieldKey
-        )
-      }
-    }
+    draft.notes.replace(with: "changed after transfer")
+    draft.close()
+
+    XCTAssertEqual(fields.value.notes.reveal(), "")
+    XCTAssertEqual(fields.value.password.reveal(), "secret")
+    fields.close()
+    XCTAssertEqual(fields.value.password.reveal(), "")
   }
 
-  func testRejectsDuplicateCustomFieldNames() {
-    var draft = testDraft()
-    draft.customFields = [
-      EntryCustomFieldDraft(key: "API Token", value: "one", isProtected: true),
-      EntryCustomFieldDraft(key: "API Token", value: "two", isProtected: true),
-    ]
+  func testDraftCloseClearsNestedSensitiveOwners() {
+    let draft = testDraft()
+    let customKey = draft.customFields[0].key
+    let customValue = draft.customFields[0].value
+    let attachmentName = draft.attachments[0].name
 
-    XCTAssertThrowsError(try draft.validateForSave()) { error in
-      XCTAssertEqual(
-        error as? EntryDraftValidationError,
-        .duplicateCustomFieldKey
-      )
-    }
-  }
+    draft.close()
 
-  func testRejectsUnnamedCustomFieldWithValue() {
-    var draft = testDraft()
-    draft.customFields = [
-      EntryCustomFieldDraft(key: "  ", value: "must not be dropped", isProtected: true)
-    ]
-
-    XCTAssertThrowsError(try draft.validateForSave()) { error in
-      XCTAssertEqual(
-        error as? EntryDraftValidationError,
-        .missingCustomFieldKey
-      )
-    }
+    XCTAssertEqual(customKey.reveal(), "")
+    XCTAssertEqual(customValue.reveal(), "")
+    XCTAssertEqual(attachmentName.reveal(), "")
   }
 
   private func testDraft() -> EntryDraft {
@@ -58,8 +38,10 @@ final class EntryDraftValidationTests: XCTestCase {
       url: "https://example.com",
       notes: "",
       totpURI: "",
-      customFields: [],
-      attachments: [],
+      customFields: [
+        EntryCustomFieldDraft(key: "API Token", value: "value", isProtected: true)
+      ],
+      attachments: [EntryAttachmentSummary(name: "secret.pdf", size: 42)],
       passkeyRelyingParty: nil
     )
   }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import XCTest
 
@@ -5,6 +6,18 @@ import XCTest
 
 @MainActor
 final class VaultAppModelTests: XCTestCase {
+  func testQuickUnlockDesiredStatePersistsAcrossStoreInstances() throws {
+    let suiteName = "VaultKernTests.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+    defer { defaults.removePersistentDomain(forName: suiteName) }
+    let first = UserDefaultsQuickUnlockSettingsStore(defaults: defaults)
+
+    first.setEnabled(true)
+
+    let reopened = UserDefaultsQuickUnlockSettingsStore(defaults: defaults)
+    XCTAssertTrue(reopened.isEnabled)
+  }
+
   func testRetryAfterSaveFailureDoesNotApplyEditTwice() async throws {
     let runtime = ModelTestRuntime(failFirstSave: true)
     let model = VaultAppModel(runtime: runtime)
@@ -17,12 +30,14 @@ final class VaultAppModelTests: XCTestCase {
 
     await model.saveDraft()
     XCTAssertEqual(model.saveProgress, .staged)
+    XCTAssertEqual(model.terminationRisk, .stagedSave)
     XCTAssertEqual(runtime.editCount, 1)
     XCTAssertEqual(runtime.saveCount, 1)
     XCTAssertEqual(password.reveal(), "")
 
     await model.saveDraft()
     XCTAssertEqual(model.saveProgress, .clean)
+    XCTAssertNil(model.terminationRisk)
     XCTAssertEqual(runtime.editCount, 1)
     XCTAssertEqual(runtime.saveCount, 2)
   }
@@ -35,6 +50,7 @@ final class VaultAppModelTests: XCTestCase {
 
     await model.unlockWithPassword(password, keyFileURL: nil)
     XCTAssertNotNil(model.kdfPrompt)
+    XCTAssertEqual(model.terminationRisk, .kdfConfirmation)
     XCTAssertEqual(password.reveal(), "master-password")
 
     model.cancelKDF()
@@ -87,6 +103,136 @@ final class VaultAppModelTests: XCTestCase {
     XCTAssertEqual(password.reveal(), "")
     XCTAssertEqual(scopedAccess.retained, [keyFileURL])
     XCTAssertEqual(scopedAccess.released, [keyFileURL])
+  }
+
+  func testStartupReconciliationPurgesQuickUnlockWhenDesiredStateIsDisabled() async {
+    let runtime = ModelTestRuntime()
+    let settings = VolatileQuickUnlockSettingsStore(isEnabled: false)
+    let model = VaultAppModel(runtime: runtime, quickUnlockSettings: settings)
+
+    await model.reconcileStartupSettings()
+
+    XCTAssertEqual(runtime.reconcileCount, 1)
+    XCTAssertEqual(runtime.lastReconcileEnabled, false)
+    XCTAssertFalse(model.isUnlocked)
+  }
+
+  func testPasswordUnlockReconcilesPersistedQuickUnlockIntentBeforeClearingCredential()
+    async throws
+  {
+    let runtime = ModelTestRuntime()
+    let settings = VolatileQuickUnlockSettingsStore(isEnabled: true)
+    let model = VaultAppModel(runtime: runtime, quickUnlockSettings: settings)
+    try await openTestVault(model)
+    let password = VaultKernSensitiveString("master-password")
+
+    await model.unlockWithPassword(password, keyFileURL: nil)
+
+    XCTAssertTrue(settings.isEnabled)
+    XCTAssertTrue(model.quickUnlockDesiredEnabled)
+    XCTAssertEqual(runtime.reconcileCount, 1)
+    XCTAssertEqual(runtime.lastReconcileEnabled, true)
+    XCTAssertEqual(runtime.lastReconcileHadPassword, true)
+    XCTAssertEqual(password.reveal(), "")
+  }
+
+  func testStaleBiometricCredentialIsReconciledByNextPasswordUnlock() async throws {
+    let runtime = ModelTestRuntime(blobStatus: .credentialRequired)
+    let settings = VolatileQuickUnlockSettingsStore(isEnabled: true)
+    let model = VaultAppModel(runtime: runtime, quickUnlockSettings: settings)
+    try await openTestVault(model)
+
+    await model.unlockWithBiometrics()
+    XCTAssertEqual(model.quickUnlockKnownEnrolled, false)
+    XCTAssertEqual(runtime.reconcileCount, 0)
+
+    let password = VaultKernSensitiveString("current-password")
+    await model.unlockWithPassword(password, keyFileURL: nil)
+
+    XCTAssertEqual(runtime.reconcileCount, 1)
+    XCTAssertEqual(runtime.lastReconcileEnabled, true)
+    XCTAssertEqual(runtime.lastReconcileHadPassword, true)
+    XCTAssertEqual(model.quickUnlockKnownEnrolled, true)
+    XCTAssertEqual(password.reveal(), "")
+  }
+
+  func testEnabledQuickUnlockDoesNotClaimEnrollmentWhenPlatformIsUnsupported() async throws {
+    let runtime = ModelTestRuntime(supportsQuickUnlock: false)
+    let settings = VolatileQuickUnlockSettingsStore(isEnabled: true)
+    let model = VaultAppModel(runtime: runtime, quickUnlockSettings: settings)
+    try await openTestVault(model)
+
+    await model.unlockWithPassword(
+      VaultKernSensitiveString("master-password"),
+      keyFileURL: nil
+    )
+
+    XCTAssertNil(model.quickUnlockKnownEnrolled)
+    XCTAssertEqual(runtime.reconcileCount, 1)
+  }
+
+  func testDisablingQuickUnlockPersistsIntentBeforeReconciliation() async throws {
+    let runtime = ModelTestRuntime()
+    let settings = VolatileQuickUnlockSettingsStore(isEnabled: true)
+    let model = VaultAppModel(runtime: runtime, quickUnlockSettings: settings)
+    try await openTestVault(model)
+    await model.unlockWithPassword(
+      VaultKernSensitiveString("master-password"),
+      keyFileURL: nil
+    )
+
+    await model.disableQuickUnlock()
+
+    XCTAssertFalse(settings.isEnabled)
+    XCTAssertFalse(model.quickUnlockDesiredEnabled)
+    XCTAssertEqual(runtime.lastReconcileEnabled, false)
+    XCTAssertEqual(model.quickUnlockKnownEnrolled, false)
+  }
+
+  func testDisablingQuickUnlockReconcilesImmediatelyWhileVaultIsLocked() async {
+    let runtime = ModelTestRuntime()
+    let settings = VolatileQuickUnlockSettingsStore(isEnabled: true)
+    let model = VaultAppModel(runtime: runtime, quickUnlockSettings: settings)
+
+    await model.disableQuickUnlock()
+
+    XCTAssertFalse(settings.isEnabled)
+    XCTAssertEqual(runtime.reconcileCount, 1)
+    XCTAssertEqual(runtime.lastReconcileEnabled, false)
+  }
+
+  func testTerminationRequiresExplicitConfirmationForDirtyDraft() async throws {
+    let runtime = ModelTestRuntime()
+    let model = VaultAppModel(runtime: runtime)
+    try await openTestVault(model)
+    await model.unlockWithPassword(
+      VaultKernSensitiveString("master-password"),
+      keyFileURL: nil
+    )
+    await model.selectEntry("entry")
+    model.updateDraft(\.notes, value: "unsaved")
+    let appDelegate = VaultKernAppDelegate()
+
+    appDelegate.confirmsTermination = { _ in false }
+    XCTAssertEqual(appDelegate.terminationReply(for: model), .terminateCancel)
+
+    appDelegate.confirmsTermination = { risk in
+      XCTAssertEqual(risk, .dirtyDraft)
+      return true
+    }
+    XCTAssertEqual(appDelegate.terminationReply(for: model), .terminateNow)
+  }
+
+  func testCredentialSubmissionReservationClosesTheTaskSchedulingGap() async {
+    let model = VaultAppModel(runtime: ModelTestRuntime())
+
+    XCTAssertTrue(model.registerCredentialSubmission())
+    XCTAssertFalse(model.registerCredentialSubmission())
+    XCTAssertEqual(model.terminationRisk, .operationInProgress)
+
+    await model.unlockWithBiometrics()
+    XCTAssertFalse(model.hasPendingCredentialSubmission)
+    XCTAssertNil(model.terminationRisk)
   }
 
   private func openTestVault(_ model: VaultAppModel) async throws {
@@ -143,34 +289,43 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
   private let lock = NSLock()
   private let failFirstSave: Bool
   private let requiresKDFConfirmation: Bool
+  private let blobStatus: UnlockBlobStatusDto
+  private let supportsQuickUnlock: Bool
   private var mutableEditCount = 0
   private var mutableSaveCount = 0
-  private var currentDraft = EntryDraft(
-    id: "entry",
-    title: "Example",
-    username: "alice",
-    password: "secret",
-    url: "https://example.com",
-    notes: "initial",
-    totpURI: "",
-    customFields: [],
-    attachments: [],
-    passkeyRelyingParty: nil
-  )
+  private var mutableReconcileCount = 0
+  private var mutableLastReconcileEnabled: Bool?
+  private var mutableLastReconcileHadPassword: Bool?
+  private var mutableUnlocked = false
+  private var currentNotes = "initial"
 
-  init(failFirstSave: Bool = false, requiresKDFConfirmation: Bool = false) {
+  init(
+    failFirstSave: Bool = false,
+    requiresKDFConfirmation: Bool = false,
+    blobStatus: UnlockBlobStatusDto = .notEnrolled,
+    supportsQuickUnlock: Bool = true
+  ) {
     self.failFirstSave = failFirstSave
     self.requiresKDFConfirmation = requiresKDFConfirmation
+    self.blobStatus = blobStatus
+    self.supportsQuickUnlock = supportsQuickUnlock
   }
 
   var editCount: Int { lock.withLock { mutableEditCount } }
   var saveCount: Int { lock.withLock { mutableSaveCount } }
+  var reconcileCount: Int { lock.withLock { mutableReconcileCount } }
+  var lastReconcileEnabled: Bool? { lock.withLock { mutableLastReconcileEnabled } }
+  var lastReconcileHadPassword: Bool? {
+    lock.withLock { mutableLastReconcileHadPassword }
+  }
 
   func openVault(path: String) throws -> VaultHandleDto {
     VaultHandleDto(vaultId: "vault", name: "Test", path: path)
   }
 
-  func sessionState() throws -> SessionStateDto { state(unlocked: false) }
+  func sessionState() throws -> SessionStateDto {
+    lock.withLock { state(unlocked: mutableUnlocked) }
+  }
 
   func unlockVault(
     vaultID: String,
@@ -186,22 +341,45 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
         limit: 262_144
       )
     }
+    lock.withLock { mutableUnlocked = true }
     return state(unlocked: true)
   }
 
   func unlockWithBlob(kdfConfirmed: Bool) throws -> UnlockBlobResultDto {
-    UnlockBlobResultDto(status: .notEnrolled, state: state(unlocked: false))
+    lock.withLock { mutableUnlocked = blobStatus == .unlocked }
+    return UnlockBlobResultDto(
+      status: blobStatus,
+      state: state(unlocked: blobStatus == .unlocked)
+    )
   }
 
-  func enroll(
+  func reconcileQuickUnlock(
+    enabled: Bool,
     password: VaultKernSensitiveString?,
     keyFilePath: String?,
     kdfConfirmed: Bool
-  ) throws -> SessionStateDto { state(unlocked: true) }
+  ) throws -> SessionStateDto {
+    lock.withLock {
+      mutableReconcileCount += 1
+      mutableLastReconcileEnabled = enabled
+      mutableLastReconcileHadPassword = password != nil
+      return state(unlocked: mutableUnlocked)
+    }
+  }
 
-  func revoke() throws -> SessionStateDto { state(unlocked: true) }
-  func lockSession() throws -> SessionStateDto { state(unlocked: false) }
-  func closeVault(vaultID: String) throws -> SessionStateDto { state(unlocked: false) }
+  func lockSession() throws -> SessionStateDto {
+    lock.withLock {
+      mutableUnlocked = false
+      return state(unlocked: false)
+    }
+  }
+
+  func closeVault(vaultID: String) throws -> SessionStateDto {
+    lock.withLock {
+      mutableUnlocked = false
+      return state(unlocked: false)
+    }
+  }
 
   func listEntries(vaultID: String) throws -> [EntrySummaryDto] {
     [
@@ -217,7 +395,7 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
   }
 
   func readEntry(vaultID: String, entryID: String) throws -> EntryDraft {
-    lock.withLock { currentDraft }
+    lock.withLock { makeDraft(notes: currentNotes) }
   }
 
   func editEntry(
@@ -228,8 +406,8 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
     defer { fields.close() }
     return lock.withLock {
       mutableEditCount += 1
-      currentDraft.notes = "changed"
-      return currentDraft
+      currentNotes = fields.value.notes.reveal()
+      return makeDraft(notes: currentNotes)
     }
   }
 
@@ -248,8 +426,23 @@ private final class ModelTestRuntime: VaultRuntimeClient, @unchecked Sendable {
       unlocked: unlocked,
       activeVaultId: unlocked ? "vault" : nil,
       currentVaultRefId: nil,
-      supportsBiometricUnlock: false,
+      supportsBiometricUnlock: supportsQuickUnlock,
       sourceStatus: nil
+    )
+  }
+
+  private func makeDraft(notes: String) -> EntryDraft {
+    EntryDraft(
+      id: "entry",
+      title: "Example",
+      username: "alice",
+      password: "secret",
+      url: "https://example.com",
+      notes: notes,
+      totpURI: "",
+      customFields: [],
+      attachments: [],
+      passkeyRelyingParty: nil
     )
   }
 }

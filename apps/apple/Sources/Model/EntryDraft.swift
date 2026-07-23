@@ -1,189 +1,199 @@
 import Foundation
 
-struct EntryCustomFieldDraft: Identifiable, Sendable,
+struct EntryCustomFieldDraft: Identifiable, @unchecked Sendable,
   CustomStringConvertible, CustomDebugStringConvertible
 {
   let id: UUID
-  var key: String
-  var value: String
+  let key: VaultKernSensitiveString
+  let value: VaultKernSensitiveString
   var isProtected: Bool
 
-  init(id: UUID = UUID(), key: String, value: String, isProtected: Bool) {
+  init(
+    id: UUID = UUID(),
+    key: VaultKernSensitiveString,
+    value: VaultKernSensitiveString,
+    isProtected: Bool
+  ) {
     self.id = id
     self.key = key
     self.value = value
     self.isProtected = isProtected
   }
 
+  init(id: UUID = UUID(), key: String, value: String, isProtected: Bool) {
+    self.init(
+      id: id,
+      key: VaultKernSensitiveString(key),
+      value: VaultKernSensitiveString(value),
+      isProtected: isProtected
+    )
+  }
+
+  func close() {
+    key.close()
+    value.close()
+  }
+
   var description: String { "EntryCustomFieldDraft([REDACTED])" }
   var debugDescription: String { description }
 }
 
-struct EntryAttachmentSummary: Identifiable, Sendable,
+struct EntryAttachmentSummary: Identifiable, @unchecked Sendable,
   CustomStringConvertible, CustomDebugStringConvertible
 {
   let id: UUID
-  var name: String
+  let name: VaultKernSensitiveString
   let size: UInt64
 
-  init(id: UUID = UUID(), name: String, size: UInt64) {
+  init(id: UUID = UUID(), name: VaultKernSensitiveString, size: UInt64) {
     self.id = id
     self.name = name
     self.size = size
+  }
+
+  init(id: UUID = UUID(), name: String, size: UInt64) {
+    self.init(id: id, name: VaultKernSensitiveString(name), size: size)
+  }
+
+  func close() {
+    name.close()
   }
 
   var description: String { "EntryAttachmentSummary([REDACTED])" }
   var debugDescription: String { description }
 }
 
-struct EntryDraft: Identifiable, Sendable,
+final class EntryDraft: @unchecked Sendable,
   CustomStringConvertible, CustomDebugStringConvertible
 {
-  var id: String
-  var title: String
-  var username: String
-  var password: String
-  var url: String
-  var notes: String
-  var totpURI: String
+  let id: VaultKernSensitiveString
+  let title: VaultKernSensitiveString
+  let username: VaultKernSensitiveString
+  let password: VaultKernSensitiveString
+  let url: VaultKernSensitiveString
+  let notes: VaultKernSensitiveString
+  let totpURI: VaultKernSensitiveString
   var customFields: [EntryCustomFieldDraft]
   var attachments: [EntryAttachmentSummary]
-  var passkeyRelyingParty: String?
+  let passkeyRelyingParty: VaultKernSensitiveString?
 
-  func validateForSave() throws {
-    var keys = Set<String>()
-    for field in customFields {
-      if field.key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        guard field.value.isEmpty else {
-          throw EntryDraftValidationError.missingCustomFieldKey
-        }
-        continue
-      }
-      guard !Self.isReservedCustomFieldKey(field.key) else {
-        throw EntryDraftValidationError.reservedCustomFieldKey
-      }
-      guard keys.insert(field.key).inserted else {
-        throw EntryDraftValidationError.duplicateCustomFieldKey
-      }
-    }
+  private let closeLock = NSLock()
+  private var isClosed = false
+
+  init(
+    id: VaultKernSensitiveString,
+    title: VaultKernSensitiveString,
+    username: VaultKernSensitiveString,
+    password: VaultKernSensitiveString,
+    url: VaultKernSensitiveString,
+    notes: VaultKernSensitiveString,
+    totpURI: VaultKernSensitiveString,
+    customFields: [EntryCustomFieldDraft],
+    attachments: [EntryAttachmentSummary],
+    passkeyRelyingParty: VaultKernSensitiveString?
+  ) {
+    self.id = id
+    self.title = title
+    self.username = username
+    self.password = password
+    self.url = url
+    self.notes = notes
+    self.totpURI = totpURI
+    self.customFields = customFields
+    self.attachments = attachments
+    self.passkeyRelyingParty = passkeyRelyingParty
   }
 
-  mutating func clear() {
-    id.removeAll(keepingCapacity: false)
-    title.removeAll(keepingCapacity: false)
-    username.removeAll(keepingCapacity: false)
-    password.removeAll(keepingCapacity: false)
-    url.removeAll(keepingCapacity: false)
-    notes.removeAll(keepingCapacity: false)
-    totpURI.removeAll(keepingCapacity: false)
-    for index in customFields.indices {
-      customFields[index].key.removeAll(keepingCapacity: false)
-      customFields[index].value.removeAll(keepingCapacity: false)
-    }
-    customFields.removeAll(keepingCapacity: false)
-    for index in attachments.indices {
-      attachments[index].name.removeAll(keepingCapacity: false)
-    }
-    attachments.removeAll(keepingCapacity: false)
-    passkeyRelyingParty?.removeAll(keepingCapacity: false)
-    passkeyRelyingParty = nil
-  }
-
-  var description: String { "EntryDraft([REDACTED])" }
-  var debugDescription: String { description }
-
-  private static func isReservedCustomFieldKey(_ key: String) -> Bool {
-    standardFieldKeys.contains(key)
-      || otpFieldKeys.contains(key)
-      || key.hasPrefix("KPEX_PASSKEY_")
-  }
-
-  private static let standardFieldKeys: Set<String> = [
-    "Title", "UserName", "Password", "URL", "Notes",
-  ]
-
-  private static let otpFieldKeys: Set<String> = [
-    "otp",
-    "TimeOtp-Secret",
-    "TimeOtp-Secret-Hex",
-    "TimeOtp-Secret-Base32",
-    "TimeOtp-Secret-Base64",
-    "TimeOtp-Algorithm",
-    "TimeOtp-Length",
-    "TimeOtp-Period",
-    "HmacOtp-Secret",
-    "HmacOtp-Secret-Hex",
-    "HmacOtp-Secret-Base32",
-    "HmacOtp-Secret-Base64",
-    "HmacOtp-Counter",
-  ]
-}
-
-enum EntryDraftValidationError: LocalizedError, Equatable {
-  case missingCustomFieldKey
-  case reservedCustomFieldKey
-  case duplicateCustomFieldKey
-
-  var errorDescription: String? {
-    switch self {
-    case .missingCustomFieldKey:
-      "Custom fields with a value must have a name."
-    case .reservedCustomFieldKey:
-      "Custom fields cannot use reserved KeePass or VaultKern names."
-    case .duplicateCustomFieldKey:
-      "Custom field names must be unique."
-    }
-  }
-}
-
-extension EntryDetailDto {
-  func consumeAsDraft() -> EntryDraft {
-    defer { closeSensitiveValues() }
-    return EntryDraft(
-      id: id.reveal(),
-      title: title.reveal(),
-      username: username.reveal(),
-      password: password.reveal(),
-      url: url.reveal(),
-      notes: notes.reveal(),
-      totpURI: totpUri?.reveal() ?? "",
-      customFields: customFields.map {
-        EntryCustomFieldDraft(
-          key: $0.key.reveal(),
-          value: $0.value.reveal(),
-          isProtected: $0.protected
-        )
-      },
-      attachments: attachments.map {
-        EntryAttachmentSummary(name: $0.name.reveal(), size: $0.size)
-      },
-      passkeyRelyingParty: passkey?.relyingParty.reveal()
+  convenience init(
+    id: String,
+    title: String,
+    username: String,
+    password: String,
+    url: String,
+    notes: String,
+    totpURI: String,
+    customFields: [EntryCustomFieldDraft],
+    attachments: [EntryAttachmentSummary],
+    passkeyRelyingParty: String?
+  ) {
+    self.init(
+      id: VaultKernSensitiveString(id),
+      title: VaultKernSensitiveString(title),
+      username: VaultKernSensitiveString(username),
+      password: VaultKernSensitiveString(password),
+      url: VaultKernSensitiveString(url),
+      notes: VaultKernSensitiveString(notes),
+      totpURI: VaultKernSensitiveString(totpURI),
+      customFields: customFields,
+      attachments: attachments,
+      passkeyRelyingParty: passkeyRelyingParty.map { VaultKernSensitiveString($0) }
     )
   }
 
-  func closeSensitiveValues() {
+  func close() {
+    closeLock.lock()
+    guard !isClosed else {
+      closeLock.unlock()
+      return
+    }
+    isClosed = true
+    closeLock.unlock()
+
     id.close()
     title.close()
     username.close()
     password.close()
     url.close()
     notes.close()
-    totp?.close()
-    totpUri?.close()
+    totpURI.close()
     for field in customFields {
-      field.key.close()
-      field.value.close()
+      field.close()
     }
+    customFields.removeAll(keepingCapacity: false)
     for attachment in attachments {
-      attachment.name.close()
+      attachment.close()
     }
+    attachments.removeAll(keepingCapacity: false)
+    passkeyRelyingParty?.close()
+  }
+
+  deinit { close() }
+
+  var description: String { "EntryDraft([REDACTED])" }
+  var debugDescription: String { description }
+}
+
+extension EntryDetailDto {
+  func consumeAsDraft() -> EntryDraft {
+    totp?.close()
+    let retainedRelyingParty = passkey?.relyingParty
     if let passkey {
       passkey.username.close()
       passkey.credentialId.close()
       passkey.generatedUserId?.close()
-      passkey.relyingParty.close()
       passkey.userHandle?.close()
     }
+
+    return EntryDraft(
+      id: id,
+      title: title,
+      username: username,
+      password: password,
+      url: url,
+      notes: notes,
+      totpURI: totpUri ?? VaultKernSensitiveString(""),
+      customFields: customFields.map {
+        EntryCustomFieldDraft(
+          key: $0.key,
+          value: $0.value,
+          isProtected: $0.protected
+        )
+      },
+      attachments: attachments.map {
+        EntryAttachmentSummary(name: $0.name, size: $0.size)
+      },
+      passkeyRelyingParty: retainedRelyingParty
+    )
   }
 }
 
@@ -195,19 +205,19 @@ final class OwnedEntryFields: @unchecked Sendable {
   private var isClosed = false
 
   init(draft: EntryDraft) {
-    let title = VaultKernSensitiveString(draft.title)
-    let username = VaultKernSensitiveString(draft.username)
-    let password = VaultKernSensitiveString(draft.password)
-    let url = VaultKernSensitiveString(draft.url)
-    let notes = VaultKernSensitiveString(draft.notes)
-    let totpURI = draft.totpURI.isEmpty ? nil : VaultKernSensitiveString(draft.totpURI)
+    let title = draft.title.copyForTransfer()
+    let username = draft.username.copyForTransfer()
+    let password = draft.password.copyForTransfer()
+    let url = draft.url.copyForTransfer()
+    let notes = draft.notes.copyForTransfer()
+    let totpURI = draft.totpURI.isEmpty ? nil : draft.totpURI.copyForTransfer()
     var owners = [title, username, password, url, notes]
     if let totpURI {
       owners.append(totpURI)
     }
     let customFields = draft.customFields.map { field in
-      let key = VaultKernSensitiveString(field.key)
-      let value = VaultKernSensitiveString(field.value)
+      let key = field.key.copyForTransfer()
+      let value = field.value.copyForTransfer()
       owners.append(contentsOf: [key, value])
       return EntryCustomFieldDto(key: key, value: value, protected: field.isProtected)
     }

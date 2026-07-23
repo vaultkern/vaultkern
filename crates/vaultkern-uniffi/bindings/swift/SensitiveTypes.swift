@@ -14,10 +14,34 @@ public final class VaultKernSensitiveString: @unchecked Sendable,
         storage = Data(value.utf8)
     }
 
+    private init(storage: Data) {
+        self.storage = storage
+    }
+
+    public var isEmpty: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage.isEmpty
+    }
+
     public func reveal() -> String {
         lock.lock()
         defer { lock.unlock() }
         return String(decoding: storage, as: UTF8.self)
+    }
+
+    public func replace(with value: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        storage.resetBytes(in: storage.startIndex..<storage.endIndex)
+        storage = Data(value.utf8)
+    }
+
+    /// Creates the short-lived independent owner required for an FFI transfer.
+    public func copyForTransfer() -> VaultKernSensitiveString {
+        lock.lock()
+        defer { lock.unlock() }
+        return VaultKernSensitiveString(storage: Self.deepCopy(storage))
     }
 
     public func close() {
@@ -37,6 +61,19 @@ public final class VaultKernSensitiveString: @unchecked Sendable,
 
     public func hash(into hasher: inout Hasher) {
         hasher.combine(ObjectIdentifier(self))
+    }
+
+    private static func deepCopy(_ value: Data) -> Data {
+        var copy = Data(count: value.count)
+        copy.withUnsafeMutableBytes { (destination: UnsafeMutableRawBufferPointer) in
+            value.withUnsafeBytes { (source: UnsafeRawBufferPointer) in
+                guard let destinationAddress = destination.baseAddress,
+                      let sourceAddress = source.baseAddress
+                else { return }
+                destinationAddress.copyMemory(from: sourceAddress, byteCount: source.count)
+            }
+        }
+        return copy
     }
 }
 

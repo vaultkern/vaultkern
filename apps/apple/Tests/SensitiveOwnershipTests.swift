@@ -3,7 +3,7 @@ import XCTest
 @testable import VaultKern
 
 final class SensitiveOwnershipTests: XCTestCase {
-  func testEntryDetailConsumptionClosesEveryForeignOwner() {
+  func testEntryDetailConsumptionTransfersOwnersAndCloseClearsThem() {
     let id = VaultKernSensitiveString("entry-id")
     let title = VaultKernSensitiveString("Example")
     let username = VaultKernSensitiveString("alice")
@@ -43,13 +43,72 @@ final class SensitiveOwnershipTests: XCTestCase {
 
     let draft = detail.consumeAsDraft()
 
-    XCTAssertEqual(draft.password, "secret")
+    XCTAssertTrue(draft.password === password)
+    XCTAssertEqual(draft.password.reveal(), "secret")
+    XCTAssertEqual(totp.reveal(), "")
+    for owner in [
+      id, title, username, password, url, notes, totpURI, customKey, customValue,
+      attachmentName,
+    ] {
+      XCTAssertFalse(owner.reveal().isEmpty)
+    }
+
+    draft.close()
+
     for owner in [
       id, title, username, password, url, notes, totp, totpURI, customKey, customValue,
       attachmentName,
     ] {
       XCTAssertEqual(owner.reveal(), "")
     }
+  }
+
+  func testSensitiveStringTransferCopyHasIndependentLifetime() {
+    let source = VaultKernSensitiveString("secret")
+    let transfer = source.copyForTransfer()
+
+    source.replace(with: "updated")
+    XCTAssertEqual(source.reveal(), "updated")
+    XCTAssertEqual(transfer.reveal(), "secret")
+
+    transfer.close()
+    XCTAssertEqual(transfer.reveal(), "")
+    XCTAssertEqual(source.reveal(), "updated")
+    source.close()
+  }
+
+  func testEmptyPasswordRemainsARealCredentialWithoutAKeyFile() {
+    let owner = VaultKernSensitiveString("")
+
+    let submitted = CredentialSubmission.password(
+      taking: owner,
+      hasKeyFile: false,
+      includesEmptyPassword: false
+    )
+
+    XCTAssertTrue(submitted === owner)
+    submitted?.close()
+  }
+
+  func testKeyFileOnlySubmissionOmitsEmptyPasswordUnlessExplicitlyIncluded() {
+    let omittedOwner = VaultKernSensitiveString("")
+    XCTAssertNil(
+      CredentialSubmission.password(
+        taking: omittedOwner,
+        hasKeyFile: true,
+        includesEmptyPassword: false
+      )
+    )
+    XCTAssertEqual(omittedOwner.reveal(), "")
+
+    let includedOwner = VaultKernSensitiveString("")
+    let included = CredentialSubmission.password(
+      taking: includedOwner,
+      hasKeyFile: true,
+      includesEmptyPassword: true
+    )
+    XCTAssertTrue(included === includedOwner)
+    included?.close()
   }
 
   func testUnavailableOneDriveAdapterClosesRejectedToken() {
@@ -86,5 +145,6 @@ final class SensitiveOwnershipTests: XCTestCase {
     XCTAssertEqual(String(reflecting: attachment), "EntryAttachmentSummary([REDACTED])")
     XCTAssertEqual(String(describing: draft), "EntryDraft([REDACTED])")
     XCTAssertEqual(String(reflecting: draft), "EntryDraft([REDACTED])")
+    draft.close()
   }
 }

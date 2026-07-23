@@ -857,6 +857,8 @@ public protocol UnlockBlobAdapter: AnyObject, Sendable {
 
     func deleteBlob(key: String) throws
 
+    func purgeQuickUnlockRecords() throws  -> UInt64
+
 }
 /**
  * Platform-owned protected storage and user-presence operations for one
@@ -988,6 +990,14 @@ open func deleteBlob(key: String)throws   {try rustCallWithError(FfiConverterTyp
         FfiConverterString.lower(key),$0
     )
 }
+}
+
+open func purgeQuickUnlockRecords()throws  -> UInt64  {
+    return try  FfiConverterUInt64.lift(try rustCallWithError(FfiConverterTypePlatformAdapterError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_purge_quick_unlock_records(
+            self.uniffiCloneHandle(),$0
+    )
+})
 }
 
 
@@ -1231,6 +1241,29 @@ fileprivate struct UniffiCallbackInterfaceUnlockBlobAdapter {
 
 
             let writeReturn = { () }
+            uniffiTraitInterfaceCallWithError(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn,
+                lowerError: FfiConverterTypePlatformAdapterError_lower
+            )
+        },
+        purgeQuickUnlockRecords: { (
+            uniffiHandle: UInt64,
+            uniffiOutReturn: UnsafeMutablePointer<UInt64>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> UInt64 in
+                guard let uniffiObj = try? FfiConverterTypeUnlockBlobAdapter.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return try uniffiObj.purgeQuickUnlockRecords(
+                )
+            }
+
+
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterUInt64.lower($0) }
             uniffiTraitInterfaceCallWithError(
                 callStatus: uniffiCallStatus,
                 makeCall: makeCall,
@@ -2038,6 +2071,8 @@ public protocol VaultUnlockProtocol: AnyObject, Sendable {
 
     func enroll(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
 
+    func reconcile(enabled: Bool, password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
+
     func revoke() throws  -> SessionStateDto
 
     func unlockCurrent(password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool) throws  -> SessionStateDto
@@ -2104,6 +2139,18 @@ open func enroll(password: SensitiveString?, keyFilePath: String?, kdfConfirmed:
     return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
     uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(
             self.uniffiCloneHandle(),
+        FfiConverterOptionTypeSensitiveString.lower(password),
+        FfiConverterOptionString.lower(keyFilePath),
+        FfiConverterBool.lower(kdfConfirmed),$0
+    )
+})
+}
+
+open func reconcile(enabled: Bool, password: SensitiveString?, keyFilePath: String?, kdfConfirmed: Bool)throws  -> SessionStateDto  {
+    return try  FfiConverterTypeSessionStateDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultunlock_reconcile(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),
         FfiConverterOptionTypeSensitiveString.lower(password),
         FfiConverterOptionString.lower(keyFilePath),
         FfiConverterBool.lower(kdfConfirmed),$0
@@ -4863,6 +4910,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob() != 21760) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_purge_quick_unlock_records() != 7681) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey() != 55408) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -4948,6 +4998,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_reconcile() != 1075) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533) {

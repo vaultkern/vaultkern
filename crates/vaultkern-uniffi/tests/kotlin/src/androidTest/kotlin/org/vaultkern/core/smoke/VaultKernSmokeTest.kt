@@ -52,6 +52,13 @@ private class FakeUnlockBlobAdapter : UnlockBlobAdapter {
     override fun deleteBlob(key: String) {
         blobs.remove(key)?.fill(0)
     }
+
+    override fun purgeQuickUnlockRecords(): ULong {
+        val values = blobs.values.toList()
+        blobs.clear()
+        values.forEach { it.fill(0) }
+        return values.size.toULong()
+    }
 }
 
 private class FakeOneDriveTokenAdapter : OneDriveTokenAdapter {

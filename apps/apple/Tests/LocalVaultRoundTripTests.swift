@@ -43,18 +43,19 @@ final class LocalVaultRoundTripTests: XCTestCase {
 
     let summaries = try firstClient.listEntries(vaultID: firstHandle.vaultId)
     let summary = try XCTUnwrap(summaries.first)
-    var draft = try firstClient.readEntry(vaultID: firstHandle.vaultId, entryID: summary.id)
+    let draft = try firstClient.readEntry(vaultID: firstHandle.vaultId, entryID: summary.id)
     let marker = "macOS M2 \(UUID().uuidString)"
-    draft.notes = marker
-    _ = try firstClient.editEntry(
+    draft.notes.replace(with: marker)
+    let staged = try firstClient.editEntry(
       vaultID: firstHandle.vaultId,
       entryID: summary.id,
       fields: OwnedEntryFields(draft: draft)
     )
+    staged.close()
     let saved = try firstClient.save(vaultID: firstHandle.vaultId)
     XCTAssertEqual(saved.status, .saved)
     _ = try firstClient.closeVault(vaultID: firstHandle.vaultId)
-    draft.clear()
+    draft.close()
 
     let secondClient = try LiveVaultRuntimeClient(configuration: configuration)
     let secondHandle = try secondClient.openVault(path: vault.path)
@@ -66,9 +67,9 @@ final class LocalVaultRoundTripTests: XCTestCase {
       keyFilePath: nil,
       kdfConfirmed: false
     )
-    var reopened = try secondClient.readEntry(vaultID: secondHandle.vaultId, entryID: summary.id)
-    XCTAssertEqual(reopened.notes, marker)
-    reopened.clear()
+    let reopened = try secondClient.readEntry(vaultID: secondHandle.vaultId, entryID: summary.id)
+    XCTAssertEqual(reopened.notes.reveal(), marker)
+    reopened.close()
     _ = try secondClient.closeVault(vaultID: secondHandle.vaultId)
   }
 

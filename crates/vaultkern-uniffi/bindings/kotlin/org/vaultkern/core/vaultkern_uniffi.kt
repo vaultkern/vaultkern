@@ -651,6 +651,9 @@ internal interface UniffiCallbackInterfaceUnlockBlobAdapterMethod7 : com.sun.jna
 internal interface UniffiCallbackInterfaceUnlockBlobAdapterMethod8 : com.sun.jna.Callback {
     fun callback(`uniffiHandle`: Long,`key`: RustBuffer.ByValue,`uniffiOutReturn`: Pointer,uniffiCallStatus: UniffiRustCallStatus,)
 }
+internal interface UniffiCallbackInterfaceUnlockBlobAdapterMethod9 : com.sun.jna.Callback {
+    fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: LongByReference,uniffiCallStatus: UniffiRustCallStatus,)
+}
 @Structure.FieldOrder("uniffiFree", "uniffiClone", "loadRefreshToken", "storeRefreshToken", "deleteRefreshToken")
 internal open class UniffiVTableCallbackInterfaceOneDriveTokenAdapter(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -676,7 +679,7 @@ internal open class UniffiVTableCallbackInterfaceOneDriveTokenAdapter(
     }
 
 }
-@Structure.FieldOrder("uniffiFree", "uniffiClone", "supportsUnlockBlob", "authorize", "storeRequiresUserPresence", "loadRequiresUserPresence", "authorizeStoreUserPresence", "storeBlob", "loadBlob", "containsBlob", "deleteBlob")
+@Structure.FieldOrder("uniffiFree", "uniffiClone", "supportsUnlockBlob", "authorize", "storeRequiresUserPresence", "loadRequiresUserPresence", "authorizeStoreUserPresence", "storeBlob", "loadBlob", "containsBlob", "deleteBlob", "purgeQuickUnlockRecords")
 internal open class UniffiVTableCallbackInterfaceUnlockBlobAdapter(
     @JvmField internal var `uniffiFree`: UniffiCallbackInterfaceFree? = null,
     @JvmField internal var `uniffiClone`: UniffiCallbackInterfaceClone? = null,
@@ -689,6 +692,7 @@ internal open class UniffiVTableCallbackInterfaceUnlockBlobAdapter(
     @JvmField internal var `loadBlob`: UniffiCallbackInterfaceUnlockBlobAdapterMethod6? = null,
     @JvmField internal var `containsBlob`: UniffiCallbackInterfaceUnlockBlobAdapterMethod7? = null,
     @JvmField internal var `deleteBlob`: UniffiCallbackInterfaceUnlockBlobAdapterMethod8? = null,
+    @JvmField internal var `purgeQuickUnlockRecords`: UniffiCallbackInterfaceUnlockBlobAdapterMethod9? = null,
 ) : Structure() {
     class UniffiByValue(
         `uniffiFree`: UniffiCallbackInterfaceFree? = null,
@@ -702,7 +706,8 @@ internal open class UniffiVTableCallbackInterfaceUnlockBlobAdapter(
         `loadBlob`: UniffiCallbackInterfaceUnlockBlobAdapterMethod6? = null,
         `containsBlob`: UniffiCallbackInterfaceUnlockBlobAdapterMethod7? = null,
         `deleteBlob`: UniffiCallbackInterfaceUnlockBlobAdapterMethod8? = null,
-    ): UniffiVTableCallbackInterfaceUnlockBlobAdapter(`uniffiFree`,`uniffiClone`,`supportsUnlockBlob`,`authorize`,`storeRequiresUserPresence`,`loadRequiresUserPresence`,`authorizeStoreUserPresence`,`storeBlob`,`loadBlob`,`containsBlob`,`deleteBlob`,), Structure.ByValue
+        `purgeQuickUnlockRecords`: UniffiCallbackInterfaceUnlockBlobAdapterMethod9? = null,
+    ): UniffiVTableCallbackInterfaceUnlockBlobAdapter(`uniffiFree`,`uniffiClone`,`supportsUnlockBlob`,`authorize`,`storeRequiresUserPresence`,`loadRequiresUserPresence`,`authorizeStoreUserPresence`,`storeBlob`,`loadBlob`,`containsBlob`,`deleteBlob`,`purgeQuickUnlockRecords`,), Structure.ByValue
 
    internal fun uniffiSetValue(other: UniffiVTableCallbackInterfaceUnlockBlobAdapter) {
         `uniffiFree` = other.`uniffiFree`
@@ -716,6 +721,7 @@ internal open class UniffiVTableCallbackInterfaceUnlockBlobAdapter(
         `loadBlob` = other.`loadBlob`
         `containsBlob` = other.`containsBlob`
         `deleteBlob` = other.`deleteBlob`
+        `purgeQuickUnlockRecords` = other.`purgeQuickUnlockRecords`
     }
 
 }
@@ -765,6 +771,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_contains_blob(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_purge_quick_unlock_records(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey(
     ): Short
@@ -823,6 +831,8 @@ internal object IntegrityCheckingUniffiLib {
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsync_trigger(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll(
+    ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_reconcile(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke(
     ): Short
@@ -890,6 +900,8 @@ external fun uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_contains_blob(`
 ): Byte
 external fun uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_delete_blob(`ptr`: Long,`key`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_purge_quick_unlock_records(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
+): Long
 external fun uniffi_vaultkern_uniffi_fn_clone_vaultpasskeyoperation(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_vaultpasskeyoperation(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -969,6 +981,8 @@ external fun uniffi_vaultkern_uniffi_fn_clone_vaultunlock(`handle`: Long,uniffi_
 external fun uniffi_vaultkern_uniffi_fn_free_vaultunlock(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(`ptr`: Long,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
+external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_reconcile(`ptr`: Long,`enabled`: Byte,`password`: RustBuffer.ByValue,`keyFilePath`: RustBuffer.ByValue,`kdfConfirmed`: Byte,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultunlock_revoke(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1133,6 +1147,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_delete_blob() != 21760.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_unlockblobadapter_purge_quick_unlock_records() != 7681.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultpasskeyoperation_assert_passkey() != 55408.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
@@ -1218,6 +1235,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_enroll() != 55925.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_reconcile() != 1075.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultunlock_revoke() != 17533.toShort()) {
@@ -2119,6 +2139,8 @@ public interface UnlockBlobAdapter {
 
     fun `deleteBlob`(`key`: kotlin.String)
 
+    fun `purgeQuickUnlockRecords`(): kotlin.ULong
+
     companion object
 }
 
@@ -2346,6 +2368,20 @@ open class UnlockBlobAdapterImpl: Disposable, AutoCloseable, UnlockBlobAdapter
 
 
 
+    @Throws(PlatformAdapterException::class)override fun `purgeQuickUnlockRecords`(): kotlin.ULong {
+            return FfiConverterULong.lift(
+    callWithHandle {
+    uniffiRustCallWithError(PlatformAdapterException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_unlockblobadapter_purge_quick_unlock_records(
+        it,
+        _status)
+}
+    }
+    )
+    }
+
+
+
 
 
 
@@ -2513,6 +2549,22 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
             )
         }
     }
+    internal object `purgeQuickUnlockRecords`: UniffiCallbackInterfaceUnlockBlobAdapterMethod9 {
+        override fun callback(`uniffiHandle`: Long,`uniffiOutReturn`: LongByReference,uniffiCallStatus: UniffiRustCallStatus,) {
+            val uniffiObj = FfiConverterTypeUnlockBlobAdapter.handleMap.get(uniffiHandle)
+            val makeCall = { ->
+                uniffiObj.`purgeQuickUnlockRecords`(
+                )
+            }
+            val writeReturn = { value: kotlin.ULong -> uniffiOutReturn.setValue(FfiConverterULong.lower(value)) }
+            uniffiTraitInterfaceCallWithError(
+                uniffiCallStatus,
+                makeCall,
+                writeReturn,
+                { e: PlatformAdapterException -> FfiConverterTypePlatformAdapterError.lower(e) }
+            )
+        }
+    }
 
     internal object uniffiFree: UniffiCallbackInterfaceFree {
         override fun callback(handle: Long) {
@@ -2538,6 +2590,7 @@ internal object uniffiCallbackInterfaceUnlockBlobAdapter {
         `loadBlob`,
         `containsBlob`,
         `deleteBlob`,
+        `purgeQuickUnlockRecords`,
     )
 
     // Registers the foreign callback with the Rust side.
@@ -4075,6 +4128,8 @@ public interface VaultUnlockInterface {
 
     fun `enroll`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
 
+    fun `reconcile`(`enabled`: kotlin.Boolean, `password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
+
     fun `revoke`(): SessionStateDto
 
     fun `unlockCurrent`(`password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto
@@ -4190,6 +4245,20 @@ open class VaultUnlock: Disposable, AutoCloseable, VaultUnlockInterface
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_enroll(
         it,
         FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
+}
+    }
+    )
+    }
+
+
+
+    @Throws(VaultKernException::class)override fun `reconcile`(`enabled`: kotlin.Boolean, `password`: SensitiveString?, `keyFilePath`: kotlin.String?, `kdfConfirmed`: kotlin.Boolean): SessionStateDto {
+            return FfiConverterTypeSessionStateDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultunlock_reconcile(
+        it,
+        FfiConverterBoolean.lower(`enabled`),FfiConverterOptionalTypeSensitiveString.lower(`password`),FfiConverterOptionalString.lower(`keyFilePath`),FfiConverterBoolean.lower(`kdfConfirmed`),_status)
 }
     }
     )

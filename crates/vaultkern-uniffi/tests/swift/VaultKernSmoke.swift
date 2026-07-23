@@ -21,8 +21,11 @@ private final class FakeUnlockBlobAdapter: UnlockBlobAdapter, @unchecked Sendabl
     func storeBlob(key: String, value: VaultKernSensitiveBytes) throws {
         lock.lock()
         defer { lock.unlock() }
-        blobs[key] = value.copyData()
+        let replacement = value.copyData()
         value.close()
+        if var previous = blobs.updateValue(replacement, forKey: key) {
+            previous.resetBytes(in: previous.startIndex..<previous.endIndex)
+        }
     }
 
     func loadBlob(key: String) throws -> VaultKernSensitiveBytes? {
@@ -44,7 +47,20 @@ private final class FakeUnlockBlobAdapter: UnlockBlobAdapter, @unchecked Sendabl
     func deleteBlob(key: String) throws {
         lock.lock()
         defer { lock.unlock() }
-        blobs.removeValue(forKey: key)
+        if var removed = blobs.removeValue(forKey: key) {
+            removed.resetBytes(in: removed.startIndex..<removed.endIndex)
+        }
+    }
+
+    func purgeQuickUnlockRecords() throws -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        var values = Array(blobs.values)
+        blobs.removeAll(keepingCapacity: false)
+        for index in values.indices {
+            values[index].resetBytes(in: values[index].startIndex..<values[index].endIndex)
+        }
+        return UInt64(values.count)
     }
 }
 
@@ -55,14 +71,14 @@ private final class FakeOneDriveTokenAdapter: OneDriveTokenAdapter, @unchecked S
     func loadRefreshToken() throws -> VaultKernSensitiveString? {
         lock.lock()
         defer { lock.unlock() }
-        return token.map { VaultKernSensitiveString($0.reveal()) }
+        return token?.copyForTransfer()
     }
 
     func storeRefreshToken(token: VaultKernSensitiveString) throws {
         lock.lock()
         defer { lock.unlock() }
         self.token?.close()
-        self.token = VaultKernSensitiveString(token.reveal())
+        self.token = token.copyForTransfer()
         token.close()
     }
 

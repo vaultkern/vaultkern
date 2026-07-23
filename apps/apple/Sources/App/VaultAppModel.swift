@@ -6,6 +6,52 @@ struct KDFConfirmationPrompt: Identifiable, Equatable {
   let message: String
 }
 
+enum VaultTerminationRisk: Equatable {
+  case operationInProgress
+  case kdfConfirmation
+  case dirtyDraft
+  case stagedSave
+}
+
+@MainActor
+protocol QuickUnlockSettingsStoring: AnyObject {
+  var isEnabled: Bool { get }
+  func setEnabled(_ enabled: Bool)
+}
+
+@MainActor
+final class UserDefaultsQuickUnlockSettingsStore: QuickUnlockSettingsStoring {
+  private let defaults: UserDefaults
+  private let key: String
+
+  init(
+    defaults: UserDefaults = .standard,
+    key: String = "io.vaultkern.quick-unlock.enabled"
+  ) {
+    self.defaults = defaults
+    self.key = key
+  }
+
+  var isEnabled: Bool { defaults.bool(forKey: key) }
+
+  func setEnabled(_ enabled: Bool) {
+    defaults.set(enabled, forKey: key)
+  }
+}
+
+@MainActor
+final class VolatileQuickUnlockSettingsStore: QuickUnlockSettingsStoring {
+  private(set) var isEnabled: Bool
+
+  init(isEnabled: Bool = false) {
+    self.isEnabled = isEnabled
+  }
+
+  func setEnabled(_ enabled: Bool) {
+    isEnabled = enabled
+  }
+}
+
 @MainActor
 final class VaultAppModel: ObservableObject {
   @Published private(set) var bootError: String?
@@ -15,20 +61,26 @@ final class VaultAppModel: ObservableObject {
   @Published private(set) var draft: EntryDraft?
   @Published private(set) var saveProgress: SaveProgress = .clean
   @Published private(set) var isBusy = false
+  @Published private(set) var hasPendingCredentialSubmission = false
   @Published private(set) var isUnlocked = false
   @Published private(set) var supportsBiometricUnlock = false
   @Published private(set) var quickUnlockKnownEnrolled: Bool?
+  @Published private(set) var quickUnlockDesiredEnabled: Bool
   @Published var errorMessage: String?
   @Published var noticeMessage: String?
   @Published var kdfPrompt: KDFConfirmationPrompt?
 
   private let runtime: (any VaultRuntimeClient)?
   private let scopedAccess: any SecurityScopedAccessing
+  private let quickUnlockSettings: any QuickUnlockSettingsStoring
   private var vaultAccessURLs: [URL] = []
   private var pendingKDF: PendingKDFOperation?
 
   init() {
     scopedAccess = SecurityScopedAccess()
+    let quickUnlockSettings = UserDefaultsQuickUnlockSettingsStore()
+    self.quickUnlockSettings = quickUnlockSettings
+    quickUnlockDesiredEnabled = quickUnlockSettings.isEnabled
     do {
       runtime = try LiveVaultRuntimeClient(configuration: AppConfiguration.live())
       bootError = nil
@@ -40,17 +92,66 @@ final class VaultAppModel: ObservableObject {
 
   init(
     runtime: any VaultRuntimeClient,
-    scopedAccess: any SecurityScopedAccessing = SecurityScopedAccess()
+    scopedAccess: any SecurityScopedAccessing = SecurityScopedAccess(),
+    quickUnlockSettings: any QuickUnlockSettingsStoring =
+      VolatileQuickUnlockSettingsStore()
   ) {
     self.runtime = runtime
     self.scopedAccess = scopedAccess
+    self.quickUnlockSettings = quickUnlockSettings
+    quickUnlockDesiredEnabled = quickUnlockSettings.isEnabled
     bootError = nil
   }
 
   var hasUncommittedChanges: Bool { saveProgress.hasUncommittedChanges }
 
   var canChangeVault: Bool {
-    !isBusy && !saveProgress.hasUncommittedChanges && pendingKDF == nil
+    !isBusy && !hasPendingCredentialSubmission
+      && !saveProgress.hasUncommittedChanges && pendingKDF == nil
+  }
+
+  var terminationRisk: VaultTerminationRisk? {
+    if isBusy || hasPendingCredentialSubmission { return .operationInProgress }
+    if pendingKDF != nil { return .kdfConfirmation }
+    switch saveProgress {
+    case .clean:
+      return nil
+    case .dirty:
+      return .dirtyDraft
+    case .staged:
+      return .stagedSave
+    }
+  }
+
+  func registerCredentialSubmission() -> Bool {
+    guard
+      !isBusy,
+      !hasPendingCredentialSubmission,
+      pendingKDF == nil
+    else { return false }
+    hasPendingCredentialSubmission = true
+    return true
+  }
+
+  func reconcileStartupSettings() async {
+    guard
+      !quickUnlockDesiredEnabled,
+      currentVault == nil,
+      let runtime,
+      beginOperation()
+    else { return }
+    defer { endOperation() }
+    do {
+      try await reconcileDesiredQuickUnlock(
+        runtime: runtime,
+        password: nil,
+        keyFileURL: nil,
+        kdfConfirmed: false
+      )
+      errorMessage = nil
+    } catch {
+      errorMessage = Self.describe(error)
+    }
   }
 
   func openVault(_ url: URL, authorizedDirectoryURL: URL) async {
@@ -105,6 +206,7 @@ final class VaultAppModel: ObservableObject {
     _ password: VaultKernSensitiveString?,
     keyFileURL: URL?
   ) async {
+    consumeCredentialSubmissionReservation()
     if let keyFileURL {
       scopedAccess.retain(keyFileURL)
     }
@@ -115,7 +217,13 @@ final class VaultAppModel: ObservableObject {
       }
       return
     }
-    defer { endOperation() }
+    var retainedForKDFConfirmation = false
+    defer {
+      if !retainedForKDFConfirmation {
+        closeCredential(password: password, keyFileURL: keyFileURL)
+      }
+      endOperation()
+    }
 
     do {
       let state = try await BackgroundWork.run {
@@ -126,40 +234,50 @@ final class VaultAppModel: ObservableObject {
           kdfConfirmed: false
         )
       }
-      password?.close()
-      if let keyFileURL {
-        scopedAccess.release(keyFileURL)
+      let reconciliationError = try await reconcileThenFinishUnlock(
+        state,
+        runtime: runtime,
+        password: password,
+        keyFileURL: keyFileURL,
+        kdfConfirmed: false
+      )
+      if let error = reconciliationError as? VaultKernError {
+        if captureKDFConfirmation(
+          error,
+          operation: .reconcile(password: password, keyFileURL: keyFileURL)
+        ) {
+          retainedForKDFConfirmation = true
+          return
+        }
+        errorMessage =
+          "The vault unlocked, but Quick Unlock reconciliation failed: \(Self.describe(error))"
+      } else if let reconciliationError {
+        errorMessage =
+          "The vault unlocked, but Quick Unlock reconciliation failed: \(Self.describe(reconciliationError))"
       }
-      try await finishUnlock(state, runtime: runtime)
     } catch let error as VaultKernError {
       if captureKDFConfirmation(
         error,
         operation: .unlock(password: password, keyFileURL: keyFileURL)
       ) {
+        retainedForKDFConfirmation = true
         return
-      }
-      password?.close()
-      if let keyFileURL {
-        scopedAccess.release(keyFileURL)
       }
       errorMessage = Self.describe(error)
     } catch {
-      password?.close()
-      if let keyFileURL {
-        scopedAccess.release(keyFileURL)
-      }
       errorMessage = Self.describe(error)
     }
   }
 
   func unlockWithBiometrics() async {
+    consumeCredentialSubmissionReservation()
     guard let runtime, currentVault != nil, beginOperation() else { return }
     defer { endOperation() }
     do {
       let result = try await BackgroundWork.run {
         try runtime.unlockWithBlob(kdfConfirmed: false)
       }
-      try await handleBlobResult(result, runtime: runtime)
+      try await handleBlobResult(result, runtime: runtime, kdfConfirmed: false)
     } catch let error as VaultKernError {
       if captureKDFConfirmation(error, operation: .unlockBlob) {
         return
@@ -170,10 +288,12 @@ final class VaultAppModel: ObservableObject {
     }
   }
 
-  func enrollQuickUnlock(
+  func enableQuickUnlock(
     password: VaultKernSensitiveString?,
     keyFileURL: URL?
   ) async {
+    consumeCredentialSubmissionReservation()
+    setQuickUnlockDesiredEnabled(true)
     if let keyFileURL {
       scopedAccess.retain(keyFileURL)
     }
@@ -184,51 +304,47 @@ final class VaultAppModel: ObservableObject {
       }
       return
     }
-    defer { endOperation() }
+    var retainedForKDFConfirmation = false
+    defer {
+      if !retainedForKDFConfirmation {
+        closeCredential(password: password, keyFileURL: keyFileURL)
+      }
+      endOperation()
+    }
     do {
-      let state = try await BackgroundWork.run {
-        try runtime.enroll(
-          password: password,
-          keyFilePath: keyFileURL?.path,
-          kdfConfirmed: false
-        )
-      }
-      password?.close()
-      if let keyFileURL {
-        scopedAccess.release(keyFileURL)
-      }
-      apply(state)
-      quickUnlockKnownEnrolled = true
+      try await reconcileDesiredQuickUnlock(
+        runtime: runtime,
+        password: password,
+        keyFileURL: keyFileURL,
+        kdfConfirmed: false
+      )
       noticeMessage = "Touch ID quick unlock is enabled."
       errorMessage = nil
     } catch let error as VaultKernError {
       if captureKDFConfirmation(
         error,
-        operation: .enroll(password: password, keyFileURL: keyFileURL)
+        operation: .reconcile(password: password, keyFileURL: keyFileURL)
       ) {
+        retainedForKDFConfirmation = true
         return
-      }
-      password?.close()
-      if let keyFileURL {
-        scopedAccess.release(keyFileURL)
       }
       errorMessage = Self.describe(error)
     } catch {
-      password?.close()
-      if let keyFileURL {
-        scopedAccess.release(keyFileURL)
-      }
       errorMessage = Self.describe(error)
     }
   }
 
-  func revokeQuickUnlock() async {
-    guard let runtime, isUnlocked, beginOperation() else { return }
+  func disableQuickUnlock() async {
+    setQuickUnlockDesiredEnabled(false)
+    guard let runtime, beginOperation() else { return }
     defer { endOperation() }
     do {
-      let state = try await BackgroundWork.run { try runtime.revoke() }
-      apply(state)
-      quickUnlockKnownEnrolled = false
+      try await reconcileDesiredQuickUnlock(
+        runtime: runtime,
+        password: nil,
+        keyFileURL: nil,
+        kdfConfirmed: false
+      )
       noticeMessage = "Touch ID quick unlock is disabled."
       errorMessage = nil
     } catch {
@@ -259,23 +375,32 @@ final class VaultAppModel: ObservableObject {
             kdfConfirmed: true
           )
         }
-        try await finishUnlock(state, runtime: runtime)
+        let reconciliationError = try await reconcileThenFinishUnlock(
+          state,
+          runtime: runtime,
+          password: password,
+          keyFileURL: keyFileURL,
+          kdfConfirmed: true
+        )
+        if let reconciliationError {
+          throw reconciliationError
+        }
       case .unlockBlob:
         let result = try await BackgroundWork.run {
           try runtime.unlockWithBlob(kdfConfirmed: true)
         }
-        try await handleBlobResult(result, runtime: runtime)
-      case .enroll(let password, let keyFileURL):
-        let state = try await BackgroundWork.run {
-          try runtime.enroll(
-            password: password,
-            keyFilePath: keyFileURL?.path,
-            kdfConfirmed: true
-          )
-        }
-        apply(state)
-        quickUnlockKnownEnrolled = true
-        noticeMessage = "Touch ID quick unlock is enabled."
+        try await handleBlobResult(result, runtime: runtime, kdfConfirmed: true)
+      case .reconcile(let password, let keyFileURL):
+        try await reconcileDesiredQuickUnlock(
+          runtime: runtime,
+          password: password,
+          keyFileURL: keyFileURL,
+          kdfConfirmed: true
+        )
+        noticeMessage =
+          quickUnlockDesiredEnabled
+          ? "Touch ID quick unlock is enabled."
+          : "Touch ID quick unlock is disabled."
       }
       errorMessage = nil
     } catch {
@@ -334,22 +459,38 @@ final class VaultAppModel: ObservableObject {
     }
   }
 
-  func updateDraft<Value>(_ keyPath: WritableKeyPath<EntryDraft, Value>, value: Value) {
-    guard !isBusy, saveProgress != .staged, draft != nil else { return }
-    draft?[keyPath: keyPath] = value
+  func updateDraft(
+    _ keyPath: KeyPath<EntryDraft, VaultKernSensitiveString>,
+    value: String
+  ) {
+    guard !isBusy, saveProgress != .staged, let draft else { return }
+    draft[keyPath: keyPath].replace(with: value)
+    self.draft = draft
     saveProgress.markDraftChanged()
   }
 
-  func updateCustomField(_ field: EntryCustomFieldDraft) {
-    guard !isBusy, saveProgress != .staged, var draft else { return }
-    guard let index = draft.customFields.firstIndex(where: { $0.id == field.id }) else { return }
-    draft.customFields[index] = field
+  func updateCustomField(
+    id: UUID,
+    _ keyPath: KeyPath<EntryCustomFieldDraft, VaultKernSensitiveString>,
+    value: String
+  ) {
+    guard !isBusy, saveProgress != .staged, let draft else { return }
+    guard let index = draft.customFields.firstIndex(where: { $0.id == id }) else { return }
+    draft.customFields[index][keyPath: keyPath].replace(with: value)
+    self.draft = draft
+    saveProgress.markDraftChanged()
+  }
+
+  func updateCustomFieldProtection(id: UUID, isProtected: Bool) {
+    guard !isBusy, saveProgress != .staged, let draft else { return }
+    guard let index = draft.customFields.firstIndex(where: { $0.id == id }) else { return }
+    draft.customFields[index].isProtected = isProtected
     self.draft = draft
     saveProgress.markDraftChanged()
   }
 
   func addCustomField() {
-    guard !isBusy, saveProgress != .staged, var draft else { return }
+    guard !isBusy, saveProgress != .staged, let draft else { return }
     draft.customFields.append(
       EntryCustomFieldDraft(key: "", value: "", isProtected: false)
     )
@@ -358,10 +499,9 @@ final class VaultAppModel: ObservableObject {
   }
 
   func removeCustomField(id: UUID) {
-    guard !isBusy, saveProgress != .staged, var draft else { return }
+    guard !isBusy, saveProgress != .staged, let draft else { return }
     guard let index = draft.customFields.firstIndex(where: { $0.id == id }) else { return }
-    draft.customFields[index].key.removeAll(keepingCapacity: false)
-    draft.customFields[index].value.removeAll(keepingCapacity: false)
+    draft.customFields[index].close()
     draft.customFields.remove(at: index)
     self.draft = draft
     saveProgress.markDraftChanged()
@@ -369,12 +509,6 @@ final class VaultAppModel: ObservableObject {
 
   func saveDraft() async {
     guard let runtime, let vaultID = activeVaultID, let draft else { return }
-    do {
-      try draft.validateForSave()
-    } catch {
-      errorMessage = Self.describe(error)
-      return
-    }
     guard beginOperation() else { return }
     defer { endOperation() }
 
@@ -385,7 +519,7 @@ final class VaultAppModel: ObservableObject {
           defer { ownedFields.close() }
           return try runtime.editEntry(
             vaultID: vaultID,
-            entryID: draft.id,
+            entryID: draft.id.reveal(),
             fields: ownedFields
           )
         }
@@ -475,13 +609,21 @@ final class VaultAppModel: ObservableObject {
   }
 
   private func beginOperation(allowPendingKDF: Bool = false) -> Bool {
-    guard !isBusy, allowPendingKDF || pendingKDF == nil else { return false }
+    guard
+      !isBusy,
+      !hasPendingCredentialSubmission,
+      allowPendingKDF || pendingKDF == nil
+    else { return false }
     isBusy = true
     return true
   }
 
   private func endOperation() {
     isBusy = false
+  }
+
+  private func consumeCredentialSubmissionReservation() {
+    hasPendingCredentialSubmission = false
   }
 
   private func release(_ accessURLs: [URL]) {
@@ -503,25 +645,81 @@ final class VaultAppModel: ObservableObject {
     errorMessage = nil
   }
 
+  private func reconcileDesiredQuickUnlock(
+    runtime: any VaultRuntimeClient,
+    password: VaultKernSensitiveString?,
+    keyFileURL: URL?,
+    kdfConfirmed: Bool
+  ) async throws {
+    let enabled = quickUnlockDesiredEnabled
+    let state = try await BackgroundWork.run {
+      try runtime.reconcileQuickUnlock(
+        enabled: enabled,
+        password: password,
+        keyFilePath: keyFileURL?.path,
+        kdfConfirmed: kdfConfirmed
+      )
+    }
+    apply(state)
+    quickUnlockKnownEnrolled =
+      enabled && state.supportsBiometricUnlock ? true : (enabled ? nil : false)
+  }
+
+  private func reconcileThenFinishUnlock(
+    _ state: SessionStateDto,
+    runtime: any VaultRuntimeClient,
+    password: VaultKernSensitiveString?,
+    keyFileURL: URL?,
+    kdfConfirmed: Bool
+  ) async throws -> Error? {
+    let reconciliationError: Error?
+    do {
+      try await reconcileDesiredQuickUnlock(
+        runtime: runtime,
+        password: password,
+        keyFileURL: keyFileURL,
+        kdfConfirmed: kdfConfirmed
+      )
+      reconciliationError = nil
+    } catch {
+      reconciliationError = error
+    }
+    try await finishUnlock(state, runtime: runtime)
+    return reconciliationError
+  }
+
   private func handleBlobResult(
     _ result: UnlockBlobResultDto,
-    runtime: any VaultRuntimeClient
+    runtime: any VaultRuntimeClient,
+    kdfConfirmed: Bool
   ) async throws {
     apply(result.state)
     switch result.status {
     case .unlocked:
       quickUnlockKnownEnrolled = true
-      try await finishUnlock(result.state, runtime: runtime)
+      let reconciliationError = try await reconcileThenFinishUnlock(
+        result.state,
+        runtime: runtime,
+        password: nil,
+        keyFileURL: nil,
+        kdfConfirmed: kdfConfirmed
+      )
+      if let reconciliationError {
+        throw reconciliationError
+      }
     case .notEnrolled:
       quickUnlockKnownEnrolled = false
       noticeMessage = "Touch ID quick unlock is not enrolled."
     case .cancelled:
       noticeMessage = nil
     case .openAppRequired:
+      quickUnlockKnownEnrolled = true
       errorMessage = "Quick unlock needs one password unlock to refresh its cached key."
     case .credentialRequired:
+      quickUnlockKnownEnrolled = false
       errorMessage = "The stored credential is stale. Unlock with the current master credential."
     case .unsupported:
+      quickUnlockKnownEnrolled = nil
       errorMessage = "Touch ID quick unlock is unavailable on this Mac."
     }
   }
@@ -529,6 +727,21 @@ final class VaultAppModel: ObservableObject {
   private func apply(_ state: SessionStateDto) {
     isUnlocked = state.unlocked
     supportsBiometricUnlock = state.supportsBiometricUnlock
+  }
+
+  private func setQuickUnlockDesiredEnabled(_ enabled: Bool) {
+    quickUnlockSettings.setEnabled(enabled)
+    quickUnlockDesiredEnabled = enabled
+  }
+
+  private func closeCredential(
+    password: VaultKernSensitiveString?,
+    keyFileURL: URL?
+  ) {
+    password?.close()
+    if let keyFileURL {
+      scopedAccess.release(keyFileURL)
+    }
   }
 
   private func captureKDFConfirmation(
@@ -564,7 +777,7 @@ final class VaultAppModel: ObservableObject {
   }
 
   private func clearDraft() {
-    draft?.clear()
+    draft?.close()
     draft = nil
   }
 
@@ -593,12 +806,12 @@ final class VaultAppModel: ObservableObject {
 private enum PendingKDFOperation {
   case unlock(password: VaultKernSensitiveString?, keyFileURL: URL?)
   case unlockBlob
-  case enroll(password: VaultKernSensitiveString?, keyFileURL: URL?)
+  case reconcile(password: VaultKernSensitiveString?, keyFileURL: URL?)
 
   @MainActor
   func close(using scopedAccess: any SecurityScopedAccessing) {
     switch self {
-    case .unlock(let password, let keyFileURL), .enroll(let password, let keyFileURL):
+    case .unlock(let password, let keyFileURL), .reconcile(let password, let keyFileURL):
       password?.close()
       if let keyFileURL {
         scopedAccess.release(keyFileURL)
