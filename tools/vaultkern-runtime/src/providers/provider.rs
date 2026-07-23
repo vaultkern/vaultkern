@@ -81,11 +81,11 @@ impl fmt::Display for ProviderError {
 
 impl std::error::Error for ProviderError {}
 
-pub trait Provider: Send + Sync {
-    fn read(&self) -> Result<ProviderSnapshot, ProviderError>;
+pub trait Provider {
+    fn read(&mut self) -> Result<ProviderSnapshot, ProviderError>;
 
     fn publish(
-        &self,
+        &mut self,
         expected: &ProviderRevision,
         bytes: &[u8],
     ) -> Result<ProviderCommit, ProviderError>;

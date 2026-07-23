@@ -31,7 +31,7 @@ impl InMemoryProvider {
 }
 
 impl Provider for InMemoryProvider {
-    fn read(&self) -> Result<ProviderSnapshot, ProviderError> {
+    fn read(&mut self) -> Result<ProviderSnapshot, ProviderError> {
         let state = self.state.lock().expect("in-memory Provider lock");
         Ok(ProviderSnapshot {
             bytes: state.bytes.clone(),
@@ -40,7 +40,7 @@ impl Provider for InMemoryProvider {
     }
 
     fn publish(
-        &self,
+        &mut self,
         expected: &ProviderRevision,
         bytes: &[u8],
     ) -> Result<ProviderCommit, ProviderError> {

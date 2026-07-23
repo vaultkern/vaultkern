@@ -78,10 +78,10 @@ use crate::providers::local_file::{
 };
 use crate::providers::onedrive::{
     OneDriveConditionalWriteOutcome, OneDriveMemoryAccessCounts, OneDriveMemoryWriteBehavior,
-    OneDriveVaultSourceProvider, is_onedrive_item_not_found,
+    OneDriveProvider, OneDriveSnapshot, OneDriveVaultSourceProvider, is_onedrive_item_not_found,
 };
 use crate::providers::onedrive_token_store::OneDriveRefreshTokenStore;
-use crate::providers::provider::{Provider, ProviderError, ProviderRevision};
+use crate::providers::provider::{Provider, ProviderCommit, ProviderError, ProviderRevision};
 use crate::providers::remote_cache::{
     GenericPendingKind, PendingRemoteCacheChain, PendingRemoteCacheChainError,
     PendingRemoteCacheCompletion, RemoteCacheKey, RemoteVaultCache, RemoteVaultCacheEntry,
@@ -1035,6 +1035,7 @@ impl Runtime {
                     path_name,
                     bytes,
                     baseline_fingerprint,
+                    provider_revision,
                     source_status,
                     source_account_label,
                 ) = if let Some(cached) = self.remote_cache.read(&cache_key)? {
@@ -1046,6 +1047,7 @@ impl Runtime {
                             display_name,
                             cached.bytes,
                             cached.fingerprint,
+                            None,
                             Some(VaultSourceStatusDto {
                                 source_kind: cache_key.provider_kind,
                                 remote_state: "pending_sync".into(),
@@ -1058,6 +1060,8 @@ impl Runtime {
                     } else {
                         match self.one_drive.remote_state(&drive_id, &item_id) {
                             Ok(state) if state.matches_fingerprint(&cached.fingerprint) => {
+                                let provider_revision =
+                                    OneDriveProvider::revision_for_state(&state).ok();
                                 let display_name = cached.display_name;
                                 let account_label = cached.account_label;
                                 (
@@ -1065,6 +1069,7 @@ impl Runtime {
                                     display_name,
                                     cached.bytes,
                                     cached.fingerprint,
+                                    provider_revision,
                                     Some(VaultSourceStatusDto {
                                         source_kind: cache_key.provider_kind,
                                         remote_state: "online".into(),
@@ -1076,18 +1081,21 @@ impl Runtime {
                                 )
                             }
                             Ok(state) => {
-                                let snapshot = self
-                                    .one_drive
-                                    .read_snapshot_from_state(&drive_id, &item_id, &state)?;
-                                let name = display_name_for_cloud_name(&snapshot.name);
-                                let path_name = snapshot.name.clone();
-                                let account_label = snapshot.account_label.clone();
+                                let mut provider = self.one_drive.bind(&drive_id, &item_id);
+                                let snapshot = provider.read_from_state(&state)?;
+                                let fingerprint = OneDriveProvider::legacy_fingerprint(
+                                    &snapshot.bytes,
+                                    &snapshot.revision,
+                                )?;
+                                let name = display_name_for_cloud_name(&state.name);
+                                let path_name = state.name.clone();
+                                let account_label = cached.account_label;
                                 let cached_at = self.current_unix_time() as i64;
                                 self.remote_cache.write(
                                     &cache_key,
                                     RemoteVaultCacheEntry {
                                         bytes: snapshot.bytes.clone(),
-                                        fingerprint: snapshot.fingerprint.clone(),
+                                        fingerprint: fingerprint.clone(),
                                         display_name: name.clone(),
                                         account_label: account_label.clone(),
                                         cached_at,
@@ -1098,7 +1106,8 @@ impl Runtime {
                                     name,
                                     path_name,
                                     snapshot.bytes,
-                                    snapshot.fingerprint,
+                                    fingerprint,
+                                    Some(snapshot.revision),
                                     Some(VaultSourceStatusDto {
                                         source_kind: cache_key.provider_kind,
                                         remote_state: "online".into(),
@@ -1118,6 +1127,7 @@ impl Runtime {
                                     display_name,
                                     cached.bytes,
                                     cached.fingerprint,
+                                    None,
                                     Some(VaultSourceStatusDto {
                                         source_kind: cache_key.provider_kind,
                                         remote_state: "cache".into(),
@@ -1131,23 +1141,30 @@ impl Runtime {
                         }
                     }
                 } else {
-                    let snapshot_result = match &vault_source {
-                        VaultSource::OneDriveItem { drive_id, item_id } => {
-                            self.one_drive.read_snapshot(drive_id, item_id)
-                        }
+                    let snapshot_result: Result<_> = match &vault_source {
+                        VaultSource::OneDriveItem { drive_id, item_id } => (|| {
+                            let metadata = self.one_drive.metadata(drive_id, item_id)?;
+                            let snapshot = self.one_drive.bind(drive_id, item_id).read()?;
+                            Ok((metadata, snapshot))
+                        })(
+                        ),
                         VaultSource::LocalPath(_) => unreachable!(),
                     };
                     match snapshot_result {
-                        Ok(snapshot) => {
-                            let name = display_name_for_cloud_name(&snapshot.name);
-                            let path_name = snapshot.name.clone();
-                            let account_label = snapshot.account_label.clone();
+                        Ok((metadata, snapshot)) => {
+                            let fingerprint = OneDriveProvider::legacy_fingerprint(
+                                &snapshot.bytes,
+                                &snapshot.revision,
+                            )?;
+                            let name = display_name_for_cloud_name(&metadata.name);
+                            let path_name = metadata.name;
+                            let account_label = metadata.account_label;
                             let cached_at = self.current_unix_time() as i64;
                             self.remote_cache.write(
                                 &cache_key,
                                 RemoteVaultCacheEntry {
                                     bytes: snapshot.bytes.clone(),
-                                    fingerprint: snapshot.fingerprint.clone(),
+                                    fingerprint: fingerprint.clone(),
                                     display_name: name.clone(),
                                     account_label: account_label.clone(),
                                     cached_at,
@@ -1158,7 +1175,8 @@ impl Runtime {
                                 name,
                                 path_name,
                                 snapshot.bytes,
-                                snapshot.fingerprint,
+                                fingerprint,
+                                Some(snapshot.revision),
                                 Some(VaultSourceStatusDto {
                                     source_kind: cache_key.provider_kind,
                                     remote_state: "online".into(),
@@ -1182,6 +1200,7 @@ impl Runtime {
                                 display_name,
                                 cached.bytes,
                                 cached.fingerprint,
+                                None,
                                 Some(VaultSourceStatusDto {
                                     source_kind: cache_key.provider_kind,
                                     remote_state: "cache".into(),
@@ -1247,7 +1266,7 @@ impl Runtime {
                         name: name.clone(),
                         bytes,
                         baseline_fingerprint,
-                        provider_revision: None,
+                        provider_revision,
                         credential_shape: MasterCredentialShape {
                             has_password: false,
                             has_key_file: false,
@@ -6114,18 +6133,16 @@ impl Runtime {
                     ));
                 }
             };
-            let snapshot = match self
-                .one_drive
-                .read_snapshot_from_state(drive_id, item_id, &state)
-            {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    return Ok(autofill_persist_error(
-                        "persist_io_unavailable",
-                        format!("failed to read current OneDrive generation: {error:#}"),
-                    ));
-                }
-            };
+            let snapshot =
+                match read_onedrive_provider(&mut self.one_drive, drive_id, item_id, &state) {
+                    Ok(snapshot) => snapshot,
+                    Err(error) => {
+                        return Ok(autofill_persist_error(
+                            "persist_io_unavailable",
+                            format!("failed to read current OneDrive generation: {error:#}"),
+                        ));
+                    }
+                };
             let current_source = match Self::load_session_database(&snapshot.bytes, &key) {
                 Ok(database) => database.vault,
                 Err(KdbxError::HeaderHmacMismatch) => {
@@ -6284,9 +6301,7 @@ impl Runtime {
                 }
             };
 
-            match self
-                .one_drive
-                .conditional_write(drive_id, item_id, &bytes, &state)
+            match publish_onedrive_provider(&mut self.one_drive, drive_id, item_id, &bytes, &state)
             {
                 Ok(OneDriveConditionalWriteOutcome::Committed { fingerprint, e_tag }) => {
                     let cached_at = self.current_unix_time() as i64;
@@ -7008,14 +7023,28 @@ impl Runtime {
                     return Ok(response);
                 }
             };
+            let observed_revision = match OneDriveProvider::revision_for_state(&state) {
+                Ok(revision) => revision,
+                Err(error) => {
+                    let response = self.save_remote_vault_to_pending_cache(
+                        vault_id,
+                        source,
+                        local_bytes,
+                        baseline_fingerprint,
+                        display_name,
+                        Some(account_label),
+                        error.to_string(),
+                    )?;
+                    self.install_pending_vault_candidate(vault_id, verified_local.clone())?;
+                    return Ok(response);
+                }
+            };
             let remote_bytes = if state.matches_fingerprint(baseline_fingerprint) {
                 base_bytes.clone()
             } else {
                 saw_source_change = true;
-                match self
-                    .one_drive
-                    .read_snapshot_from_state(drive_id, item_id, &state)
-                {
+                let mut provider = self.one_drive.bind(drive_id, item_id);
+                match provider.read_from_state(&state) {
                     Ok(snapshot) => snapshot.bytes,
                     Err(error) => {
                         let response = self.save_remote_vault_to_pending_cache(
@@ -7025,7 +7054,7 @@ impl Runtime {
                             baseline_fingerprint,
                             display_name,
                             Some(account_label),
-                            format_error_chain(&error),
+                            error.to_string(),
                         )?;
                         self.install_pending_vault_candidate(vault_id, verified_local.clone())?;
                         return Ok(response);
@@ -7150,48 +7179,45 @@ impl Runtime {
 
             let write_outcome = self
                 .one_drive
-                .conditional_write(drive_id, item_id, &bytes, &state)
-                .map_err(anyhow::Error::from);
+                .bind(drive_id, item_id)
+                .publish(&observed_revision, &bytes);
             let write_outcome = match write_outcome {
-                Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message }) => {
-                    match self
-                        .one_drive
-                        .remote_state(drive_id, item_id)
-                        .and_then(|current_state| {
-                            self.one_drive
-                                .read_snapshot_from_state(drive_id, item_id, &current_state)
-                                .map(|snapshot| (current_state, snapshot))
-                        }) {
-                        Ok((current_state, snapshot)) if snapshot.bytes == bytes => {
-                            Ok(OneDriveConditionalWriteOutcome::Committed {
-                                fingerprint: snapshot.fingerprint,
-                                e_tag: current_state.e_tag,
-                            })
-                        }
-                        Ok((_current_state, snapshot)) if snapshot.bytes == remote_bytes => {
-                            Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
+                Err(ProviderError::OutcomeUnknown { message }) => {
+                    let mut provider = self.one_drive.bind(drive_id, item_id);
+                    match provider.read() {
+                        Ok(snapshot) if snapshot.bytes == bytes => Ok(ProviderCommit {
+                            revision: snapshot.revision,
+                            warnings: vec![format!(
+                                "{message}; readback confirmed that the candidate was published"
+                            )],
+                        }),
+                        Ok(snapshot) if snapshot.bytes == remote_bytes => {
+                            Err(ProviderError::OutcomeUnknown {
                                 message: format!(
                                     "{message}; readback confirmed that the candidate was not published"
                                 ),
                             })
                         }
-                        Ok((_current_state, _snapshot)) => {
-                            Ok(OneDriveConditionalWriteOutcome::PreconditionFailed)
-                        }
-                        Err(readback_error) => {
-                            Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
-                                message: format!(
-                                    "{message}; write outcome readback failed: {readback_error:#}"
-                                ),
-                            })
-                        }
+                        Ok(_) => Err(ProviderError::StaleRevision {
+                            message:
+                                "OneDrive advanced to a third generation during outcome readback"
+                                    .into(),
+                        }),
+                        Err(readback_error) => Err(ProviderError::OutcomeUnknown {
+                            message: format!(
+                                "{message}; write outcome readback failed: {readback_error}"
+                            ),
+                        }),
                     }
                 }
                 other => other,
             };
 
             match write_outcome {
-                Ok(OneDriveConditionalWriteOutcome::Committed { fingerprint, e_tag }) => {
+                Ok(commit) => {
+                    let fingerprint =
+                        OneDriveProvider::legacy_fingerprint(&bytes, &commit.revision)?;
+                    let e_tag = OneDriveProvider::source_etag(&commit.revision)?;
                     let cached_at = self.current_unix_time() as i64;
                     let cache_result = self.remote_cache.write_with_source_etag(
                         &cache_key,
@@ -7217,6 +7243,10 @@ impl Runtime {
                         fingerprint,
                         Some(status),
                     )?;
+                    self.vault_session
+                        .find_loaded_mut(vault_id)
+                        .expect("committed vault remains loaded")
+                        .provider_revision = Some(commit.revision);
                     self.replace_session_transformed_key(vault_id, key.clone())?;
                     return Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
                         status: if saw_source_change {
@@ -7228,13 +7258,11 @@ impl Runtime {
                         conflict_copy_path: None,
                     }));
                 }
-                Ok(OneDriveConditionalWriteOutcome::PreconditionFailed)
-                    if attempt + 1 < MAX_SOURCE_ATTEMPTS =>
-                {
+                Err(ProviderError::StaleRevision { .. }) if attempt + 1 < MAX_SOURCE_ATTEMPTS => {
                     saw_source_change = true;
                     continue;
                 }
-                Ok(OneDriveConditionalWriteOutcome::PreconditionFailed) => {
+                Err(ProviderError::StaleRevision { .. }) => {
                     return self.upload_or_persist_onedrive_conflict_copy(
                         vault_id,
                         drive_id,
@@ -7247,7 +7275,7 @@ impl Runtime {
                         "OneDrive CAS retry budget was exhausted",
                     );
                 }
-                Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message }) => {
+                Err(ProviderError::OutcomeUnknown { message }) => {
                     self.synced_bases
                         .store(vault_id, &remote_bytes)
                         .with_context(|| {
@@ -7372,9 +7400,7 @@ impl Runtime {
             }));
         }
 
-        let snapshot = self
-            .one_drive
-            .read_snapshot_from_state(drive_id, item_id, &state)?;
+        let snapshot = read_onedrive_provider(&mut self.one_drive, drive_id, item_id, &state)?;
         let (remote_vault, key) = match Self::load_session_database(&snapshot.bytes, &key) {
             Ok(database) => (database.vault, key),
             Err(KdbxError::HeaderHmacMismatch) => self
@@ -7588,7 +7614,8 @@ impl Runtime {
                 .one_drive
                 .remote_state(drive_id, &receipt.account_label)
                 .and_then(|state| {
-                    self.one_drive.read_snapshot_from_state(
+                    read_onedrive_provider(
+                        &mut self.one_drive,
                         drive_id,
                         &receipt.account_label,
                         &state,
@@ -8072,9 +8099,8 @@ impl Runtime {
                 Ok(status)
             }
             Ok(state) => {
-                let snapshot = self
-                    .one_drive
-                    .read_snapshot_from_state(&drive_id, &item_id, &state)?;
+                let snapshot =
+                    read_onedrive_provider(&mut self.one_drive, &drive_id, &item_id, &state)?;
                 let remote_save_profile = self
                     .inspected_save_profile(&snapshot.bytes)
                     .context("failed to inspect OneDrive generation during source refresh")?;
@@ -8447,9 +8473,7 @@ impl Runtime {
 
         for attempt in 0..MAX_SOURCE_ATTEMPTS {
             let state = self.one_drive.remote_state(drive_id, item_id)?;
-            let remote = self
-                .one_drive
-                .read_snapshot_from_state(drive_id, item_id, &state)?;
+            let remote = read_onedrive_provider(&mut self.one_drive, drive_id, item_id, &state)?;
             let remote_vault = match Self::load_session_database(&remote.bytes, &key) {
                 Ok(database) => database.vault,
                 Err(KdbxError::HeaderHmacMismatch) => {
@@ -8570,9 +8594,7 @@ impl Runtime {
                 &key,
                 merged_save_profile,
             )?;
-            match self
-                .one_drive
-                .conditional_write(drive_id, item_id, &bytes, &state)?
+            match publish_onedrive_provider(&mut self.one_drive, drive_id, item_id, &bytes, &state)?
             {
                 OneDriveConditionalWriteOutcome::Committed { fingerprint, e_tag } => {
                     return self.finish_pending_autofill_sync(
@@ -8752,9 +8774,7 @@ impl Runtime {
 
         for attempt in 0..MAX_SOURCE_ATTEMPTS {
             let state = self.one_drive.remote_state(drive_id, item_id)?;
-            let remote = self
-                .one_drive
-                .read_snapshot_from_state(drive_id, item_id, &state)?;
+            let remote = read_onedrive_provider(&mut self.one_drive, drive_id, item_id, &state)?;
             let remote_vault = match Self::load_session_database(&remote.bytes, &key) {
                 Ok(database) => database.vault,
                 Err(KdbxError::HeaderHmacMismatch) => {
@@ -8873,22 +8893,23 @@ impl Runtime {
                     cache_key,
                     pending_fingerprint,
                     || {
-                        let fingerprint =
-                            match one_drive.conditional_write(drive_id, item_id, &bytes, &state) {
-                                Ok(OneDriveConditionalWriteOutcome::Committed {
-                                    fingerprint,
-                                    e_tag: _,
-                                }) => fingerprint,
-                                Ok(OneDriveConditionalWriteOutcome::PreconditionFailed) => {
-                                    return Err(PendingGenericCasConflict.into());
-                                }
-                                Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message }) => {
-                                    anyhow::bail!(
-                                        "pending OneDrive write outcome is unknown: {message}"
-                                    );
-                                }
-                                Err(error) => return Err(error.into()),
-                            };
+                        let fingerprint = match publish_onedrive_provider(
+                            one_drive, drive_id, item_id, &bytes, &state,
+                        ) {
+                            Ok(OneDriveConditionalWriteOutcome::Committed {
+                                fingerprint,
+                                e_tag: _,
+                            }) => fingerprint,
+                            Ok(OneDriveConditionalWriteOutcome::PreconditionFailed) => {
+                                return Err(PendingGenericCasConflict.into());
+                            }
+                            Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message }) => {
+                                anyhow::bail!(
+                                    "pending OneDrive write outcome is unknown: {message}"
+                                );
+                            }
+                            Err(error) => return Err(error.into()),
+                        };
                         Ok((
                             fingerprint.clone(),
                             RemoteVaultCacheEntry {
@@ -8973,9 +8994,7 @@ impl Runtime {
             bytes,
         )?;
         let remote_state = self.one_drive.remote_state(drive_id, item_id)?;
-        let remote = self
-            .one_drive
-            .read_snapshot_from_state(drive_id, item_id, &remote_state)?;
+        let remote = read_onedrive_provider(&mut self.one_drive, drive_id, item_id, &remote_state)?;
         let (remote_vault, adoption_error) = match Self::load_session_database(&remote.bytes, &key)
         {
             Ok(database) => {
@@ -9077,7 +9096,7 @@ impl Runtime {
     }
 
     fn read_current_snapshot(
-        &self,
+        &mut self,
         vault_id: &str,
         baseline: Option<&VaultSourceFingerprint>,
     ) -> Result<LoadedSourceSnapshot> {
@@ -9100,22 +9119,26 @@ impl Runtime {
             }
             VaultSource::OneDriveItem { drive_id, item_id } => {
                 let state = self.one_drive.remote_state(drive_id, item_id)?;
+                let provider_revision = OneDriveProvider::revision_for_state(&state)?;
                 if let Some(baseline) = baseline {
                     if state.matches_fingerprint(baseline) {
                         return Ok(LoadedSourceSnapshot {
                             bytes: None,
                             fingerprint: baseline.clone(),
-                            provider_revision: None,
+                            provider_revision: Some(provider_revision),
                         });
                     }
                 }
                 let snapshot = self
                     .one_drive
-                    .read_snapshot_from_state(drive_id, item_id, &state)?;
+                    .bind(drive_id, item_id)
+                    .read_from_state(&state)?;
+                let fingerprint =
+                    OneDriveProvider::legacy_fingerprint(&snapshot.bytes, &snapshot.revision)?;
                 Ok(LoadedSourceSnapshot {
                     bytes: Some(snapshot.bytes),
-                    fingerprint: snapshot.fingerprint,
-                    provider_revision: None,
+                    fingerprint,
+                    provider_revision: Some(snapshot.revision),
                 })
             }
         }
@@ -9611,6 +9634,41 @@ fn remote_source_status_after_commit(
 
 fn same_content_fingerprint(left: &VaultSourceFingerprint, right: &VaultSourceFingerprint) -> bool {
     left.content_sha256 == right.content_sha256 && left.size_bytes == right.size_bytes
+}
+
+fn publish_onedrive_provider(
+    one_drive: &mut OneDriveVaultSourceProvider,
+    drive_id: &str,
+    item_id: &str,
+    bytes: &[u8],
+    observed: &crate::providers::onedrive::OneDriveRemoteState,
+) -> Result<OneDriveConditionalWriteOutcome, ProviderError> {
+    let revision = OneDriveProvider::revision_for_state(observed)?;
+    match one_drive.bind(drive_id, item_id).publish(&revision, bytes) {
+        Ok(commit) => Ok(OneDriveConditionalWriteOutcome::Committed {
+            fingerprint: OneDriveProvider::legacy_fingerprint(bytes, &commit.revision)?,
+            e_tag: OneDriveProvider::source_etag(&commit.revision)?,
+        }),
+        Err(ProviderError::StaleRevision { .. }) => {
+            Ok(OneDriveConditionalWriteOutcome::PreconditionFailed)
+        }
+        Err(ProviderError::OutcomeUnknown { message }) => {
+            Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown { message })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn read_onedrive_provider(
+    one_drive: &mut OneDriveVaultSourceProvider,
+    drive_id: &str,
+    item_id: &str,
+    state: &crate::providers::onedrive::OneDriveRemoteState,
+) -> Result<OneDriveSnapshot> {
+    one_drive
+        .bind(drive_id, item_id)
+        .read_runtime_snapshot_from_state(state)
+        .map_err(anyhow::Error::from)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

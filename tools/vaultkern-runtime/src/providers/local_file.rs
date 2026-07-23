@@ -228,7 +228,7 @@ impl LocalFileProvider {
 }
 
 impl Provider for LocalFileProvider {
-    fn read(&self) -> Result<ProviderSnapshot, ProviderError> {
+    fn read(&mut self) -> Result<ProviderSnapshot, ProviderError> {
         let snapshot =
             self.source
                 .read_snapshot(self.path()?)
@@ -247,7 +247,7 @@ impl Provider for LocalFileProvider {
     }
 
     fn publish(
-        &self,
+        &mut self,
         expected: &ProviderRevision,
         bytes: &[u8],
     ) -> Result<ProviderCommit, ProviderError> {

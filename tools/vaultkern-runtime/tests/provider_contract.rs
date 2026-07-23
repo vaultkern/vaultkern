@@ -1,8 +1,9 @@
 use vaultkern_runtime::{
-    InMemoryProvider, LocalFileProvider, Provider, ProviderError, ProviderRevision,
+    InMemoryProvider, LocalFileProvider, OneDriveMemoryWriteBehavior, OneDriveVaultSourceProvider,
+    Provider, ProviderError, ProviderRevision,
 };
 
-fn assert_provider_contract(provider: &dyn Provider) {
+fn assert_provider_contract(provider: &mut dyn Provider) {
     let opened = provider.read().expect("read initial Provider snapshot");
     assert_eq!(opened.bytes, b"generation-a");
 
@@ -27,9 +28,9 @@ fn assert_provider_contract(provider: &dyn Provider) {
 
 #[test]
 fn in_memory_adapter_satisfies_the_provider_contract() {
-    let provider = InMemoryProvider::new(b"generation-a".to_vec());
+    let mut provider = InMemoryProvider::new(b"generation-a".to_vec());
 
-    assert_provider_contract(&provider);
+    assert_provider_contract(&mut provider);
 }
 
 #[test]
@@ -37,9 +38,68 @@ fn local_file_adapter_satisfies_the_provider_contract() {
     let directory = tempfile::tempdir().expect("temporary Provider directory");
     let path = directory.path().join("vault.kdbx");
     std::fs::write(&path, b"generation-a").expect("write initial local snapshot");
-    let provider = LocalFileProvider::new(path);
+    let mut provider = LocalFileProvider::new(path);
 
-    assert_provider_contract(&provider);
+    assert_provider_contract(&mut provider);
+}
+
+#[test]
+fn onedrive_adapter_satisfies_the_provider_contract() {
+    let mut source = OneDriveVaultSourceProvider::new_in_memory();
+    source.insert_memory_item(
+        "drive-1",
+        "item-1",
+        "vault.kdbx",
+        "acceptance@example.com",
+        b"generation-a".to_vec(),
+    );
+    let mut provider = source.bind("drive-1", "item-1");
+
+    assert_provider_contract(&mut provider);
+}
+
+#[test]
+fn onedrive_adapter_keeps_unknown_and_unavailable_distinct_from_stale() {
+    let mut unknown_source = OneDriveVaultSourceProvider::new_in_memory();
+    unknown_source.insert_memory_item(
+        "drive-1",
+        "unknown",
+        "unknown.kdbx",
+        "acceptance@example.com",
+        b"generation-a".to_vec(),
+    );
+    let expected = unknown_source
+        .bind("drive-1", "unknown")
+        .read()
+        .expect("read unknown-outcome baseline")
+        .revision;
+    unknown_source
+        .queue_memory_write_behavior(OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommitted);
+    let unknown = unknown_source
+        .bind("drive-1", "unknown")
+        .publish(&expected, b"generation-b")
+        .expect_err("injected transport ambiguity must remain unknown");
+    assert!(matches!(unknown, ProviderError::OutcomeUnknown { .. }));
+
+    let mut unavailable_source = OneDriveVaultSourceProvider::new_in_memory();
+    unavailable_source.insert_memory_item(
+        "drive-1",
+        "unavailable",
+        "unavailable.kdbx",
+        "acceptance@example.com",
+        b"generation-a".to_vec(),
+    );
+    let expected = unavailable_source
+        .bind("drive-1", "unavailable")
+        .read()
+        .expect("read unavailable baseline")
+        .revision;
+    unavailable_source.remove_memory_item("drive-1", "unavailable");
+    let unavailable = unavailable_source
+        .bind("drive-1", "unavailable")
+        .publish(&expected, b"generation-b")
+        .expect_err("missing transport target must be unavailable");
+    assert!(matches!(unavailable, ProviderError::Unavailable { .. }));
 }
 
 #[test]
@@ -48,7 +108,7 @@ fn provider_revision_is_opaque_but_supports_identity_comparison() {
         revision
     }
 
-    let provider = InMemoryProvider::new(b"opaque".to_vec());
+    let mut provider = InMemoryProvider::new(b"opaque".to_vec());
     let first = provider.read().expect("first read").revision;
     let second = provider.read().expect("second read").revision;
 
