@@ -1538,6 +1538,14 @@ impl VaultSources {
             .map_err(Into::into)
     }
 
+    pub fn add_local_vault(&self, path: String) -> Result<VaultReferenceDto, VaultKernError> {
+        self.shared
+            .lock_for_session_mutation()?
+            .add_local_vault_reference(&path)
+            .map(Into::into)
+            .map_err(Into::into)
+    }
+
     pub fn begin_one_drive_login(&self) -> Result<OneDriveAuthSessionDto, VaultKernError> {
         match self
             .shared

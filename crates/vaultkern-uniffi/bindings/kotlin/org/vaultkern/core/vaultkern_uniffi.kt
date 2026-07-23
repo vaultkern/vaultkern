@@ -806,6 +806,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock(
     ): Short
+    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_local_vault(
+    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsources_begin_one_drive_login(
@@ -944,6 +946,8 @@ external fun uniffi_vaultkern_uniffi_fn_clone_vaultsources(`handle`: Long,uniffi
 ): Long
 external fun uniffi_vaultkern_uniffi_fn_free_vaultsources(`handle`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): Unit
+external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_add_local_vault(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
+): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_add_one_drive_vault(`ptr`: Long,`driveId`: RustBuffer.ByValue,`itemId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsources_begin_one_drive_login(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
@@ -1191,6 +1195,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock() != 47569.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_local_vault() != 14382.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault() != 18786.toShort()) {
@@ -3487,6 +3494,8 @@ public object FfiConverterTypeVaultSession: FfiConverter<VaultSession, Long> {
 
 public interface VaultSourcesInterface {
 
+    fun `addLocalVault`(`path`: kotlin.String): VaultReferenceDto
+
     fun `addOneDriveVault`(`driveId`: kotlin.String, `itemId`: kotlin.String): VaultReferenceDto
 
     fun `beginOneDriveLogin`(): OneDriveAuthSessionDto
@@ -3597,6 +3606,20 @@ open class VaultSources: Disposable, AutoCloseable, VaultSourcesInterface
             UniffiLib.uniffi_vaultkern_uniffi_fn_clone_vaultsources(handle, status)
         }
     }
+
+
+    @Throws(VaultKernException::class)override fun `addLocalVault`(`path`: kotlin.String): VaultReferenceDto {
+            return FfiConverterTypeVaultReferenceDto.lift(
+    callWithHandle {
+    uniffiRustCallWithError(VaultKernException) { _status ->
+    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsources_add_local_vault(
+        it,
+        FfiConverterString.lower(`path`),_status)
+}
+    }
+    )
+    }
+
 
 
     @Throws(VaultKernException::class)override fun `addOneDriveVault`(`driveId`: kotlin.String, `itemId`: kotlin.String): VaultReferenceDto {

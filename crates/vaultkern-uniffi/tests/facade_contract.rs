@@ -313,6 +313,31 @@ fn ffi_sources_expose_the_existing_runtime_reference_vocabulary() {
 }
 
 #[test]
+fn ffi_sources_can_select_a_local_vault_without_loading_its_snapshot() {
+    let (dir, path) = copied_fixture();
+    let session = VaultSession::new(
+        session_config(dir.path(), ResidentPlatform::Android),
+        Arc::new(FakeUnlockBlobAdapter::default()),
+        Arc::new(FakeOneDriveTokenAdapter::default()),
+    )
+    .unwrap();
+
+    let selected = session.sources().add_local_vault(path.clone()).unwrap();
+
+    assert_eq!(selected.source_kind, "local");
+    assert!(selected.is_current);
+    assert_eq!(
+        session.session_state().unwrap().active_vault_id,
+        None,
+        "selecting a document must not retain its encrypted snapshot",
+    );
+    assert_eq!(
+        session.session_state().unwrap().current_vault_ref_id,
+        Some(selected.vault_ref_id),
+    );
+}
+
+#[test]
 fn ffi_unlock_blob_roundtrip_uses_the_platform_adapter_and_revoke_removes_it() {
     let (_dir, session, adapter, vault_id) = opened_session();
     let unlock = session.unlock();

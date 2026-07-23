@@ -1739,6 +1739,8 @@ public func FfiConverterTypeVaultSession_lower(_ value: VaultSession) -> UInt64 
 
 public protocol VaultSourcesProtocol: AnyObject, Sendable {
 
+    func addLocalVault(path: String) throws  -> VaultReferenceDto
+
     func addOneDriveVault(driveId: String, itemId: String) throws  -> VaultReferenceDto
 
     func beginOneDriveLogin() throws  -> OneDriveAuthSessionDto
@@ -1804,6 +1806,15 @@ open class VaultSources: VaultSourcesProtocol, @unchecked Sendable {
 
 
 
+
+open func addLocalVault(path: String)throws  -> VaultReferenceDto  {
+    return try  FfiConverterTypeVaultReferenceDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
+    uniffi_vaultkern_uniffi_fn_method_vaultsources_add_local_vault(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(path),$0
+    )
+})
+}
 
 open func addOneDriveVault(driveId: String, itemId: String)throws  -> VaultReferenceDto  {
     return try  FfiConverterTypeVaultReferenceDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
@@ -4921,6 +4932,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_unlock() != 47569) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_local_vault() != 14382) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsources_add_one_drive_vault() != 18786) {
