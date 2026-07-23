@@ -7,7 +7,6 @@ import android.security.keystore.KeyInfo
 import android.security.keystore.KeyProperties
 import android.security.keystore.StrongBoxUnavailableException
 import java.security.KeyStore
-import java.security.UnrecoverableKeyException
 import java.util.UUID
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator

@@ -2,6 +2,7 @@ package org.vaultkern.android.security
 
 import android.security.keystore.KeyPermanentlyInvalidatedException
 import java.security.InvalidKeyException
+import java.security.UnrecoverableKeyException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
@@ -26,6 +27,7 @@ class AndroidUnlockBlobAdapter(
     private val selectedSecurity = AtomicReference<UnlockKeySecurityLevel?>(null)
     private val maintenancePending = AtomicBoolean(false)
     private val invalidatedKeys = ConcurrentHashMap.newKeySet<String>()
+    private val pendingInvalidationDeletes = ConcurrentHashMap.newKeySet<String>()
 
     override fun supportsUnlockBlob(): Boolean = biometricAvailable()
 
@@ -40,6 +42,7 @@ class AndroidUnlockBlobAdapter(
     override fun storeRequiresUserPresence(): Boolean = true
     override fun loadRequiresUserPresence(): Boolean = true
 
+    @Synchronized
     override fun authorizeStoreUserPresence() {
         pendingEncryption.getAndSet(null)?.let { stale ->
             if (!deleteKey(stale.keyAlias)) maintenancePending.set(true)
@@ -47,6 +50,7 @@ class AndroidUnlockBlobAdapter(
         pendingEncryption.set(prepareAuthorizedEncryption("Enable quick unlock"))
     }
 
+    @Synchronized
     override fun storeBlob(key: String, value: VaultKernSensitiveBytes) {
         val plaintext = try {
             value.copyBytes()
@@ -71,6 +75,7 @@ class AndroidUnlockBlobAdapter(
             records.write(key, record)
             committed = true
             invalidatedKeys.remove(key)
+            pendingInvalidationDeletes.remove(key)
             selectedSecurity.set(record.securityLevel)
             state.set(UnlockEnrollmentState.ENROLLED)
         } catch (error: Throwable) {
@@ -98,11 +103,12 @@ class AndroidUnlockBlobAdapter(
         maintenancePending.set(cleanup.isFailure)
     }
 
+    @Synchronized
     override fun loadBlob(key: String): VaultKernSensitiveBytes? {
         val record = try {
             records.read(key)
         } catch (_: Throwable) {
-            invalidate(key, null)
+            invalidate(key, null, expectCoreDelete = true)
             throw PlatformAdapterException.Invalidated()
         } ?: run {
             state.set(stateForMissingRecord(key))
@@ -117,7 +123,7 @@ class AndroidUnlockBlobAdapter(
             if (isPermanentInvalidation(error) ||
                 error is UnsupportedUnlockKeySecurityException
             ) {
-                invalidate(key, record)
+                invalidate(key, record, expectCoreDelete = true)
                 throw PlatformAdapterException.Invalidated()
             }
             throw mapPlatformError(error)
@@ -132,7 +138,7 @@ class AndroidUnlockBlobAdapter(
             authorized.doFinal(record.ciphertext)
         } catch (error: Throwable) {
             if (isPermanentInvalidation(error) || error is AEADBadTagException) {
-                invalidate(key, record)
+                invalidate(key, record, expectCoreDelete = true)
                 throw PlatformAdapterException.Invalidated()
             }
             throw mapPlatformError(error)
@@ -142,17 +148,18 @@ class AndroidUnlockBlobAdapter(
         return VaultKernSensitiveBytes.fromByteArray(plaintext)
     }
 
+    @Synchronized
     override fun containsBlob(key: String): Boolean {
         val record = try {
             records.read(key)
         } catch (_: Throwable) {
-            invalidate(key, null)
+            invalidate(key, null, expectCoreDelete = false)
             return false
         } ?: return false.also {
             state.set(stateForMissingRecord(key))
         }
         if (!cipherBackend.contains(record.keyAlias)) {
-            invalidate(key, record)
+            invalidate(key, record, expectCoreDelete = false)
             return false
         }
         selectedSecurity.set(record.securityLevel)
@@ -160,12 +167,17 @@ class AndroidUnlockBlobAdapter(
         return true
     }
 
+    @Synchronized
     override fun deleteBlob(key: String) {
+        val preserveInvalidatedState = pendingInvalidationDeletes.remove(key)
         val record = runCatching { records.read(key) }.getOrNull()
         records.delete(key)
-        invalidatedKeys.remove(key)
+        if (!preserveInvalidatedState) invalidatedKeys.remove(key)
         selectedSecurity.set(null)
-        state.set(UnlockEnrollmentState.NOT_ENROLLED)
+        state.set(
+            if (preserveInvalidatedState) UnlockEnrollmentState.INVALIDATED
+            else UnlockEnrollmentState.NOT_ENROLLED,
+        )
         val cleanup = runCatching {
             val pending = pendingEncryption.getAndSet(null)
             runAllMaintenance(
@@ -178,9 +190,11 @@ class AndroidUnlockBlobAdapter(
         cleanup.exceptionOrNull()?.let { throw mapPlatformError(it) }
     }
 
+    @Synchronized
     fun deleteAll() {
         val pending = pendingEncryption.getAndSet(null)
         invalidatedKeys.clear()
+        pendingInvalidationDeletes.clear()
         selectedSecurity.set(null)
         val cleanup = runCatching {
             runAllMaintenance(
@@ -206,6 +220,7 @@ class AndroidUnlockBlobAdapter(
     fun securityLevel(): UnlockKeySecurityLevel? = selectedSecurity.get()
     fun maintenanceRequired(): Boolean = maintenancePending.get()
 
+    @Synchronized
     fun reconcileStorage() {
         try {
             cleanupOrphans()
@@ -237,9 +252,15 @@ class AndroidUnlockBlobAdapter(
         }
     }
 
-    private fun invalidate(key: String, record: UnlockBlobRecord?) {
+    private fun invalidate(
+        key: String,
+        record: UnlockBlobRecord?,
+        expectCoreDelete: Boolean,
+    ) {
         records.delete(key)
         invalidatedKeys.add(key)
+        if (expectCoreDelete) pendingInvalidationDeletes.add(key)
+        else pendingInvalidationDeletes.remove(key)
         selectedSecurity.set(null)
         state.set(UnlockEnrollmentState.INVALIDATED)
         val cleanup = runCatching {
@@ -254,12 +275,14 @@ class AndroidUnlockBlobAdapter(
     private fun cleanupOrphans() {
         records.discardUncommittedWrites()
         val selected = buildSet {
+            pendingEncryption.get()?.let { add(it.keyAlias) }
             records.keys().forEach { key ->
                 val record = try {
                     records.read(key)
                 } catch (_: Throwable) {
                     records.delete(key)
                     invalidatedKeys.add(key)
+                    pendingInvalidationDeletes.remove(key)
                     state.set(UnlockEnrollmentState.INVALIDATED)
                     null
                 }
@@ -312,7 +335,8 @@ class AndroidUnlockBlobAdapter(
         var current = error
         while (current != null) {
             if (current is KeyPermanentlyInvalidatedException ||
-                current is MissingUnlockKeyException
+                current is MissingUnlockKeyException ||
+                current is UnrecoverableKeyException
             ) {
                 return true
             }

@@ -77,6 +77,7 @@ class QuickUnlockReconciler(
     private val desiredSettings: DesiredSettingsStore,
     private val actualState: QuickUnlockActualState,
 ) {
+    @Synchronized
     fun reconcile(enrollCurrentVault: (() -> Unit)? = null): QuickUnlockReconciliationOutcome {
         val desired = desiredSettings.load()
         if (!desired.quickUnlockEnabled) {

@@ -6,10 +6,13 @@ import android.security.keystore.KeyProperties
 import androidx.biometric.BiometricManager
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import java.security.Key
 import java.security.KeyStore
 import java.security.SecureRandom
+import java.security.UnrecoverableKeyException
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -94,6 +97,34 @@ class AndroidUnlockBlobAdapterTest {
         assertFalse(records.exists(TEST_KEY))
         assertFalse(keys.contains(selectedAlias))
         assertEquals(UnlockEnrollmentState.INVALIDATED, adapter.enrollmentState())
+
+        // The core defensively deletes again after receiving Invalidated.
+        // That idempotent cleanup must not erase the UI classification.
+        adapter.deleteBlob(TEST_KEY)
+        assertEquals(UnlockEnrollmentState.INVALIDATED, adapter.enrollmentState(TEST_KEY))
+
+        // A later explicit revoke is distinct from the core's one cleanup
+        // retry and must converge the visible state to not enrolled.
+        adapter.deleteBlob(TEST_KEY)
+        assertEquals(UnlockEnrollmentState.NOT_ENROLLED, adapter.enrollmentState(TEST_KEY))
+    }
+
+    @Test
+    fun unrecoverableKeystoreKeyDeletesTheAtomicItemAndReportsInvalidated() {
+        adapter.authorizeStoreUserPresence()
+        adapter.storeBlob(
+            TEST_KEY,
+            VaultKernSensitiveBytes.fromByteArray(ByteArray(32) { 3 }),
+        )
+        val selectedAlias = records.read(TEST_KEY)!!.keyAlias
+        keys.unrecoverableAlias = selectedAlias
+
+        val result = runCatching { adapter.loadBlob(TEST_KEY) }
+
+        assertTrue(result.exceptionOrNull() is PlatformAdapterException.Invalidated)
+        assertFalse(records.exists(TEST_KEY))
+        assertFalse(keys.contains(selectedAlias))
+        assertEquals(UnlockEnrollmentState.INVALIDATED, adapter.enrollmentState(TEST_KEY))
     }
 
     @Test
@@ -166,6 +197,43 @@ class AndroidUnlockBlobAdapterTest {
         assertEquals(original.keyAlias, records.read(TEST_KEY)!!.keyAlias)
         assertTrue(keys.contains(original.keyAlias))
         assertEquals(setOf(original.keyAlias), keys.aliases())
+    }
+
+    @Test
+    fun storageReconciliationPreservesAnAuthorizedPendingKey() {
+        adapter.authorizeStoreUserPresence()
+        val pendingAlias = keys.aliases().single()
+
+        adapter.reconcileStorage()
+
+        assertTrue(keys.contains(pendingAlias))
+        adapter.storeBlob(
+            TEST_KEY,
+            VaultKernSensitiveBytes.fromByteArray(ByteArray(32) { 6 }),
+        )
+        assertTrue(adapter.containsBlob(TEST_KEY))
+    }
+
+    @Test
+    fun reconciliationScanCannotDeleteAConcurrentlyPreparedKey() {
+        val executor = Executors.newFixedThreadPool(2)
+        keys.blockNextAliasesScan = true
+
+        try {
+            val reconciliation = executor.submit { adapter.reconcileStorage() }
+            assertTrue(keys.aliasesScanStarted.await(5, TimeUnit.SECONDS))
+
+            val authorization = executor.submit { adapter.authorizeStoreUserPresence() }
+            keys.encryptionPrepared.await(250, TimeUnit.MILLISECONDS)
+            keys.finishAliasesScan.countDown()
+
+            reconciliation.get(5, TimeUnit.SECONDS)
+            authorization.get(5, TimeUnit.SECONDS)
+            assertEquals(1, keys.aliases().size)
+        } finally {
+            keys.finishAliasesScan.countDown()
+            executor.shutdownNow()
+        }
     }
 
     @Test
@@ -251,7 +319,13 @@ class AndroidUnlockBlobAdapterTest {
 private class FakeCipherBackend : UnlockCipherBackend {
     private val keys = ConcurrentHashMap<String, SecretKey>()
     var invalidatedAlias: String? = null
+    var unrecoverableAlias: String? = null
     var failNextDeleteAlias: String? = null
+    @Volatile
+    var blockNextAliasesScan = false
+    val aliasesScanStarted = CountDownLatch(1)
+    val finishAliasesScan = CountDownLatch(1)
+    val encryptionPrepared = CountDownLatch(1)
 
     override fun prepareEncryption(): PreparedUnlockCipher {
         val generator = KeyGenerator.getInstance("AES")
@@ -259,6 +333,7 @@ private class FakeCipherBackend : UnlockCipherBackend {
         val key = generator.generateKey()
         val alias = "test-${System.nanoTime()}"
         keys[alias] = key
+        encryptionPrepared.countDown()
         return PreparedUnlockCipher(
             keyAlias = alias,
             cipher = Cipher.getInstance(TRANSFORMATION).apply {
@@ -271,6 +346,9 @@ private class FakeCipherBackend : UnlockCipherBackend {
     override fun prepareDecryption(record: UnlockBlobRecord): PreparedUnlockCipher {
         if (invalidatedAlias == record.keyAlias) {
             throw KeyPermanentlyInvalidatedException()
+        }
+        if (unrecoverableAlias == record.keyAlias) {
+            throw UnrecoverableKeyException("injected unrecoverable key")
         }
         val key = keys[record.keyAlias] ?: error("missing test key")
         return PreparedUnlockCipher(
@@ -290,7 +368,14 @@ private class FakeCipherBackend : UnlockCipherBackend {
         }
         keys.remove(alias)
     }
-    override fun aliases(): Set<String> = keys.keys.toSet()
+    override fun aliases(): Set<String> {
+        if (blockNextAliasesScan) {
+            blockNextAliasesScan = false
+            aliasesScanStarted.countDown()
+            check(finishAliasesScan.await(5, TimeUnit.SECONDS))
+        }
+        return keys.keys.toSet()
+    }
 
     companion object {
         private const val TRANSFORMATION = "AES/GCM/NoPadding"

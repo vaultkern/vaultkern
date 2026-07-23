@@ -36,8 +36,8 @@ class ProcessBiometricGate(
         val intent = Intent(context, BiometricGateActivity::class.java)
             .putExtra(BiometricGateActivity.EXTRA_TOKEN, token)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
-        context.startActivity(intent)
         return try {
+            context.startActivity(intent)
             BiometricRequestBroker.await(token) ?: throw BiometricUnavailableException()
         } catch (error: ExecutionException) {
             throw error.cause ?: error
@@ -54,8 +54,8 @@ class ProcessBiometricGate(
         val intent = Intent(context, BiometricGateActivity::class.java)
             .putExtra(BiometricGateActivity.EXTRA_TOKEN, token)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION)
-        context.startActivity(intent)
         try {
+            context.startActivity(intent)
             BiometricRequestBroker.await(token)
         } catch (error: ExecutionException) {
             throw error.cause ?: error
