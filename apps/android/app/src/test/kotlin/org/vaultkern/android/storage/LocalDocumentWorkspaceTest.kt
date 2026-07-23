@@ -1,6 +1,7 @@
 package org.vaultkern.android.storage
 
 import java.io.File
+import java.io.IOException
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -178,7 +179,39 @@ class LocalDocumentWorkspaceTest {
     }
 
     @Test
-    fun readbackMismatchRemainsPendingAndRestartRetriesTheStartedWrite() {
+    fun ambiguousWriteFollowedByAForeignChangeForksInsteadOfOverwriting() {
+        val uri = "content://documents/local/vault.kdbx"
+        val conflictUri = "content://documents/local/vault-vaultkern-conflict.kdbx"
+        val original = ByteArray(44) { 31 }
+        val candidate = ByteArray(88) { 32 }
+        val foreign = ByteArray(66) { 33 }
+        val documents = MemoryLocalDocuments().apply {
+            put(uri, original, modifiedAt = 55L)
+            throwAfterNextReplace = true
+            nextConflictUri = conflictUri
+        }
+        val root = temporary.newFolder("ambiguous-then-foreign")
+        val firstProcess = LocalDocumentWorkspace(root, documents)
+        val selected = firstProcess.select(uri, "vault.kdbx")
+
+        firstProcess.prepareSave(selected.privatePath)
+        File(selected.privatePath).writeBytes(candidate)
+        assertEquals(
+            LocalDocumentPublishStatus.PENDING,
+            firstProcess.publishAfterSave(selected.privatePath).status,
+        )
+        documents.put(uri, foreign, modifiedAt = 57L)
+
+        val recovered = LocalDocumentWorkspace(root, documents).reconcilePending().single()
+
+        assertEquals(LocalDocumentPublishStatus.CONFLICT_COPY, recovered.status)
+        assertEquals(conflictUri, recovered.conflictLocation)
+        assertArrayEquals(foreign, documents.bytes(uri))
+        assertArrayEquals(candidate, documents.bytes(conflictUri))
+    }
+
+    @Test
+    fun readbackMismatchForksTheCandidateInsteadOfOverwritingAmbiguousContent() {
         val uri = "content://documents/local/vault.kdbx"
         val candidate = ByteArray(104) { 18 }
         val documents = MemoryLocalDocuments().apply {
@@ -194,11 +227,13 @@ class LocalDocumentWorkspaceTest {
         val mismatched = firstProcess.publishAfterSave(selected.privatePath)
 
         assertEquals(LocalDocumentPublishStatus.PENDING, mismatched.status)
-        assertTrue(!documents.bytes(uri).contentEquals(candidate))
+        val ambiguousContent = documents.bytes(uri)
+        assertTrue(!ambiguousContent.contentEquals(candidate))
 
         val recovered = LocalDocumentWorkspace(root, documents).reconcilePending()
-        assertEquals(LocalDocumentPublishStatus.PUBLISHED, recovered.single().status)
-        assertArrayEquals(candidate, documents.bytes(uri))
+        assertEquals(LocalDocumentPublishStatus.CONFLICT_COPY, recovered.single().status)
+        assertArrayEquals(ambiguousContent, documents.bytes(uri))
+        assertArrayEquals(candidate, File(requireNotNull(recovered.single().conflictLocation)).readBytes())
         assertTrue(documents.createdConflictUris.isEmpty())
     }
 
@@ -277,6 +312,11 @@ class LocalDocumentWorkspaceTest {
         workspace.prepareSave(selected.privatePath)
         File(selected.privatePath).writeBytes(candidate)
         documents.failNextReplace = true
+        assertEquals(
+            LocalDocumentPublishStatus.PENDING,
+            workspace.publishAfterSave(selected.privatePath).status,
+        )
+        documents.failNextReplace = true
 
         val reselected = runCatching { workspace.select(uri, "vault.kdbx") }
 
@@ -284,6 +324,94 @@ class LocalDocumentWorkspaceTest {
         assertArrayEquals(candidate, File(selected.privatePath).readBytes())
         assertEquals(LocalDocumentPublishStatus.PUBLISHED, workspace.reconcilePending().single().status)
         assertArrayEquals(candidate, documents.bytes(uri))
+    }
+
+    @Test
+    fun backgroundRecoverySkipsAReceiptWhileItsCoreSaveIsActive() {
+        val uri = "content://documents/local/vault.kdbx"
+        val candidate = ByteArray(96) { 35 }
+        val documents = MemoryLocalDocuments().apply {
+            put(uri, ByteArray(48) { 34 }, modifiedAt = 110L)
+        }
+        val workspace = LocalDocumentWorkspace(temporary.newFolder("active-save"), documents)
+        val selected = workspace.select(uri, "vault.kdbx")
+
+        workspace.prepareSave(selected.privatePath)
+
+        assertTrue(workspace.reconcilePending().isEmpty())
+        File(selected.privatePath).writeBytes(candidate)
+        assertEquals(
+            LocalDocumentPublishStatus.PUBLISHED,
+            workspace.publishAfterSave(selected.privatePath).status,
+        )
+        assertArrayEquals(candidate, documents.bytes(uri))
+    }
+
+    @Test
+    fun privateConflictCopiesNeverOverwriteAnEarlierConflict() {
+        val uri = "content://documents/local/vault.kdbx"
+        val firstCandidate = ByteArray(80) { 37 }
+        val secondCandidate = ByteArray(84) { 39 }
+        val documents = MemoryLocalDocuments().apply {
+            put(uri, ByteArray(40) { 36 }, modifiedAt = 120L)
+        }
+        val workspace = LocalDocumentWorkspace(temporary.newFolder("unique-private-conflicts"), documents)
+        val selected = workspace.select(uri, "vault.kdbx")
+
+        workspace.prepareSave(selected.privatePath)
+        File(selected.privatePath).writeBytes(firstCandidate)
+        documents.put(uri, ByteArray(40) { 38 }, modifiedAt = 121L)
+        val firstConflict = File(
+            requireNotNull(workspace.publishAfterSave(selected.privatePath).conflictLocation),
+        )
+
+        workspace.select(uri, "vault.kdbx")
+        workspace.prepareSave(selected.privatePath)
+        File(selected.privatePath).writeBytes(secondCandidate)
+        documents.put(uri, ByteArray(40) { 40 }, modifiedAt = 122L)
+        val secondConflict = File(
+            requireNotNull(workspace.publishAfterSave(selected.privatePath).conflictLocation),
+        )
+
+        assertTrue(firstConflict.canonicalPath != secondConflict.canonicalPath)
+        assertArrayEquals(firstCandidate, firstConflict.readBytes())
+        assertArrayEquals(secondCandidate, secondConflict.readBytes())
+    }
+
+    @Test
+    fun atomicMetadataCommitPropagatesDirectorySyncFailure() {
+        val uri = "content://documents/local/vault.kdbx"
+        val documents = MemoryLocalDocuments().apply {
+            put(uri, ByteArray(32) { 41 }, modifiedAt = 130L)
+        }
+        val workspace = LocalDocumentWorkspace(
+            root = temporary.newFolder("directory-sync-failure"),
+            documents = documents,
+            directorySync = { throw IOException("injected directory sync failure") },
+        )
+
+        val selected = runCatching { workspace.select(uri, "vault.kdbx") }
+
+        assertTrue(selected.isFailure)
+        assertEquals("injected directory sync failure", selected.exceptionOrNull()?.message)
+    }
+
+    @Test
+    fun atomicMetadataCommitNeverFallsBackToANonAtomicMove() {
+        val uri = "content://documents/local/vault.kdbx"
+        val documents = MemoryLocalDocuments().apply {
+            put(uri, ByteArray(32) { 42 }, modifiedAt = 140L)
+        }
+        val workspace = LocalDocumentWorkspace(
+            root = temporary.newFolder("atomic-move-failure"),
+            documents = documents,
+            atomicMove = { _, _ -> throw IOException("injected atomic move failure") },
+        )
+
+        val selected = runCatching { workspace.select(uri, "vault.kdbx") }
+
+        assertTrue(selected.isFailure)
+        assertEquals("injected atomic move failure", selected.exceptionOrNull()?.message)
     }
 }
 

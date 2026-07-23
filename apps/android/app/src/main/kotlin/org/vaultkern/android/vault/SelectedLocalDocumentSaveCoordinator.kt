@@ -37,4 +37,10 @@ class SelectedLocalDocumentSaveTransaction internal constructor(
             )
         }
     }
+
+    fun abandon() {
+        if (completed.compareAndSet(false, true)) {
+            workspace.abandonSave(vaultPath)
+        }
+    }
 }

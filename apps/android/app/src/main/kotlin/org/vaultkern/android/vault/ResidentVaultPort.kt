@@ -115,6 +115,7 @@ class VaultKernResidentVaultPort(
             VaultKernSensitiveString.fromString(value).also(owners::add)
 
         var edited: EntryDetailDto? = null
+        var localSave: SelectedLocalDocumentSaveTransaction? = null
         return try {
             val fields = EntryFieldsDto(
                 title = sensitive(draft.title),
@@ -135,7 +136,7 @@ class VaultKernResidentVaultPort(
             edited = session.editEntry(vaultId, draft.id, fields)
             edited.closeSecrets()
             edited = null
-            val localSave = selectedLocalDocuments?.prepare(vaultId)
+            localSave = selectedLocalDocuments?.prepare(vaultId)
             val result = session.save(vaultId)
             val coreResult = VaultSaveResult(
                 status = when (result.status) {
@@ -150,9 +151,14 @@ class VaultKernResidentVaultPort(
         } finally {
             var cleanupFailure: Throwable? = null
             try {
-                edited?.closeSecrets()
+                localSave?.abandon()
             } catch (error: Throwable) {
                 cleanupFailure = error
+            }
+            try {
+                edited?.closeSecrets()
+            } catch (error: Throwable) {
+                cleanupFailure?.addSuppressed(error) ?: run { cleanupFailure = error }
             }
             try {
                 owners.closeAllSecrets()

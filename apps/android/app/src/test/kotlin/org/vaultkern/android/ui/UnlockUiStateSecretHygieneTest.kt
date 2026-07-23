@@ -28,4 +28,16 @@ class UnlockUiStateSecretHygieneTest {
         assertFalse(rendered.contains("personal-finances.kdbx"))
         assertTrue(rendered.contains("[REDACTED]"))
     }
+
+    @Test
+    fun diagnosticRenderingDoesNotExposeAConflictCopyLocation() {
+        val state = UnlockUiState(
+            conflictCopyPath = "/data/user/0/org.vaultkern.android/personal-finances-conflict.kdbx",
+        )
+
+        val rendered = state.toString()
+
+        assertFalse(rendered.contains("personal-finances-conflict.kdbx"))
+        assertTrue(rendered.contains("conflictCopyPath=[REDACTED]"))
+    }
 }

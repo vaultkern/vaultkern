@@ -53,7 +53,7 @@ data class UnlockUiState(
             "vaultUnlocked=$vaultUnlocked, " +
             "entryCount=${entries.size}, " +
             "editor=${if (editor == null) "closed" else "[REDACTED]"}, " +
-            "conflictCopyPath=$conflictCopyPath)"
+            "conflictCopyPath=${if (conflictCopyPath == null) "none" else "[REDACTED]"})"
 }
 
 @Composable

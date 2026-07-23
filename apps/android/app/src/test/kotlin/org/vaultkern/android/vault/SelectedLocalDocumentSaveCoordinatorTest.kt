@@ -8,6 +8,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import org.vaultkern.android.storage.LocalDocumentAccess
+import org.vaultkern.android.storage.LocalDocumentPublishStatus
 import org.vaultkern.android.storage.LocalDocumentSnapshot
 import org.vaultkern.android.storage.LocalDocumentWorkspace
 
@@ -54,6 +55,25 @@ class SelectedLocalDocumentSaveCoordinatorTest {
         access.failReplace = false
         assertEquals(1, LocalDocumentWorkspace(root, access).reconcilePending().size)
         assertArrayEquals(candidate, access.bytes)
+    }
+
+    @Test
+    fun abandonedCoreSaveReleasesTheInProcessGuardButKeepsItsReceiptRecoverable() {
+        val uri = "content://documents/local/vault.kdbx"
+        val access = CoordinatorDocumentAccess(uri, ByteArray(48) { 54 })
+        val workspace = LocalDocumentWorkspace(temporary.newFolder("abandoned"), access)
+        val selected = workspace.select(uri, "vault.kdbx")
+        val transaction = assertNotNullTransaction(
+            SelectedLocalDocumentSaveCoordinator(workspace).prepare(selected.privatePath),
+        )
+
+        transaction.abandon()
+
+        assertEquals(LocalDocumentPublishStatus.NO_CHANGE, workspace.reconcilePending().single().status)
+        val retried = assertNotNullTransaction(
+            SelectedLocalDocumentSaveCoordinator(workspace).prepare(selected.privatePath),
+        )
+        retried.abandon()
     }
 
     private fun assertNotNullTransaction(

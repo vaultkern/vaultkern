@@ -7,7 +7,6 @@ import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
 import java.nio.channels.FileChannel
-import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.nio.file.StandardOpenOption
@@ -72,8 +71,11 @@ private data class PendingLocalDocumentSave(
 class LocalDocumentWorkspace(
     root: File,
     private val documents: LocalDocumentAccess,
+    private val atomicMove: (File, File) -> Unit = ::moveAtomically,
+    private val directorySync: (File) -> Unit = ::forceDirectory,
 ) {
     private val root = root.canonicalFile
+    private val activeSaves = mutableSetOf<String>()
 
     @Synchronized
     fun select(uri: String, displayName: String): SelectedLocalDocument {
@@ -85,6 +87,9 @@ class LocalDocumentWorkspace(
         }
         val privateFile = File(directory, PRIVATE_FILE_NAME)
         if (File(directory, PENDING_FILE_NAME).isFile) {
+            check(!activeSaves.contains(privateFile.canonicalPath)) {
+                "selected local document save is still active"
+            }
             val publication = publishAfterSave(privateFile.canonicalPath)
             check(publication.status != LocalDocumentPublishStatus.PENDING) {
                 "selected local document still has an unpublished private save"
@@ -128,6 +133,9 @@ class LocalDocumentWorkspace(
             .filter { File(it, BINDING_FILE_NAME).isFile }
             .filter { File(it, PENDING_FILE_NAME).isFile }
             .filter { File(it, PRIVATE_FILE_NAME).isFile }
+            .filterNot {
+                activeSaves.contains(File(it, PRIVATE_FILE_NAME).canonicalPath)
+            }
             .map { directory ->
                 publishAfterSave(File(directory, PRIVATE_FILE_NAME).canonicalPath)
             }
@@ -172,17 +180,42 @@ class LocalDocumentWorkspace(
         val privateFile = File(binding.privatePath)
         require(privateFile.isFile) { "local document working copy is missing" }
         val directory = requireNotNull(privateFile.parentFile)
-        writePending(
-            directory,
-            PendingLocalDocumentSave(
-                mirrorBefore = fingerprint(privateFile),
-                writeStarted = false,
-            ),
-        )
+        check(!File(directory, PENDING_FILE_NAME).isFile) {
+            "a previous local document save still needs reconciliation"
+        }
+        check(activeSaves.add(privateFile.canonicalPath)) {
+            "local document save is already active"
+        }
+        try {
+            writePending(
+                directory,
+                PendingLocalDocumentSave(
+                    mirrorBefore = fingerprint(privateFile),
+                    writeStarted = false,
+                ),
+            )
+        } catch (error: Throwable) {
+            activeSaves.remove(privateFile.canonicalPath)
+            throw error
+        }
     }
 
     @Synchronized
     fun publishAfterSave(privatePath: String): LocalDocumentPublishResult {
+        val canonicalPath = File(privatePath).canonicalPath
+        return try {
+            publishAfterSaveInternal(canonicalPath)
+        } finally {
+            activeSaves.remove(canonicalPath)
+        }
+    }
+
+    @Synchronized
+    fun abandonSave(privatePath: String) {
+        activeSaves.remove(File(privatePath).canonicalPath)
+    }
+
+    private fun publishAfterSaveInternal(privatePath: String): LocalDocumentPublishResult {
         val binding = requireNotNull(bindingFor(privatePath)) {
             "vault is not backed by a selected local document"
         }
@@ -214,7 +247,7 @@ class LocalDocumentWorkspace(
             clearPending(directory)
             return LocalDocumentPublishResult(LocalDocumentPublishStatus.PUBLISHED)
         }
-        if (!currentFingerprint.sameContentAs(binding.baseline) && !pending.writeStarted) {
+        if (!currentFingerprint.sameContentAs(binding.baseline)) {
             return publishConflictCopy(binding, privateFile, directory, candidate)
         }
 
@@ -267,6 +300,7 @@ class LocalDocumentWorkspace(
                     directory,
                     conflictName,
                     candidateBytes,
+                    candidate,
                 )
             val conflict = documents.read(conflictUri)
             try {
@@ -300,8 +334,12 @@ class LocalDocumentWorkspace(
         directory: File,
         conflictName: String,
         candidateBytes: ByteArray,
+        candidate: LocalDocumentFingerprint,
     ): LocalDocumentPublishResult {
-        val conflictFile = File(directory, PRIVATE_CONFLICT_FILE_NAME)
+        val conflictFile = File(
+            directory,
+            "$PRIVATE_CONFLICT_FILE_PREFIX${candidate.contentSha256}.kdbx",
+        )
         writeAtomic(conflictFile, candidateBytes)
         writeBinding(
             directory,
@@ -416,7 +454,7 @@ class LocalDocumentWorkspace(
 
     private fun clearPending(directory: File) {
         Files.deleteIfExists(File(directory, PENDING_FILE_NAME).toPath())
-        syncDirectory(directory)
+        directorySync(directory)
     }
 
     private fun stableId(uri: String): String = sha256Hex(uri.toByteArray(Charsets.UTF_8))
@@ -430,27 +468,8 @@ class LocalDocumentWorkspace(
             output.flush()
             output.fd.sync()
         }
-        try {
-            Files.move(
-                temporary.toPath(),
-                target.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            Files.move(
-                temporary.toPath(),
-                target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        }
-        runCatching {
-            syncDirectory(parent)
-        }
-    }
-
-    private fun syncDirectory(directory: File) {
-        FileChannel.open(directory.toPath(), StandardOpenOption.READ).use { it.force(true) }
+        atomicMove(temporary, target)
+        directorySync(parent)
     }
 
     companion object {
@@ -459,7 +478,7 @@ class LocalDocumentWorkspace(
         private const val PENDING_MAGIC = 0x564b4c50
         private const val PENDING_VERSION = 2
         private const val PRIVATE_FILE_NAME = "vault.kdbx"
-        private const val PRIVATE_CONFLICT_FILE_NAME = "vault-vaultkern-conflict.kdbx"
+        private const val PRIVATE_CONFLICT_FILE_PREFIX = "vault-vaultkern-conflict-"
         private const val BINDING_FILE_NAME = "binding.bin"
         private const val PENDING_FILE_NAME = "pending.bin"
         private const val NEW_SUFFIX = ".new"
@@ -488,6 +507,19 @@ class LocalDocumentWorkspace(
             .digest(bytes)
             .joinToString("") { byte -> "%02x".format(byte) }
     }
+}
+
+private fun moveAtomically(source: File, target: File) {
+    Files.move(
+        source.toPath(),
+        target.toPath(),
+        StandardCopyOption.ATOMIC_MOVE,
+        StandardCopyOption.REPLACE_EXISTING,
+    )
+}
+
+private fun forceDirectory(directory: File) {
+    FileChannel.open(directory.toPath(), StandardOpenOption.READ).use { it.force(true) }
 }
 
 private fun LocalDocumentFingerprint.sameContentAs(other: LocalDocumentFingerprint): Boolean =
