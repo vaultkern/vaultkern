@@ -67,6 +67,7 @@ fn normalize_generated_text(generated: &str) -> String {
         .join("\n");
     normalized = clear_kotlin_sensitive_byte_copies(normalized);
     normalized = avoid_kotlin_sensitive_plain_strings(normalized);
+    normalized = close_sensitive_kotlin_callback_returns(normalized);
     while normalized.ends_with('\n') {
         normalized.pop();
     }
@@ -211,11 +212,27 @@ fn avoid_kotlin_sensitive_plain_strings(generated: String) -> String {
     )
 }
 
+fn close_sensitive_kotlin_callback_returns(mut generated: String) -> String {
+    for (sensitive_type, converter) in [
+        ("SensitiveString", "FfiConverterOptionalTypeSensitiveString"),
+        ("SensitiveBytes", "FfiConverterOptionalTypeSensitiveBytes"),
+    ] {
+        let original = format!(
+            "            val writeReturn = {{ value: {sensitive_type}? -> uniffiOutReturn.setValue({converter}.lower(value)) }}"
+        );
+        let replacement = format!(
+            "            val writeReturn = {{ value: {sensitive_type}? ->\n                try {{\n                    uniffiOutReturn.setValue({converter}.lower(value))\n                }} finally {{\n                    value?.close()\n                }}\n            }}"
+        );
+        generated = generated.replace(&original, &replacement);
+    }
+    generated
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         avoid_kotlin_sensitive_plain_strings, clear_kotlin_sensitive_byte_copies,
-        normalize_generated_text,
+        close_sensitive_kotlin_callback_returns, normalize_generated_text,
     };
 
     #[test]
@@ -270,5 +287,17 @@ mod tests {
 
         assert!(!hardened.contains("FfiConverterString"));
         assert!(hardened.contains("value.copyUtf8Bytes()"));
+    }
+
+    #[test]
+    fn closes_sensitive_kotlin_callback_returns_after_lowering() {
+        let generated = "            val writeReturn = { value: SensitiveString? -> uniffiOutReturn.setValue(FfiConverterOptionalTypeSensitiveString.lower(value)) }";
+
+        let normalized = close_sensitive_kotlin_callback_returns(generated.into());
+
+        assert!(normalized.contains("value?.close()"));
+        assert!(
+            normalized.find("lower(value)").unwrap() < normalized.find("value?.close()").unwrap()
+        );
     }
 }

@@ -3,6 +3,12 @@ package org.vaultkern.core
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
+private fun copyAndClear(value: ByteArray): ByteArray = try {
+    value.copyOf()
+} finally {
+    value.fill(0)
+}
+
 /**
  * Clearable text storage for secret-bearing UniFFI DTO fields.
  *
@@ -21,9 +27,7 @@ public class VaultKernSensitiveString private constructor(
 
         @JvmStatic
         public fun fromUtf8Bytes(value: ByteArray): VaultKernSensitiveString {
-            val owned = value.copyOf()
-            value.fill(0)
-            return VaultKernSensitiveString(owned)
+            return VaultKernSensitiveString(copyAndClear(value))
         }
     }
 
@@ -50,9 +54,7 @@ public class VaultKernSensitiveBytes private constructor(
     public companion object {
         @JvmStatic
         public fun fromByteArray(value: ByteArray): VaultKernSensitiveBytes {
-            val owned = value.copyOf()
-            value.fill(0)
-            return VaultKernSensitiveBytes(owned)
+            return VaultKernSensitiveBytes(copyAndClear(value))
         }
     }
 
