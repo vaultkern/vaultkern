@@ -55,6 +55,21 @@ class UnlockCoordinatorTest {
     }
 
     @Test
+    fun quickUnlockRefreshesTheSelectedVaultBeforeConsultingTheCoreBlob() {
+        val port = RecordingUnlockPort(initialEnrollment = UnlockEnrollmentState.ENROLLED)
+        val coordinator = UnlockCoordinator(
+            port,
+            CountingReconciliation(QuickUnlockReconciler(FixedSettings(true), port)),
+            beforeQuickUnlock = { port.events += "refresh" },
+        )
+
+        val result = coordinator.quickUnlock()
+
+        assertEquals(UnlockAttemptOutcome.UNLOCKED, result)
+        assertEquals(listOf("refresh", "quick"), port.events)
+    }
+
+    @Test
     fun reconciliationFailureDoesNotTurnASuccessfulUnlockIntoAnUnlockFailure() {
         val port = RecordingUnlockPort()
         val reconciliation = object : PostUnlockReconciliation {
@@ -88,6 +103,28 @@ class UnlockCoordinatorTest {
         assertTrue(result.isFailure)
         assertEquals(UnlockEnrollmentState.NOT_ENROLLED, port.enrollmentState())
         assertEquals(2, cleanupCalls)
+    }
+
+    @Test
+    fun platformStoreReconciliationRunsEveryStoreAndCombinesFailures() {
+        val events = mutableListOf<String>()
+
+        val result = runCatching {
+            reconcilePlatformStores(
+                {
+                    events += "unlock-blob"
+                    error("blob failure")
+                },
+                {
+                    events += "local-documents"
+                    error("document failure")
+                },
+            )
+        }
+
+        assertTrue(result.isFailure)
+        assertEquals(listOf("unlock-blob", "local-documents"), events)
+        assertEquals(1, result.exceptionOrNull()?.suppressed?.size)
     }
 }
 
@@ -134,6 +171,7 @@ private class RecordingUnlockPort(
     }
 
     override fun quickUnlock(): UnlockAttemptOutcome {
+        events += "quick"
         unlocked = true
         return UnlockAttemptOutcome.UNLOCKED
     }

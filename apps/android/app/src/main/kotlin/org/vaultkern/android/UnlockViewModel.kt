@@ -15,6 +15,10 @@ import org.vaultkern.android.settings.QuickUnlockSettingsApplier
 import org.vaultkern.android.settings.QuickUnlockSettingsApplyOutcome
 import org.vaultkern.android.ui.UnlockUiState
 import org.vaultkern.android.unlock.UnlockAttemptOutcome
+import org.vaultkern.android.vault.VaultEntryDraft
+import org.vaultkern.android.vault.VaultEntryListItem
+import org.vaultkern.android.vault.VaultSaveResult
+import org.vaultkern.android.vault.VaultSaveStatus
 
 class UnlockViewModel(
     private val graph: VaultKernGraph,
@@ -32,17 +36,25 @@ class UnlockViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val refreshed = runCatching {
                 graph.awaitScheduledReconciliation()
-                graph.currentEnrollmentState() to graph.currentKeySecurityLevel()
+                val unlocked = graph.session.sessionState().unlocked
+                StartupSnapshot(
+                    enrollment = graph.currentEnrollmentState(),
+                    security = graph.currentKeySecurityLevel(),
+                    unlocked = unlocked,
+                    entries = if (unlocked) graph.vaultWorkflow.browse() else emptyList(),
+                )
             }
             mutableState.update { current ->
                 if (current.busy || current.status != INITIAL_STATUS) {
                     current
                 } else {
                     refreshed.fold(
-                        onSuccess = { (enrollment, security) ->
+                        onSuccess = { snapshot ->
                             current.copy(
-                                enrollmentState = enrollment,
-                                keySecurityLevel = security,
+                                enrollmentState = snapshot.enrollment,
+                                keySecurityLevel = snapshot.security,
+                                vaultUnlocked = snapshot.unlocked,
+                                entries = snapshot.entries,
                             )
                         },
                         onFailure = {
@@ -57,18 +69,40 @@ class UnlockViewModel(
         }
     }
 
-    fun onPathChanged(value: String) {
-        mutableState.update { it.copy(vaultPath = value) }
-    }
-
     fun onPasswordChanged(value: String) {
         mutableState.update { it.copy(password = value) }
+    }
+
+    fun selectLocalDocument(uri: String) {
+        if (uri.isBlank() || mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, status = "Opening selected local vault") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val selected = runCatching { graph.selectLocalDocument(uri) }
+            mutableState.update { current ->
+                selected.fold(
+                    onSuccess = {
+                        current.copy(
+                            vaultPath = it.privatePath,
+                            selectedVaultName = it.displayName,
+                            busy = false,
+                            status = "Local vault selected",
+                        )
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "Vault selection failed: ${it.javaClass.simpleName}",
+                        )
+                    },
+                )
+            }
+        }
     }
 
     @OptIn(ExperimentalCoroutinesApi::class)
     fun interactiveUnlock() {
         val snapshot = mutableState.value
-        if (snapshot.vaultPath.isBlank()) return
+        if (snapshot.busy || snapshot.vaultPath.isBlank()) return
         val path = snapshot.vaultPath
         val credential = snapshot.password.toCharArray()
         mutableState.update {
@@ -83,7 +117,7 @@ class UnlockViewModel(
                 credential.fill('\u0000')
             }
             if (result.isSuccess) {
-                publishStatus(unlockedStatus())
+                publishUnlockedVault(unlockedStatus())
             } else {
                 publishStatus("Unlock failed: ${result.exceptionOrNull()?.javaClass?.simpleName}")
             }
@@ -91,6 +125,7 @@ class UnlockViewModel(
     }
 
     fun quickUnlock() {
+        if (mutableState.value.busy) return
         mutableState.update { it.copy(busy = true, status = "Waiting for biometrics") }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching { graph.unlockCoordinator.quickUnlock() }
@@ -98,11 +133,106 @@ class UnlockViewModel(
                 onSuccess = ::quickUnlockStatus,
                 onFailure = { "Quick unlock failed: ${it.javaClass.simpleName}" },
             )
-            publishStatus(status)
+            if (result.getOrNull() == UnlockAttemptOutcome.UNLOCKED) {
+                publishUnlockedVault(status)
+            } else {
+                publishStatus(status)
+            }
+        }
+    }
+
+    fun selectEntry(entryId: String) {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, status = "Opening entry") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { graph.vaultWorkflow.open(entryId) }
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = { draft ->
+                        current.copy(busy = false, status = "Editing entry", editor = draft)
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "Entry open failed: ${it.javaClass.simpleName}",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun updateDraft(draft: VaultEntryDraft) {
+        mutableState.update { current ->
+            if (current.editor?.id == draft.id && !current.busy) current.copy(editor = draft)
+            else current
+        }
+    }
+
+    fun closeEditor() {
+        mutableState.update { current ->
+            if (current.busy) current
+            else current.copy(editor = null, status = "Vault unlocked")
+        }
+    }
+
+    fun saveEditor() {
+        val snapshot = mutableState.value
+        if (snapshot.busy) return
+        val draft = snapshot.editor ?: return
+        mutableState.update { it.copy(busy = true, status = "Saving vault") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { graph.vaultWorkflow.save(draft) }
+            val refreshed = result.mapCatching { graph.vaultWorkflow.browse() }
+            mutableState.update { current ->
+                result.fold(
+                    onSuccess = { save ->
+                        current.copy(
+                            busy = false,
+                            status = saveStatus(save),
+                            entries = refreshed.getOrDefault(current.entries),
+                            editor = null,
+                            conflictCopyPath = save.conflictCopyPath,
+                        )
+                    },
+                    onFailure = {
+                        current.copy(
+                            busy = false,
+                            status = "Save failed: ${it.javaClass.simpleName}",
+                        )
+                    },
+                )
+            }
+        }
+    }
+
+    fun lockVault() {
+        if (mutableState.value.busy) return
+        mutableState.update { it.copy(busy = true, status = "Locking vault") }
+        viewModelScope.launch(Dispatchers.IO) {
+            val result = runCatching { graph.vaultWorkflow.lock() }
+            mutableState.update { current ->
+                if (result.isSuccess) {
+                    current.copy(
+                        busy = false,
+                        status = INITIAL_STATUS,
+                        vaultUnlocked = false,
+                        entries = emptyList(),
+                        editor = null,
+                        conflictCopyPath = null,
+                    )
+                } else {
+                    current.copy(
+                        busy = false,
+                        status = "Lock failed: ${result.exceptionOrNull()?.javaClass?.simpleName}",
+                    )
+                }
+            }
         }
     }
 
     fun setQuickUnlockDesired(enabled: Boolean) {
+        if (mutableState.value.busy) return
         mutableState.update { it.copy(quickUnlockDesired = enabled, busy = true) }
         viewModelScope.launch(Dispatchers.IO) {
             val result = runCatching {
@@ -151,6 +281,32 @@ class UnlockViewModel(
         }
     }
 
+    private fun publishUnlockedVault(status: String) {
+        val entries = runCatching { graph.vaultWorkflow.browse() }
+        mutableState.update { current ->
+            current.copy(
+                busy = false,
+                status = entries.fold(
+                    onSuccess = { status },
+                    onFailure = { "$status; browse failed (${it.javaClass.simpleName})" },
+                ),
+                quickUnlockDesired = graph.desiredSettings.load().quickUnlockEnabled,
+                enrollmentState = graph.currentEnrollmentState(),
+                keySecurityLevel = graph.currentKeySecurityLevel(),
+                vaultUnlocked = true,
+                entries = entries.getOrDefault(emptyList()),
+                editor = null,
+            )
+        }
+    }
+
+    private fun saveStatus(result: VaultSaveResult): String = when (result.status) {
+        VaultSaveStatus.SAVED -> "Vault saved durably"
+        VaultSaveStatus.MERGED -> "Vault saved after core field patch"
+        VaultSaveStatus.SAVED_TO_CACHE -> "Vault saved to local working copy"
+        VaultSaveStatus.CONFLICT_COPY -> "Foreign change detected; conflict copy created"
+    }
+
     private fun unlockedStatus(): String =
         graph.unlockCoordinator.lastReconciliationFailure()?.let {
             "Vault unlocked; quick-unlock reconciliation needs retry ($it)"
@@ -175,3 +331,10 @@ class UnlockViewModel(
         private const val INITIAL_STATUS = "Select a vault and unlock it"
     }
 }
+
+private data class StartupSnapshot(
+    val enrollment: UnlockEnrollmentState,
+    val security: org.vaultkern.android.security.UnlockKeySecurityLevel?,
+    val unlocked: Boolean,
+    val entries: List<VaultEntryListItem>,
+)

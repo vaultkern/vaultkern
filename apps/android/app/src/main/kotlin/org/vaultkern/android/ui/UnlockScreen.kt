@@ -23,35 +23,47 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import org.vaultkern.android.security.UnlockEnrollmentState
 import org.vaultkern.android.security.UnlockKeySecurityLevel
+import org.vaultkern.android.vault.VaultEntryDraft
+import org.vaultkern.android.vault.VaultEntryListItem
 
 data class UnlockUiState(
     val vaultPath: String = "",
+    val selectedVaultName: String? = null,
     val password: String = "",
     val quickUnlockDesired: Boolean = false,
     val enrollmentState: UnlockEnrollmentState = UnlockEnrollmentState.NOT_ENROLLED,
     val keySecurityLevel: UnlockKeySecurityLevel? = null,
     val busy: Boolean = false,
     val status: String = "Select a vault and unlock it",
+    val vaultUnlocked: Boolean = false,
+    val entries: List<VaultEntryListItem> = emptyList(),
+    val editor: VaultEntryDraft? = null,
+    val conflictCopyPath: String? = null,
 ) {
     override fun toString(): String =
         "UnlockUiState(" +
-            "vaultPath=$vaultPath, " +
+            "vaultPath=${if (vaultPath.isBlank()) "none" else "[APP-PRIVATE]"}, " +
+            "selectedVaultName=${if (selectedVaultName == null) "none" else "[REDACTED]"}, " +
             "password=[REDACTED], " +
             "quickUnlockDesired=$quickUnlockDesired, " +
             "enrollmentState=$enrollmentState, " +
             "keySecurityLevel=$keySecurityLevel, " +
             "busy=$busy, " +
-            "status=$status)"
+            "status=$status, " +
+            "vaultUnlocked=$vaultUnlocked, " +
+            "entryCount=${entries.size}, " +
+            "editor=${if (editor == null) "closed" else "[REDACTED]"}, " +
+            "conflictCopyPath=${if (conflictCopyPath == null) "none" else "[REDACTED]"})"
 }
 
 @Composable
 fun VaultKernUnlockScreen(
     state: UnlockUiState,
-    onPathChanged: (String) -> Unit,
     onPasswordChanged: (String) -> Unit,
     onInteractiveUnlock: () -> Unit,
     onQuickUnlock: () -> Unit,
     onQuickUnlockDesiredChanged: (Boolean) -> Unit,
+    onChooseLocalVault: () -> Unit = {},
 ) {
     MaterialTheme {
         Column(
@@ -62,13 +74,16 @@ fun VaultKernUnlockScreen(
         ) {
             Text("VaultKern", style = MaterialTheme.typography.headlineMedium)
             Text(state.status, modifier = Modifier.testTag("unlock-status"))
-            OutlinedTextField(
-                value = state.vaultPath,
-                onValueChange = onPathChanged,
+            Button(
+                onClick = onChooseLocalVault,
                 enabled = !state.busy,
-                label = { Text("Vault path") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth().testTag("vault-path"),
+                modifier = Modifier.fillMaxWidth().testTag("choose-local-vault"),
+            ) {
+                Text("Choose local vault")
+            }
+            Text(
+                state.selectedVaultName?.let { "Selected: $it" } ?: "No local vault selected",
+                modifier = Modifier.testTag("selected-vault-name"),
             )
             OutlinedTextField(
                 value = state.password,
