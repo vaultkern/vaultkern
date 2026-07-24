@@ -9,7 +9,7 @@ use vaultkern_core::{
 use vaultkern_runtime_protocol::{
     AutofillUpdateFieldsDto, CommitStatusDto, DatabaseCredentialsUpdateDto,
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto,
-    DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, EntryCustomFieldDto,
+    DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, EntryCustomFieldDto, EntryFieldsDto,
     OptionalSettingUpdateDto, PROTOCOL_VERSION, PublicationStatusDto, RuntimeCommand,
     RuntimeResponse,
 };
@@ -28,6 +28,26 @@ fn empty_vault_bytes() -> Vec<u8> {
             SaveProfile::recommended(),
         )
         .expect("create in-memory KDBX snapshot")
+}
+
+fn browser_entry_fields(password: &str) -> EntryFieldsDto {
+    EntryFieldsDto {
+        title: "Example".into(),
+        username: "alice".into(),
+        password: password.into(),
+        url: "https://example.com/login".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+        custom_fields: vec![],
+    }
+}
+
+fn browser_update_fields(password: &str) -> AutofillUpdateFieldsDto {
+    AutofillUpdateFieldsDto {
+        username: "alice".into(),
+        password: password.into(),
+        url: "https://example.com/login".into(),
+    }
 }
 
 fn vault_with_entry_bytes() -> (Vec<u8>, String) {
@@ -2805,6 +2825,7 @@ fn harness_keeps_browser_commands_behind_the_protocol_session_boundary() {
         harness.command(RuntimeCommand::CreateAutofillEntry {
             vault_id: "locked-vault".into(),
             parent_group_id: "locked-group".into(),
+            expected_matching_entry_ids: vec![],
             title: "Locked".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -2849,6 +2870,7 @@ fn browser_login_mutations_commit_once_and_report_pending_publication() {
         harness.command(RuntimeCommand::CreateAutofillEntry {
             vault_id: vault_id.clone(),
             parent_group_id: root_id,
+            expected_matching_entry_ids: vec![],
             title: "Example".into(),
             username: "alice".into(),
             password: "first-secret".into(),
@@ -2923,4 +2945,177 @@ fn browser_login_mutations_commit_once_and_report_pending_publication() {
         }),
         RuntimeResponse::Error(error) if error.code == "invalid_autofill_mutation"
     ));
+}
+
+#[test]
+fn browser_create_rejects_a_matching_set_changed_after_confirmation() {
+    let mut harness =
+        RuntimeProtocolHarness::browser_with_unlocked_in_memory_vault(empty_vault_bytes());
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "browser-extension".into(),
+            "browser-autofill".into(),
+        ],
+    });
+    let vault_id = match harness.command(RuntimeCommand::GetSessionState) {
+        RuntimeResponse::SessionState(state) => state.active_vault_id.expect("active vault"),
+        other => panic!("expected browser session, got {other:?}"),
+    };
+    let root_id = match harness.command(RuntimeCommand::GetAutofillCreateContext {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::AutofillCreateContext(context) => context.root_group_id,
+        other => panic!("expected create context, got {other:?}"),
+    };
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::FindExactMatchingEntryIds {
+            vault_id: vault_id.clone(),
+            fields: browser_entry_fields("secret"),
+        }),
+        RuntimeResponse::EntryIdList(ids) if ids.entry_ids.is_empty()
+    ));
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateAutofillEntry {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id.clone(),
+            expected_matching_entry_ids: vec![],
+            title: "Example".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::EntryMutationResult(_)
+    ));
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateAutofillEntry {
+            vault_id: vault_id.clone(),
+            parent_group_id: root_id.clone(),
+            expected_matching_entry_ids: vec![],
+            title: "Example".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::Error(error) if error.code == "create_matching_set_changed"
+    ));
+    let current_matching_ids = match harness.command(RuntimeCommand::FindExactMatchingEntryIds {
+        vault_id: vault_id.clone(),
+        fields: browser_entry_fields("secret"),
+    }) {
+        RuntimeResponse::EntryIdList(ids) => ids.entry_ids,
+        other => panic!("expected matching entry ids, got {other:?}"),
+    };
+    assert_eq!(current_matching_ids.len(), 1);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::CreateAutofillEntry {
+            vault_id,
+            parent_group_id: root_id,
+            expected_matching_entry_ids: current_matching_ids,
+            title: "Example".into(),
+            username: "alice".into(),
+            password: "secret".into(),
+            url: "https://example.com/login".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+        }),
+        RuntimeResponse::EntryMutationResult(_)
+    ));
+}
+
+#[test]
+fn browser_noop_update_preserves_entry_history_and_modified_time() {
+    let core = KeepassCore::new();
+    let mut harness =
+        RuntimeProtocolHarness::browser_with_unlocked_in_memory_vault(empty_vault_bytes());
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "browser-extension".into(),
+            "browser-autofill".into(),
+        ],
+    });
+    let vault_id = match harness.command(RuntimeCommand::GetSessionState) {
+        RuntimeResponse::SessionState(state) => state.active_vault_id.expect("active vault"),
+        other => panic!("expected browser session, got {other:?}"),
+    };
+    let root_id = match harness.command(RuntimeCommand::GetAutofillCreateContext {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::AutofillCreateContext(context) => context.root_group_id,
+        other => panic!("expected create context, got {other:?}"),
+    };
+    harness.command(RuntimeCommand::CreateAutofillEntry {
+        vault_id: vault_id.clone(),
+        parent_group_id: root_id,
+        expected_matching_entry_ids: vec![],
+        title: "Example".into(),
+        username: "alice".into(),
+        password: "first-secret".into(),
+        url: "https://example.com/login".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    });
+    let entry_id = match harness.command(RuntimeCommand::FindFillCandidates {
+        vault_id: vault_id.clone(),
+        url: "https://example.com/login".into(),
+    }) {
+        RuntimeResponse::FillCandidates(candidates) => candidates.entries[0].id.clone(),
+        other => panic!("expected browser candidate, got {other:?}"),
+    };
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: entry_id.clone(),
+            expected_fields: browser_update_fields("first-secret"),
+            desired_fields: browser_update_fields("second-secret"),
+        }),
+        RuntimeResponse::EntryMutationResult(_)
+    ));
+    let after_update = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode updated provider snapshot")
+        .vault;
+    let updated = after_update
+        .root
+        .entries
+        .iter()
+        .find(|entry| entry.id.to_string() == entry_id)
+        .expect("updated entry");
+    let modified_at = updated.modified_at;
+    let history_len = updated.history.len();
+    let provider_revision = harness.provider_snapshot().revision;
+    assert_eq!(history_len, 1);
+
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+            vault_id,
+            entry_id: entry_id.clone(),
+            expected_fields: browser_update_fields("second-secret"),
+            desired_fields: browser_update_fields("second-secret"),
+        }),
+        RuntimeResponse::EntryMutationResult(_)
+    ));
+    let after_noop = core
+        .load_database(&harness.provider_snapshot().bytes, &key())
+        .expect("decode no-op provider snapshot")
+        .vault;
+    let unchanged = after_noop
+        .root
+        .entries
+        .iter()
+        .find(|entry| entry.id.to_string() == entry_id)
+        .expect("unchanged entry");
+    assert_eq!(unchanged.modified_at, modified_at);
+    assert_eq!(unchanged.history.len(), history_len);
+    assert_eq!(harness.provider_snapshot().revision, provider_revision);
 }

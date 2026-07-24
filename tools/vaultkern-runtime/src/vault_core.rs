@@ -192,20 +192,42 @@ fn totp_fields_semantically_equal(
 }
 
 fn entry_detail_matches_fields(detail: &EntryDetailDto, fields: &EntryFieldsDto) -> bool {
-    detail.title == fields.title
-        && detail.username == fields.username
-        && detail.password == fields.password
-        && detail.url == fields.url
-        && detail.notes == fields.notes
+    entry_detail_matches_field_values(
+        detail,
+        fields.title.as_str(),
+        fields.username.as_str(),
+        fields.password.as_str(),
+        fields.url.as_str(),
+        fields.notes.as_str(),
+        fields.totp_uri.as_deref(),
+        &fields.custom_fields,
+    )
+}
+
+fn entry_detail_matches_field_values(
+    detail: &EntryDetailDto,
+    title: &str,
+    username: &str,
+    password: &str,
+    url: &str,
+    notes: &str,
+    totp_uri: Option<&str>,
+    custom_fields: &[EntryCustomFieldDto],
+) -> bool {
+    detail.title == title
+        && detail.username == username
+        && detail.password == password
+        && detail.url == url
+        && detail.notes == notes
         && totp_fields_semantically_equal(
             &detail.title,
             &detail.username,
             detail.totp_uri.as_deref(),
-            &fields.title,
-            &fields.username,
-            fields.totp_uri.as_deref(),
+            title,
+            username,
+            totp_uri,
         )
-        && custom_fields_semantically_equal(&detail.custom_fields, &fields.custom_fields)
+        && custom_fields_semantically_equal(&detail.custom_fields, custom_fields)
 }
 
 struct LoadedSourceSnapshot {
@@ -3185,6 +3207,40 @@ impl VaultCore {
         for summary in self.find_fill_candidates(vault_id, &fields.url)?.entries {
             let detail = self.get_entry_detail(vault_id, &summary.id)?;
             if entry_detail_matches_fields(&detail, fields) {
+                matching_ids.push(summary.id);
+            }
+        }
+        matching_ids.sort();
+        Ok(matching_ids)
+    }
+
+    pub(crate) fn exact_matching_autofill_entry_ids(
+        &self,
+        vault_id: &str,
+        title: &str,
+        username: &str,
+        password: &str,
+        url: &str,
+        notes: &str,
+        totp_uri: Option<&str>,
+    ) -> Result<Vec<String>> {
+        anyhow::ensure!(
+            self.vault_session.active_vault_id() == Some(vault_id),
+            "vault is not active: {vault_id}"
+        );
+        let mut matching_ids = Vec::new();
+        for summary in self.find_fill_candidates(vault_id, url)?.entries {
+            let detail = self.get_entry_detail(vault_id, &summary.id)?;
+            if entry_detail_matches_field_values(
+                &detail,
+                title,
+                username,
+                password,
+                url,
+                notes,
+                totp_uri,
+                &[],
+            ) {
                 matching_ids.push(summary.id);
             }
         }

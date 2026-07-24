@@ -42,6 +42,7 @@ function dependencies(
       }
     })),
     getCreateContext: vi.fn(async () => ({ rootGroupId: "root-group" })),
+    findExactMatchingEntryIds: vi.fn(async () => []),
     dismiss: vi.fn(async () => true),
     commit: vi.fn(async () => ({
       commit: "committed",
@@ -63,6 +64,7 @@ describe("pending login workflow", () => {
     expect(ports.commit).toHaveBeenCalledWith("vault-a", {
       mode: "create",
       parentGroupId: "root-group",
+      expectedMatchingEntryIds: [],
       desiredFields: {
         title: "example.com",
         username: "alice",
@@ -83,7 +85,10 @@ describe("pending login workflow", () => {
     const ports = dependencies();
     ports.commit
       .mockRejectedValueOnce(disconnected)
-      .mockResolvedValueOnce({ commit: "committed" });
+      .mockResolvedValueOnce({
+        commit: "committed",
+        publication: { type: "publication_result", status: "published" }
+      });
     const workflow = createPendingLoginWorkflow(ports);
     const loaded = await workflow.loadPrompt("vault-a");
 
@@ -98,7 +103,9 @@ describe("pending login workflow", () => {
     if (unknown.status !== "retry") {
       throw new Error("expected manual retry prompt");
     }
-    await workflow.save(unknown.prompt);
+    expect(unknown.prompt.mode).toBe("retry");
+    const inspectedRetry = await workflow.loadPrompt("vault-a");
+    await workflow.save(inspectedRetry.prompt!);
     expect(ports.commit).toHaveBeenCalledTimes(2);
     expect(ports.commit.mock.calls[0]?.[1]).not.toHaveProperty("operationId");
     expect(ports.commit.mock.calls[1]?.[1]).not.toHaveProperty("operationId");
@@ -140,7 +147,7 @@ describe("pending login workflow", () => {
 
     await workflow.save(loaded.prompt!);
 
-    expect(ports.getEntryFields).toHaveBeenCalledWith(
+    expect(ports.getEntryFields).toHaveBeenLastCalledWith(
       "vault-a",
       ENTRY_ID,
       "https://example.com/login?next=%2Fvault"
@@ -185,5 +192,69 @@ describe("pending login workflow", () => {
     });
     expect(ports.commit).not.toHaveBeenCalled();
     expect(ports.dismiss).toHaveBeenCalled();
+  });
+
+  it("never replays a committed create when prompt cleanup fails", async () => {
+    const ports = dependencies();
+    ports.dismiss.mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    const workflow = createPendingLoginWorkflow(ports);
+    const loaded = await workflow.loadPrompt("vault-a");
+
+    const cleanup = await workflow.save(loaded.prompt!);
+
+    expect(cleanup).toMatchObject({
+      status: "retry",
+      prompt: { mode: "cleanup", action: "retry_cleanup" },
+      errorMessage: expect.stringMatching(/saved.*cleanup/i)
+    });
+    expect(ports.commit).toHaveBeenCalledTimes(1);
+    if (cleanup.status !== "retry") {
+      throw new Error("expected cleanup retry");
+    }
+
+    await expect(workflow.save(cleanup.prompt)).resolves.toEqual({
+      status: "dismissed"
+    });
+    expect(ports.commit).toHaveBeenCalledTimes(1);
+    expect(ports.dismiss).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps a conflict-split login available for a fresh inspection", async () => {
+    const ports = dependencies();
+    ports.commit.mockResolvedValueOnce({
+      commit: "committed",
+      publication: {
+        type: "publication_result",
+        status: "conflict_split",
+        conflictCopyPath: "/vaults/example.conflict.kdbx"
+      }
+    });
+    const workflow = createPendingLoginWorkflow(ports);
+    const loaded = await workflow.loadPrompt("vault-a");
+
+    const conflict = await workflow.save(loaded.prompt!);
+
+    expect(conflict).toMatchObject({
+      status: "retry",
+      prompt: { mode: "retry", action: "retry_lookup" },
+      errorMessage: expect.stringContaining("/vaults/example.conflict.kdbx")
+    });
+    expect(ports.dismiss).not.toHaveBeenCalled();
+  });
+
+  it("turns an already-present captured login into cleanup-only recovery", async () => {
+    const ports = dependencies();
+    ports.findExactMatchingEntryIds.mockResolvedValue([ENTRY_ID]);
+    const workflow = createPendingLoginWorkflow(ports);
+
+    const loaded = await workflow.loadPrompt("vault-a");
+
+    expect(loaded).toMatchObject({
+      prompt: { mode: "cleanup", action: "retry_cleanup" },
+      errorMessage: expect.stringMatching(/already present/i)
+    });
+    await workflow.save(loaded.prompt!);
+    expect(ports.commit).not.toHaveBeenCalled();
+    expect(ports.dismiss).toHaveBeenCalledTimes(1);
   });
 });

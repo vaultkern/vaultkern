@@ -797,6 +797,7 @@ describe("RuntimeClient", () => {
     await expect(
       client.createAutofillEntry("vault-1", {
         parentGroupId: "group-root",
+        expectedMatchingEntryIds: ["entry-before-confirmation"],
         title: "Example",
         username: "alice",
         password: "secret",
@@ -820,6 +821,7 @@ describe("RuntimeClient", () => {
         type: "create_autofill_entry",
         vault_id: "vault-1",
         parent_group_id: "group-root",
+        expected_matching_entry_ids: ["entry-before-confirmation"],
         title: "Example",
         username: "alice",
         password: "secret",

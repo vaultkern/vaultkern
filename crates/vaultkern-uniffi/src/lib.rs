@@ -864,6 +864,91 @@ impl From<EntryFieldsDto> for protocol::EntryFieldsDto {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum CommitStatusDto {
+    Committed,
+}
+
+impl From<protocol::CommitStatusDto> for CommitStatusDto {
+    fn from(value: protocol::CommitStatusDto) -> Self {
+        match value {
+            protocol::CommitStatusDto::Committed => Self::Committed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PublicationStatusDto {
+    Published,
+    Reconciled,
+    Pending,
+    ConflictSplit,
+}
+
+impl From<protocol::PublicationStatusDto> for PublicationStatusDto {
+    fn from(value: protocol::PublicationStatusDto) -> Self {
+        match value {
+            protocol::PublicationStatusDto::Published => Self::Published,
+            protocol::PublicationStatusDto::Reconciled => Self::Reconciled,
+            protocol::PublicationStatusDto::Pending => Self::Pending,
+            protocol::PublicationStatusDto::ConflictSplit => Self::ConflictSplit,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct ReconciliationSummaryDto {
+    pub merged_entries: u64,
+    pub history_snapshots_added: u64,
+    pub meta_conflicts_resolved: u32,
+    pub icon_conflicts_resolved: u32,
+}
+
+impl From<protocol::ReconciliationSummaryDto> for ReconciliationSummaryDto {
+    fn from(value: protocol::ReconciliationSummaryDto) -> Self {
+        Self {
+            merged_entries: value.merged_entries as u64,
+            history_snapshots_added: value.history_snapshots_added as u64,
+            meta_conflicts_resolved: value.meta_conflicts_resolved,
+            icon_conflicts_resolved: value.icon_conflicts_resolved,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct PublicationResultDto {
+    pub status: PublicationStatusDto,
+    pub reconciliation_summary: Option<ReconciliationSummaryDto>,
+    pub conflict_copy_path: Option<String>,
+}
+
+impl From<protocol::PublicationResultDto> for PublicationResultDto {
+    fn from(value: protocol::PublicationResultDto) -> Self {
+        Self {
+            status: value.status.into(),
+            reconciliation_summary: value.reconciliation_summary.map(Into::into),
+            conflict_copy_path: value.conflict_copy_path,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EntryMutationResultDto {
+    pub commit: CommitStatusDto,
+    pub publication: PublicationResultDto,
+    pub entry: Option<EntryDetailDto>,
+}
+
+impl From<protocol::EntryMutationResultDto> for EntryMutationResultDto {
+    fn from(value: protocol::EntryMutationResultDto) -> Self {
+        Self {
+            commit: value.commit.into(),
+            publication: value.publication.into(),
+            entry: value.entry.map(Into::into),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PlatformPasskeyCredential {
     pub credential_id: Vec<u8>,
@@ -1199,7 +1284,7 @@ impl VaultSession {
         vault_id: String,
         entry_id: String,
         fields: EntryFieldsDto,
-    ) -> Result<EntryDetailDto, VaultKernError> {
+    ) -> Result<EntryMutationResultDto, VaultKernError> {
         let protocol::EntryFieldsDto {
             title,
             username,
@@ -1222,12 +1307,7 @@ impl VaultSession {
                 custom_fields,
             },
         )? {
-            protocol::RuntimeResponse::EntryMutationResult(result) => result
-                .entry
-                .map(Into::into)
-                .ok_or_else(|| VaultKernError::Core {
-                    details: "entry Commit returned no updated Entry".into(),
-                }),
+            protocol::RuntimeResponse::EntryMutationResult(result) => Ok(result.into()),
             protocol::RuntimeResponse::Error(error) => Err(VaultKernError::Core {
                 details: error.message,
             }),

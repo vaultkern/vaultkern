@@ -1,5 +1,6 @@
 import type {
   AutofillUpdateFields,
+  CommittedAutofillMutation,
   EntrySummary
 } from "@vaultkern/runtime-web-client";
 
@@ -22,6 +23,7 @@ export type ResidentLoginMutation =
   | {
       mode: "create";
       parentGroupId: string;
+      expectedMatchingEntryIds: string[];
       desiredFields: PendingAutofillDesiredFields;
     };
 
@@ -47,12 +49,20 @@ export type PendingLoginPrompt =
       readonly siteLabel: string;
       readonly action: "retry_lookup";
       readonly canDismiss: true;
+    }
+  | {
+      readonly mode: "cleanup";
+      readonly vaultId: string;
+      readonly siteLabel: string;
+      readonly action: "retry_cleanup";
+      readonly canDismiss: false;
     };
 
 type PendingLoginPromptInput =
   | Omit<Extract<PendingLoginPrompt, { mode: "save" }>, "action" | "canDismiss">
   | Omit<Extract<PendingLoginPrompt, { mode: "update" }>, "action" | "canDismiss">
-  | Omit<Extract<PendingLoginPrompt, { mode: "retry" }>, "action" | "canDismiss">;
+  | Omit<Extract<PendingLoginPrompt, { mode: "retry" }>, "action" | "canDismiss">
+  | Omit<Extract<PendingLoginPrompt, { mode: "cleanup" }>, "action" | "canDismiss">;
 
 export type PendingLoginPromptLoad = {
   prompt: PendingLoginPrompt | null;
@@ -85,8 +95,15 @@ type PendingLoginDependencies = {
     url: string
   ): Promise<{ id: string; fields: AutofillUpdateFields }>;
   getCreateContext(vaultId: string): Promise<{ rootGroupId: string }>;
+  findExactMatchingEntryIds(
+    vaultId: string,
+    fields: PendingAutofillDesiredFields
+  ): Promise<string[]>;
   dismiss(transactionId: string, tabId: number): Promise<boolean>;
-  commit(vaultId: string, mutation: ResidentLoginMutation): Promise<unknown>;
+  commit(
+    vaultId: string,
+    mutation: ResidentLoginMutation
+  ): Promise<CommittedAutofillMutation>;
 };
 
 export interface PendingLoginWorkflow {
@@ -116,6 +133,20 @@ function savedUrl(transaction: PendingAutofillTransaction) {
   } catch {
     return transaction.submission.url.split(/[?#]/, 1)[0] || transaction.submission.url;
   }
+}
+
+function desiredCreateFields(
+  transaction: PendingAutofillTransaction
+): PendingAutofillDesiredFields {
+  return {
+    title: siteLabel(transaction),
+    username: transaction.submission.username,
+    password: pendingPassword(transaction.submission),
+    url: savedUrl(transaction),
+    notes: "",
+    totpUri: null,
+    customFields: []
+  };
 }
 
 function commitOutcomeIsUnknown(error: unknown) {
@@ -150,31 +181,37 @@ export function createPendingLoginWorkflow(
       vaultId: string;
       transaction: PendingAutofillTransaction;
       updateEntryId?: string;
+      expectedMatchingEntryIds?: string[];
     }
   >();
 
   function bindPrompt(
     input: PendingLoginPromptInput,
     transaction: PendingAutofillTransaction,
-    updateEntryId?: string
+    options: {
+      updateEntryId?: string;
+      expectedMatchingEntryIds?: string[];
+    } = {}
   ): PendingLoginPrompt {
     const action =
-      input.mode === "retry"
-        ? "retry_lookup"
-        : input.mode === "update"
-          ? "update"
-          : input.ambiguous
-            ? "save_new"
-            : "save";
+      input.mode === "cleanup"
+        ? "retry_cleanup"
+        : input.mode === "retry"
+          ? "retry_lookup"
+          : input.mode === "update"
+            ? "update"
+            : input.ambiguous
+              ? "save_new"
+              : "save";
     const prompt = Object.freeze({
       ...input,
       action,
-      canDismiss: true
+      canDismiss: input.mode !== "cleanup"
     }) as PendingLoginPrompt;
     promptBindings.set(prompt, {
       vaultId: input.vaultId,
       transaction,
-      ...(updateEntryId ? { updateEntryId } : {})
+      ...options
     });
     return prompt;
   }
@@ -207,10 +244,40 @@ export function createPendingLoginWorkflow(
       }
       const submission = transaction.submission;
       if (submission.saveOnly) {
+        let expectedMatchingEntryIds: string[];
+        try {
+          expectedMatchingEntryIds =
+            await dependencies.findExactMatchingEntryIds(
+              vaultId,
+              desiredCreateFields(transaction)
+            );
+        } catch (lookupFailure) {
+          return {
+            prompt: bindPrompt(
+              { mode: "retry", vaultId, siteLabel: siteLabel(transaction) },
+              transaction
+            ),
+            errorMessage: popupErrorMessage(
+              lookupFailure,
+              "Failed to check the pending login"
+            )
+          };
+        }
+        if (expectedMatchingEntryIds.length > 0) {
+          return {
+            prompt: bindPrompt(
+              { mode: "cleanup", vaultId, siteLabel: siteLabel(transaction) },
+              transaction
+            ),
+            errorMessage:
+              "This login is already present in the active vault. Clear the pending prompt instead of saving it again."
+          };
+        }
         return {
           prompt: bindPrompt(
             { mode: "save", vaultId, siteLabel: siteLabel(transaction) },
-            transaction
+            transaction,
+            { expectedMatchingEntryIds }
           )
         };
       }
@@ -246,8 +313,37 @@ export function createPendingLoginWorkflow(
           prompt: bindPrompt(
             { mode: "update", vaultId, siteLabel: siteLabel(transaction) },
             transaction,
-            matchingEntries[0].id
+            { updateEntryId: matchingEntries[0].id }
           )
+        };
+      }
+      let expectedMatchingEntryIds: string[];
+      try {
+        expectedMatchingEntryIds =
+          await dependencies.findExactMatchingEntryIds(
+            vaultId,
+            desiredCreateFields(transaction)
+          );
+      } catch (lookupFailure) {
+        return {
+          prompt: bindPrompt(
+            { mode: "retry", vaultId, siteLabel: siteLabel(transaction) },
+            transaction
+          ),
+          errorMessage: popupErrorMessage(
+            lookupFailure,
+            "Failed to check the pending login"
+          )
+        };
+      }
+      if (expectedMatchingEntryIds.length > 0) {
+        return {
+          prompt: bindPrompt(
+            { mode: "cleanup", vaultId, siteLabel: siteLabel(transaction) },
+            transaction
+          ),
+          errorMessage:
+            "This login is already present in the active vault. Clear the pending prompt instead of saving it again."
         };
       }
       return {
@@ -260,7 +356,8 @@ export function createPendingLoginWorkflow(
               ? { ambiguous: true as const }
               : {})
           },
-          transaction
+          transaction,
+          { expectedMatchingEntryIds }
         )
       };
     },
@@ -271,6 +368,21 @@ export function createPendingLoginWorkflow(
       const submission = transaction.submission;
       let mutation: ResidentLoginMutation;
 
+      if (prompt.mode === "cleanup") {
+        try {
+          await dismissPrompt(prompt);
+          return { status: "dismissed" };
+        } catch (error) {
+          return {
+            status: "retry",
+            prompt,
+            errorMessage: popupErrorMessage(
+              error,
+              "Failed to clear the saved login prompt"
+            )
+          };
+        }
+      }
       if (prompt.mode === "update") {
         const entryId = binding.updateEntryId;
         if (!entryId) {
@@ -306,43 +418,28 @@ export function createPendingLoginWorkflow(
         };
       } else if (prompt.mode === "save") {
         const createContext = await dependencies.getCreateContext(vaultId);
+        if (!binding.expectedMatchingEntryIds) {
+          throw new Error("Pending login create precondition is no longer available");
+        }
         mutation = {
           mode: "create",
           parentGroupId: createContext.rootGroupId,
-          desiredFields: {
-            title: siteLabel(transaction),
-            username: submission.username,
-            password: pendingPassword(submission),
-            url: savedUrl(transaction),
-            notes: "",
-            totpUri: null,
-            customFields: []
-          }
+          expectedMatchingEntryIds: binding.expectedMatchingEntryIds,
+          desiredFields: desiredCreateFields(transaction)
         };
       } else {
         throw new Error("Reconnect before retrying the pending login save");
       }
 
+      let committed: CommittedAutofillMutation;
       try {
-        await dependencies.commit(vaultId, mutation);
+        committed = await dependencies.commit(vaultId, mutation);
       } catch (error) {
         return {
           status: "retry",
           prompt: bindPrompt(
-            prompt.mode === "update"
-              ? {
-                  mode: "update",
-                  vaultId,
-                  siteLabel: prompt.siteLabel
-                }
-              : {
-                  mode: "save",
-                  vaultId,
-                  siteLabel: prompt.siteLabel,
-                  ...(prompt.ambiguous ? { ambiguous: true as const } : {})
-                },
-            transaction,
-            binding.updateEntryId
+            { mode: "retry", vaultId, siteLabel: prompt.siteLabel },
+            transaction
           ),
           errorMessage: commitOutcomeIsUnknown(error)
             ? "Login save result is unknown. Reconnect to inspect the vault or retry manually."
@@ -350,10 +447,34 @@ export function createPendingLoginWorkflow(
         };
       }
 
+      if (committed.publication.status === "conflict_split") {
+        const conflictCopy = committed.publication.conflictCopyPath
+          ? ` Conflict copy: ${committed.publication.conflictCopyPath}`
+          : "";
+        return {
+          status: "retry",
+          prompt: bindPrompt(
+            { mode: "retry", vaultId, siteLabel: prompt.siteLabel },
+            transaction
+          ),
+          errorMessage:
+            "The login was preserved in a conflict copy, but the active vault was not updated. Review the current vault before saving again." +
+            conflictCopy
+        };
+      }
+
       try {
         await dismissPrompt(prompt);
       } catch {
-        // The resident Commit is authoritative. Cleanup never replays a save.
+        return {
+          status: "retry",
+          prompt: bindPrompt(
+            { mode: "cleanup", vaultId, siteLabel: prompt.siteLabel },
+            transaction
+          ),
+          errorMessage:
+            "The login was saved, but its pending prompt could not be cleared. Retry cleanup without saving again."
+        };
       }
       return {
         status: "saved",

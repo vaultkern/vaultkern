@@ -290,6 +290,12 @@ fn ffi_session_edits_with_one_commit_and_no_follow_up_publication_call() {
             },
         )
         .unwrap();
+    assert_eq!(edited.commit, vaultkern_uniffi::CommitStatusDto::Committed);
+    assert_eq!(
+        edited.publication.status,
+        vaultkern_uniffi::PublicationStatusDto::Published
+    );
+    let edited = edited.entry.expect("published edit remains active");
     assert_eq!(edited.id.as_str(), entry_id);
     assert_eq!(edited.title.as_str(), edited_title);
 
@@ -302,6 +308,32 @@ fn ffi_session_edits_with_one_commit_and_no_follow_up_publication_call() {
         .read_entry(vault_id.clone(), entry_id)
         .expect("Entry Commit must survive lock without a follow-up save");
     assert_eq!(committed.title.as_str(), edited_title);
+}
+
+#[test]
+fn ffi_entry_mutation_result_preserves_conflict_split_publication() {
+    let result: vaultkern_uniffi::EntryMutationResultDto =
+        vaultkern_runtime_protocol::EntryMutationResultDto {
+            commit: vaultkern_runtime_protocol::CommitStatusDto::Committed,
+            publication: vaultkern_runtime_protocol::PublicationResultDto {
+                status: vaultkern_runtime_protocol::PublicationStatusDto::ConflictSplit,
+                reconciliation_summary: None,
+                conflict_copy_path: Some("/vaults/example.conflict.kdbx".into()),
+            },
+            entry: None,
+        }
+        .into();
+
+    assert_eq!(result.commit, vaultkern_uniffi::CommitStatusDto::Committed);
+    assert_eq!(
+        result.publication.status,
+        vaultkern_uniffi::PublicationStatusDto::ConflictSplit
+    );
+    assert_eq!(
+        result.publication.conflict_copy_path.as_deref(),
+        Some("/vaults/example.conflict.kdbx")
+    );
+    assert!(result.entry.is_none());
 }
 
 #[test]

@@ -322,6 +322,10 @@ export interface EntryCreateInput extends EntryDraft {
   parentGroupId: string;
 }
 
+export interface AutofillEntryCreateInput extends EntryCreateInput {
+  expectedMatchingEntryIds: string[];
+}
+
 export interface FillCandidates {
   type: "fill_candidates";
   entries: EntrySummary[];
@@ -694,12 +698,13 @@ export class RuntimeClient {
 
   async createAutofillEntry(
     vaultId: string,
-    input: EntryCreateInput
+    input: AutofillEntryCreateInput
   ): Promise<CommittedAutofillMutation> {
     return this.sendAutofillEntryMutationCommand({
       type: "create_autofill_entry",
       vault_id: vaultId,
       parent_group_id: input.parentGroupId,
+      expected_matching_entry_ids: input.expectedMatchingEntryIds,
       title: input.title,
       username: input.username,
       password: input.password,

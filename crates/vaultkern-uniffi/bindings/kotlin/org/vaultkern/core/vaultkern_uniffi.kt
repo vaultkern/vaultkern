@@ -1156,7 +1156,7 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_close_vault() != 52312.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 59453.toShort()) {
+    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_edit_entry() != 44777.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_list_entries() != 30708.toShort()) {
@@ -3011,7 +3011,7 @@ public interface VaultSessionInterface {
 
     fun `closeVault`(`vaultId`: kotlin.String): SessionStateDto
 
-    fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryDetailDto
+    fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryMutationResultDto
 
     fun `listEntries`(`vaultId`: kotlin.String): List<EntrySummaryDto>
 
@@ -3180,8 +3180,8 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
 
 
 
-    @Throws(VaultKernException::class)override fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryDetailDto {
-            return FfiConverterTypeEntryDetailDto.lift(
+    @Throws(VaultKernException::class)override fun `editEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String, `fields`: EntryFieldsDto): EntryMutationResultDto {
+            return FfiConverterTypeEntryMutationResultDto.lift(
     callWithHandle {
     uniffiRustCallWithError(VaultKernException) { _status ->
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_edit_entry(
@@ -4564,6 +4564,49 @@ public object FfiConverterTypeEntryFieldsDto: FfiConverterRustBuffer<EntryFields
 
 
 
+data class EntryMutationResultDto (
+    var `commit`: CommitStatusDto
+    ,
+    var `publication`: PublicationResultDto
+    ,
+    var `entry`: EntryDetailDto?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeEntryMutationResultDto: FfiConverterRustBuffer<EntryMutationResultDto> {
+    override fun read(buf: ByteBuffer): EntryMutationResultDto {
+        return EntryMutationResultDto(
+            FfiConverterTypeCommitStatusDto.read(buf),
+            FfiConverterTypePublicationResultDto.read(buf),
+            FfiConverterOptionalTypeEntryDetailDto.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: EntryMutationResultDto) = (
+            FfiConverterTypeCommitStatusDto.allocationSize(value.`commit`) +
+            FfiConverterTypePublicationResultDto.allocationSize(value.`publication`) +
+            FfiConverterOptionalTypeEntryDetailDto.allocationSize(value.`entry`)
+    )
+
+    override fun write(value: EntryMutationResultDto, buf: ByteBuffer) {
+            FfiConverterTypeCommitStatusDto.write(value.`commit`, buf)
+            FfiConverterTypePublicationResultDto.write(value.`publication`, buf)
+            FfiConverterOptionalTypeEntryDetailDto.write(value.`entry`, buf)
+    }
+}
+
+
+
 data class EntryPasskeyDto (
     var `username`: SensitiveString
     ,
@@ -5155,6 +5198,97 @@ public object FfiConverterTypePlatformPasskeyRegistrationOutput: FfiConverterRus
 
 
 
+data class PublicationResultDto (
+    var `status`: PublicationStatusDto
+    ,
+    var `reconciliationSummary`: ReconciliationSummaryDto?
+    ,
+    var `conflictCopyPath`: kotlin.String?
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePublicationResultDto: FfiConverterRustBuffer<PublicationResultDto> {
+    override fun read(buf: ByteBuffer): PublicationResultDto {
+        return PublicationResultDto(
+            FfiConverterTypePublicationStatusDto.read(buf),
+            FfiConverterOptionalTypeReconciliationSummaryDto.read(buf),
+            FfiConverterOptionalString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: PublicationResultDto) = (
+            FfiConverterTypePublicationStatusDto.allocationSize(value.`status`) +
+            FfiConverterOptionalTypeReconciliationSummaryDto.allocationSize(value.`reconciliationSummary`) +
+            FfiConverterOptionalString.allocationSize(value.`conflictCopyPath`)
+    )
+
+    override fun write(value: PublicationResultDto, buf: ByteBuffer) {
+            FfiConverterTypePublicationStatusDto.write(value.`status`, buf)
+            FfiConverterOptionalTypeReconciliationSummaryDto.write(value.`reconciliationSummary`, buf)
+            FfiConverterOptionalString.write(value.`conflictCopyPath`, buf)
+    }
+}
+
+
+
+data class ReconciliationSummaryDto (
+    var `mergedEntries`: kotlin.ULong
+    ,
+    var `historySnapshotsAdded`: kotlin.ULong
+    ,
+    var `metaConflictsResolved`: kotlin.UInt
+    ,
+    var `iconConflictsResolved`: kotlin.UInt
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeReconciliationSummaryDto: FfiConverterRustBuffer<ReconciliationSummaryDto> {
+    override fun read(buf: ByteBuffer): ReconciliationSummaryDto {
+        return ReconciliationSummaryDto(
+            FfiConverterULong.read(buf),
+            FfiConverterULong.read(buf),
+            FfiConverterUInt.read(buf),
+            FfiConverterUInt.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: ReconciliationSummaryDto) = (
+            FfiConverterULong.allocationSize(value.`mergedEntries`) +
+            FfiConverterULong.allocationSize(value.`historySnapshotsAdded`) +
+            FfiConverterUInt.allocationSize(value.`metaConflictsResolved`) +
+            FfiConverterUInt.allocationSize(value.`iconConflictsResolved`)
+    )
+
+    override fun write(value: ReconciliationSummaryDto, buf: ByteBuffer) {
+            FfiConverterULong.write(value.`mergedEntries`, buf)
+            FfiConverterULong.write(value.`historySnapshotsAdded`, buf)
+            FfiConverterUInt.write(value.`metaConflictsResolved`, buf)
+            FfiConverterUInt.write(value.`iconConflictsResolved`, buf)
+    }
+}
+
+
+
 data class SessionStateDto (
     var `unlocked`: kotlin.Boolean
     ,
@@ -5487,6 +5621,39 @@ public object FfiConverterTypeVaultSourceStatusDto: FfiConverterRustBuffer<Vault
 
 
 
+enum class CommitStatusDto {
+
+    COMMITTED;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeCommitStatusDto: FfiConverterRustBuffer<CommitStatusDto> {
+    override fun read(buf: ByteBuffer) = try {
+        CommitStatusDto.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: CommitStatusDto) = 4UL
+
+    override fun write(value: CommitStatusDto, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+
 
 sealed class PlatformAdapterException: kotlin.Exception() {
 
@@ -5590,6 +5757,42 @@ public object FfiConverterTypePlatformAdapterError : FfiConverterRustBuffer<Plat
     }
 
 }
+
+
+
+
+enum class PublicationStatusDto {
+
+    PUBLISHED,
+    RECONCILED,
+    PENDING,
+    CONFLICT_SPLIT;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypePublicationStatusDto: FfiConverterRustBuffer<PublicationStatusDto> {
+    override fun read(buf: ByteBuffer) = try {
+        PublicationStatusDto.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: PublicationStatusDto) = 4UL
+
+    override fun write(value: PublicationStatusDto, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
 
 
 
@@ -6001,6 +6204,38 @@ public object FfiConverterOptionalString: FfiConverterRustBuffer<kotlin.String?>
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeEntryDetailDto: FfiConverterRustBuffer<EntryDetailDto?> {
+    override fun read(buf: ByteBuffer): EntryDetailDto? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeEntryDetailDto.read(buf)
+    }
+
+    override fun allocationSize(value: EntryDetailDto?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeEntryDetailDto.allocationSize(value)
+        }
+    }
+
+    override fun write(value: EntryDetailDto?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeEntryDetailDto.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeEntryPasskeyDto: FfiConverterRustBuffer<EntryPasskeyDto?> {
     override fun read(buf: ByteBuffer): EntryPasskeyDto? {
         if (buf.get().toInt() == 0) {
@@ -6023,6 +6258,38 @@ public object FfiConverterOptionalTypeEntryPasskeyDto: FfiConverterRustBuffer<En
         } else {
             buf.put(1)
             FfiConverterTypeEntryPasskeyDto.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeReconciliationSummaryDto: FfiConverterRustBuffer<ReconciliationSummaryDto?> {
+    override fun read(buf: ByteBuffer): ReconciliationSummaryDto? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeReconciliationSummaryDto.read(buf)
+    }
+
+    override fun allocationSize(value: ReconciliationSummaryDto?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeReconciliationSummaryDto.allocationSize(value)
+        }
+    }
+
+    override fun write(value: ReconciliationSummaryDto?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeReconciliationSummaryDto.write(value, buf)
         }
     }
 }

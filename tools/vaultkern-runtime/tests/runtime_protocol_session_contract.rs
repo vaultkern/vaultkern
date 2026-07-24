@@ -205,6 +205,7 @@ fn browser_clients_are_limited_to_status_autofill_and_passkey_commands() {
         browser.accept(RuntimeCommand::CreateAutofillEntry {
             vault_id: "vault-1".into(),
             parent_group_id: "group-root".into(),
+            expected_matching_entry_ids: vec![],
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),

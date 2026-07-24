@@ -240,6 +240,7 @@ pub(crate) fn dispatch(core: &mut VaultCore, command: RuntimeCommand) -> Result<
         RuntimeCommand::CreateAutofillEntry {
             vault_id,
             parent_group_id,
+            mut expected_matching_entry_ids,
             title,
             username,
             password,
@@ -251,6 +252,22 @@ pub(crate) fn dispatch(core: &mut VaultCore, command: RuntimeCommand) -> Result<
                 return Ok(RuntimeResponse::Error(ErrorDto {
                     code: "invalid_autofill_mutation".into(),
                     message: "browser login create fields are invalid".into(),
+                }));
+            }
+            expected_matching_entry_ids.sort();
+            let current_matching_entry_ids = core.exact_matching_autofill_entry_ids(
+                &vault_id,
+                title.as_str(),
+                username.as_str(),
+                password.as_str(),
+                url.as_str(),
+                notes.as_str(),
+                totp_uri.as_deref(),
+            )?;
+            if current_matching_entry_ids != expected_matching_entry_ids {
+                return Ok(RuntimeResponse::Error(ErrorDto {
+                    code: "create_matching_set_changed".into(),
+                    message: "matching logins changed after confirmation".into(),
                 }));
             }
             core.commit_entry_mutation(&vault_id, |runtime| {
@@ -290,6 +307,11 @@ pub(crate) fn dispatch(core: &mut VaultCore, command: RuntimeCommand) -> Result<
                     code: "conflict".into(),
                     message: "entry fields changed after confirmation".into(),
                 }));
+            }
+            if current.fields == desired_fields {
+                return core
+                    .commit_entry_mutation(&vault_id, |_| Ok(None))
+                    .map(RuntimeResponse::EntryMutationResult);
             }
             core.commit_entry_mutation(&vault_id, |runtime| {
                 let current = runtime.get_entry_detail(&vault_id, &entry_id)?;

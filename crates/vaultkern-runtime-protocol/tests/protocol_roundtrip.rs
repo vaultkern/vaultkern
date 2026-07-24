@@ -1224,6 +1224,7 @@ fn protocol_roundtrips_scoped_browser_entry_mutations_without_receipt_identity()
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateAutofillEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-root".into(),
+        expected_matching_entry_ids: vec!["entry-before-confirmation".into()],
         title: "Example".into(),
         username: "alice".into(),
         password: "secret".into(),

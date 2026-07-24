@@ -79,7 +79,8 @@ describe("popup resident login save", () => {
     ).toHaveTextContent(/result is unknown/i);
     expect(commit).toHaveBeenCalledTimes(1);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save Login" }));
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Save Login" }));
     await waitFor(() => {
       expect(
         screen.queryByRole("button", { name: "Save Login" })

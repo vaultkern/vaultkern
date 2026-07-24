@@ -296,6 +296,7 @@ pub enum RuntimeCommand {
     CreateAutofillEntry {
         vault_id: String,
         parent_group_id: String,
+        expected_matching_entry_ids: Vec<String>,
         title: SensitiveString,
         username: SensitiveString,
         password: SensitiveString,

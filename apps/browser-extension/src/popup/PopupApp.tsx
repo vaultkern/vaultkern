@@ -430,6 +430,8 @@ export function PopupApp({
           <strong>
             {autofillSavePrompt.mode === "update"
               ? "Update password?"
+              : autofillSavePrompt.mode === "cleanup"
+                ? "Clear saved login prompt?"
               : autofillSavePrompt.mode === "retry"
                 ? "Retry login lookup?"
                 : autofillSavePrompt.ambiguous
@@ -453,11 +455,9 @@ export function PopupApp({
               disabled={savingAutofillPrompt}
               style={popupPrimaryActionStyle}
             >
-              {autofillSavePrompt.action === "retry_update"
-                ? "Retry Update"
-                : autofillSavePrompt.action === "replan_update"
-                  ? "Replan Update"
-                  : autofillSavePrompt.action === "update"
+              {autofillSavePrompt.action === "retry_cleanup"
+                ? "Retry Cleanup"
+                : autofillSavePrompt.action === "update"
                     ? "Update Password"
                     : autofillSavePrompt.action === "retry_lookup"
                       ? "Retry"
