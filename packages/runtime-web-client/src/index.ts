@@ -580,17 +580,20 @@ export class RuntimeClient {
     vaultId: string,
     parentGroupId: string,
     title: string
-  ): Promise<CommittedVaultMutation & { createdGroupId: string }> {
+  ): Promise<CommittedVaultMutation> {
     const result = await this.sendVaultMutationCommand({
       type: "create_group",
       vault_id: vaultId,
       parent_group_id: parentGroupId,
       title
     });
-    if (result.createdGroupId === undefined) {
+    if (
+      result.createdGroupId === undefined &&
+      result.publication.status !== "conflict_split"
+    ) {
       throw new TypeError("runtime omitted the created group id");
     }
-    return { ...result, createdGroupId: result.createdGroupId };
+    return result;
   }
 
   async renameGroup(
@@ -1075,10 +1078,14 @@ export class RuntimeClient {
   private async sendVaultMutationCommand(
     command: Record<string, unknown>
   ): Promise<CommittedVaultMutation> {
-    const response = await this.sendCommand<VaultMutationResponse>(command);
+    const response = await this.sendCommand<unknown>(command);
     if (
+      !isRecord(response) ||
       response.type !== "vault_mutation_result" ||
-      response.commit !== "committed"
+      response.commit !== "committed" ||
+      !isPublicationResultPayload(response.publication) ||
+      (response.createdGroupId !== undefined &&
+        typeof response.createdGroupId !== "string")
     ) {
       throw new TypeError("runtime returned an invalid committed vault mutation");
     }
@@ -1196,7 +1203,78 @@ function isEntryDetailPayload(
     typeof value.username === "string" &&
     typeof value.password === "string" &&
     typeof value.url === "string" &&
-    typeof value.notes === "string"
+    typeof value.notes === "string" &&
+    (value.modifiedAt === undefined || isNonNegativeInteger(value.modifiedAt)) &&
+    isOptionalStringOrNull(value.totp) &&
+    isOptionalStringOrNull(value.totpUri) &&
+    (value.passkey === undefined ||
+      value.passkey === null ||
+      isEntryPasskeyPayload(value.passkey)) &&
+    (value.fieldProtection === undefined ||
+      isEntryFieldProtectionPayload(value.fieldProtection)) &&
+    (value.customFields === undefined ||
+      (Array.isArray(value.customFields) &&
+        value.customFields.every(isEntryCustomFieldPayload))) &&
+    (value.attachments === undefined ||
+      (Array.isArray(value.attachments) &&
+        value.attachments.every(isEntryAttachmentPayload)))
+  );
+}
+
+function isOptionalStringOrNull(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isEntryPasskeyPayload(value: unknown): value is EntryPasskey {
+  return (
+    isRecord(value) &&
+    typeof value.username === "string" &&
+    typeof value.credentialId === "string" &&
+    (value.generatedUserId === null ||
+      typeof value.generatedUserId === "string") &&
+    typeof value.relyingParty === "string" &&
+    (value.userHandle === null || typeof value.userHandle === "string") &&
+    typeof value.backupEligible === "boolean" &&
+    typeof value.backupState === "boolean"
+  );
+}
+
+function isEntryFieldProtectionPayload(
+  value: unknown
+): value is EntryFieldProtection {
+  return (
+    isRecord(value) &&
+    typeof value.protectTitle === "boolean" &&
+    typeof value.protectUsername === "boolean" &&
+    typeof value.protectPassword === "boolean" &&
+    typeof value.protectUrl === "boolean" &&
+    typeof value.protectNotes === "boolean"
+  );
+}
+
+function isEntryCustomFieldPayload(
+  value: unknown
+): value is EntryCustomField {
+  return (
+    isRecord(value) &&
+    typeof value.key === "string" &&
+    typeof value.value === "string" &&
+    typeof value.protected === "boolean"
+  );
+}
+
+function isEntryAttachmentPayload(
+  value: unknown
+): value is EntryAttachment {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    isNonNegativeInteger(value.size) &&
+    typeof value.protectInMemory === "boolean"
   );
 }
 

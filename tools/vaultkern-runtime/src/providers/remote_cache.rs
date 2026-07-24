@@ -645,6 +645,7 @@ impl RemoteVaultCache {
                     current.generation.pending_kind,
                     Some(
                         RemoteVaultPendingKind::GenericFixedBase
+                            | RemoteVaultPendingKind::ConflictCopy
                             | RemoteVaultPendingKind::RetiredAutofill
                     )
                 ))
@@ -653,7 +654,7 @@ impl RemoteVaultCache {
                 return Ok(None);
             }
             return Err(PendingRemoteCacheConflict::new(
-                "source-write pending cache changed before reading its Base",
+                "pending cache changed before reading its Base",
             )
             .into());
         }

@@ -107,6 +107,11 @@ impl RuntimeProtocolHarness {
         self.runtime.test_onedrive_access_counts().writes
     }
 
+    pub fn replace_provider_snapshot(&mut self, bytes: Vec<u8>) {
+        self.runtime
+            .replace_test_onedrive_item(DRIVE_ID, ITEM_ID, bytes);
+    }
+
     pub fn restart_resident(&mut self) {
         let snapshot = self.provider_snapshot();
         let provider_items = match self

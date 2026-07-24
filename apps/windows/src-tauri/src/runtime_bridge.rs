@@ -1063,12 +1063,10 @@ fn command_unlocks_vault(command: &RuntimeCommand) -> bool {
 }
 
 fn response_commits_active_vault(value: &RuntimeResponse) -> bool {
-    if matches!(value, RuntimeResponse::EntryMutationResult(_)) {
-        return true;
-    }
     let status = match value {
         RuntimeResponse::PublicationResult(result) => Some(&result.status),
         RuntimeResponse::DatabaseSettingsCommitResult(result) => Some(&result.publication.status),
+        RuntimeResponse::EntryMutationResult(result) => Some(&result.publication.status),
         RuntimeResponse::VaultMutationResult(result) => Some(&result.publication.status),
         _ => None,
     };
@@ -1078,6 +1076,7 @@ fn response_commits_active_vault(value: &RuntimeResponse) -> bool {
             vaultkern_runtime_protocol::PublicationStatusDto::Published
                 | vaultkern_runtime_protocol::PublicationStatusDto::Reconciled
                 | vaultkern_runtime_protocol::PublicationStatusDto::Pending
+                | vaultkern_runtime_protocol::PublicationStatusDto::ConflictSplit
         )
     )
 }
@@ -1525,14 +1524,26 @@ mod tests {
     }
 
     #[test]
-    fn conflict_copy_recovers_edits_without_reconciling_live_vault_metadata() {
+    fn conflict_split_schedules_reconciliation_for_every_active_vault_result() {
         let response = RuntimeResponse::PublicationResult(PublicationResultDto {
             status: PublicationStatusDto::ConflictSplit,
             reconciliation_summary: None,
             conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
         });
 
-        assert!(!super::response_commits_active_vault(&response));
+        assert!(super::response_commits_active_vault(&response));
+
+        let response = RuntimeResponse::VaultMutationResult(VaultMutationResultDto {
+            commit: CommitStatusDto::Committed,
+            publication: PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
+                reconciliation_summary: None,
+                conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
+            },
+            created_group_id: None,
+        });
+
+        assert!(super::response_commits_active_vault(&response));
     }
 
     #[test]

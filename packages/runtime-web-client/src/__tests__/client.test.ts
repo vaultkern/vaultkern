@@ -27,12 +27,15 @@ function entryDetail() {
   };
 }
 
-function committedVaultMutation(createdGroupId?: string) {
+function committedVaultMutation(
+  createdGroupId?: string,
+  status: "published" | "reconciled" | "pending" | "conflict_split" = "published"
+) {
   return {
     type: "vault_mutation_result",
     commit: "committed",
     publication: {
-      status: "published",
+      status,
       reconciliationSummary: null
     },
     ...(createdGroupId === undefined ? {} : { createdGroupId })
@@ -1303,6 +1306,46 @@ describe("RuntimeClient", () => {
         customFields: []
       })
     ).rejects.toThrow("runtime returned an invalid committed entry mutation");
+  });
+
+  it("rejects malformed nested EntryDetail fields", async () => {
+    const malformedEntries = [
+      { ...entryDetail(), attachments: "not-an-array" },
+      { ...entryDetail(), customFields: [{ key: "site", value: 7, protected: false }] },
+      { ...entryDetail(), fieldProtection: { protectTitle: true } },
+      { ...entryDetail(), passkey: { username: "alice" } }
+    ];
+
+    for (const entry of malformedEntries) {
+      const client = new RuntimeClient({
+        send: vi.fn().mockResolvedValue(committedEntryMutation(entry))
+      });
+      await expect(
+        client.updateEntryFields("vault-1", "entry-1", {
+          title: "Published edit",
+          username: "alice",
+          password: "secret",
+          url: "https://example.com",
+          notes: "",
+          totpUri: null,
+          customFields: []
+        })
+      ).rejects.toThrow("runtime returned an invalid committed entry mutation");
+    }
+  });
+
+  it("accepts a Conflict Split group mutation without a ghost created group id", async () => {
+    const client = new RuntimeClient({
+      send: vi.fn().mockResolvedValue(
+        committedVaultMutation(undefined, "conflict_split")
+      )
+    });
+
+    await expect(
+      client.createGroup("vault-1", "group-root", "Local-only group")
+    ).resolves.toMatchObject({
+      publication: { status: "conflict_split" }
+    });
   });
 
   it("retries remote vault source sync through the command envelope", async () => {

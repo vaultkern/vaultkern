@@ -1051,8 +1051,8 @@ impl VaultCore {
             return Ok(None);
         };
         if let Some(receipt_source) = &receipt.conflict_receipt_source {
-            let source_is_current = cached_main
-                .is_none_or(|main| same_content_fingerprint(&main.fingerprint, receipt_source));
+            let source_is_current =
+                cached_main.is_none_or(|main| &main.fingerprint == receipt_source);
             return Ok(source_is_current.then_some(receipt));
         }
         if main_pending_kind == Some(GenericPendingKind::SourceWrite) {
@@ -1333,12 +1333,13 @@ impl VaultCore {
                         .remote_cache
                         .generic_pending_kind(&pending_cache_key, &baseline_fingerprint)
                     {
-                        Ok(GenericPendingKind::SourceWrite) => self.recover_generic_pending_base(
-                            &vault_id,
-                            &pending_cache_key,
-                            &baseline_fingerprint,
-                        )?,
-                        Ok(GenericPendingKind::ConflictCopy) => bytes.clone(),
+                        Ok(GenericPendingKind::SourceWrite | GenericPendingKind::ConflictCopy) => {
+                            self.recover_generic_pending_base(
+                                &vault_id,
+                                &pending_cache_key,
+                                &baseline_fingerprint,
+                            )?
+                        }
                         Err(_) => self
                             .synced_bases
                             .read(&vault_id)
@@ -2741,12 +2742,28 @@ impl VaultCore {
             .clone();
 
         let result = (|| {
-            let created_group_id = mutation(self)?;
+            let mut created_group_id = mutation(self)?;
             let RuntimeResponse::PublicationResult(publication) =
                 self.commit_working_copy(vault_id)?
             else {
                 anyhow::bail!("vault mutation save returned an unexpected response");
             };
+            if matches!(
+                &publication.status,
+                PublicationStatusDto::Reconciled | PublicationStatusDto::ConflictSplit
+            ) && let Some(group_id) = created_group_id.as_ref()
+            {
+                let exists_in_active_vault = self
+                    .vault_session
+                    .find_loaded(vault_id)
+                    .and_then(|loaded| loaded.vault.as_ref())
+                    .is_some_and(|vault| {
+                        self.core.find_group_view_by_id(vault, group_id).is_some()
+                    });
+                if !exists_in_active_vault {
+                    created_group_id = None;
+                }
+            }
             Ok(VaultMutationResultDto {
                 commit: CommitStatusDto::Committed,
                 publication,
@@ -10298,6 +10315,11 @@ mod tests {
     fn pending_conflict_copy_reopens_without_a_separate_synced_base() {
         let mut runtime = demo_onedrive_runtime(1_700_000_105);
         let vault_id = open_unlocked_demo_onedrive(&mut runtime);
+        let fixed_base = runtime
+            .session_bases
+            .read(&vault_id)
+            .unwrap()
+            .expect("fixed Base before the conflict");
         create_demo_entry(&mut runtime, &vault_id);
         let mut foreign_key = CompositeKey::default();
         foreign_key.add_password("foreign-password");
@@ -10336,6 +10358,11 @@ mod tests {
                 .source_status
                 .as_ref()
                 .is_some_and(|status| status.remote_state == "pending_sync")
+        );
+        assert_eq!(
+            runtime.session_bases.read(&vault_id).unwrap().unwrap(),
+            fixed_base,
+            "reopening a pending Conflict Copy must preserve the fixed Base"
         );
     }
 
