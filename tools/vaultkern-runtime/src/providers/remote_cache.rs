@@ -42,6 +42,7 @@ pub struct RemoteVaultCacheEntry {
     pub account_label: String,
     pub cached_at: i64,
     pub pending_sync: bool,
+    pub conflict_receipt_source: Option<ContentIdentity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +159,8 @@ struct RemoteVaultCacheManifestV2 {
     pending_sync: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_kind: Option<RemoteVaultPendingKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conflict_receipt_source: Option<ContentIdentity>,
     previous_generation: Option<RemoteVaultGeneration>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     observed_generation: Option<RemoteVaultGeneration>,
@@ -180,6 +183,8 @@ struct RemoteVaultGeneration {
     pending_sync: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pending_kind: Option<RemoteVaultPendingKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    conflict_receipt_source: Option<ContentIdentity>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -935,6 +940,7 @@ impl RemoteVaultCache {
                     cached_at: base.cached_at,
                     pending_sync: false,
                     pending_kind: Some(RemoteVaultPendingKind::None),
+                    conflict_receipt_source: None,
                 })
             })
             .transpose()?
@@ -964,6 +970,7 @@ impl RemoteVaultCache {
             } else {
                 RemoteVaultPendingKind::None
             }),
+            conflict_receipt_source: entry.conflict_receipt_source,
             previous_generation,
             observed_generation,
         };
@@ -1326,6 +1333,7 @@ impl RemoteVaultCache {
                     cached_at: metadata.cached_at,
                     pending_sync: metadata.pending_sync,
                     pending_kind: None,
+                    conflict_receipt_source: None,
                 };
                 AuthenticatedCacheRead::Current(AuthenticatedCacheEntry {
                     entry: RemoteVaultCacheEntry {
@@ -1335,6 +1343,7 @@ impl RemoteVaultCache {
                         account_label: metadata.account_label,
                         cached_at: metadata.cached_at,
                         pending_sync: metadata.pending_sync,
+                        conflict_receipt_source: None,
                     },
                     generation,
                     fallback: None,
@@ -1374,6 +1383,7 @@ impl RemoteVaultCache {
                 account_label: generation.account_label.clone(),
                 cached_at: generation.cached_at,
                 pending_sync: generation.pending_sync || degraded,
+                conflict_receipt_source: generation.conflict_receipt_source.clone(),
             },
             generation: generation.clone(),
             fallback: None,
@@ -1613,6 +1623,7 @@ impl RemoteVaultCacheManifestV2 {
             cached_at: self.cached_at,
             pending_sync: self.pending_sync,
             pending_kind: self.pending_kind,
+            conflict_receipt_source: self.conflict_receipt_source.clone(),
         }
     }
 }
@@ -1879,6 +1890,7 @@ mod tests {
             account_label: "alice@example.com".into(),
             cached_at: 1_776_500_000 + modified_at as i64,
             pending_sync,
+            conflict_receipt_source: None,
         }
     }
 

@@ -1026,14 +1026,18 @@ export class RuntimeClient {
     command: Record<string, unknown>,
     requiresEntry: boolean
   ): Promise<CommittedMutation<T>> {
-    const response =
-      await this.sendCommand<EntryMutationResponse<T>>(command);
+    const response = await this.sendCommand<unknown>(command);
     if (
+      !isRecord(response) ||
       response.type !== "entry_mutation_result" ||
       response.commit !== "committed" ||
+      !isPublicationResultPayload(response.publication) ||
       (requiresEntry &&
         response.entry == null &&
-        response.publication.status !== "conflict_split")
+        response.publication.status !== "conflict_split") ||
+      (requiresEntry &&
+        response.entry != null &&
+        !isEntryDetailPayload(response.entry))
     ) {
       throw new TypeError("runtime returned an invalid committed entry mutation");
     }
@@ -1041,8 +1045,8 @@ export class RuntimeClient {
       ? response.entry == null
         ? (null as T)
         : ({
-            type: "entry_detail",
-            ...(response.entry as Record<string, unknown>)
+            ...response.entry,
+            type: "entry_detail"
           } as T)
       : (undefined as T);
     return {
@@ -1137,12 +1141,63 @@ function isRuntimeErrorResponse(value: unknown): value is RuntimeErrorResponse {
 }
 
 function publicationResult(
-  result: Omit<PublicationResult, "type">
+  result: unknown
 ): PublicationResult {
+  if (!isPublicationResultPayload(result)) {
+    throw new TypeError("runtime returned an invalid publication result");
+  }
   return {
-    type: "publication_result",
-    ...result
+    ...result,
+    type: "publication_result"
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPublicationResultPayload(
+  value: unknown
+): value is Omit<PublicationResult, "type"> {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value.status !== "published" &&
+    value.status !== "reconciled" &&
+    value.status !== "pending" &&
+    value.status !== "conflict_split"
+  ) {
+    return false;
+  }
+  if (
+    value.conflictCopyPath !== undefined &&
+    typeof value.conflictCopyPath !== "string"
+  ) {
+    return false;
+  }
+  const summary = value.reconciliationSummary;
+  return (
+    summary === undefined ||
+    summary === null ||
+    (isRecord(summary) &&
+      typeof summary.mergedEntries === "number" &&
+      typeof summary.historySnapshotsAdded === "number")
+  );
+}
+
+function isEntryDetailPayload(
+  value: unknown
+): value is Omit<EntryDetail, "type"> {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.username === "string" &&
+    typeof value.password === "string" &&
+    typeof value.url === "string" &&
+    typeof value.notes === "string"
+  );
 }
 
 function normalizeOptionalSecret(value: string | null | undefined): string | null {

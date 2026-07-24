@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { RuntimeClient } from "../index";
 
 function committedEntryMutation(
-  entry: Record<string, unknown> | undefined,
+  entry: unknown,
   status: "published" | "reconciled" | "pending" | "conflict_split" = "published"
 ) {
   return {
@@ -12,7 +12,18 @@ function committedEntryMutation(
       status,
       reconciliationSummary: null
     },
-    ...(entry ? { entry } : {})
+    ...(entry === undefined ? {} : { entry })
+  };
+}
+
+function entryDetail() {
+  return {
+    id: "entry-1",
+    title: "Example",
+    username: "alice",
+    password: "secret",
+    url: "https://example.com",
+    notes: ""
   };
 }
 
@@ -1237,6 +1248,47 @@ describe("RuntimeClient", () => {
   it("rejects a committed entry mutation that omits the active entry without Conflict Split", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue(committedEntryMutation(undefined, "published"))
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.updateEntryFields("vault-1", "entry-1", {
+        title: "Published edit",
+        username: "alice",
+        password: "secret",
+        url: "https://example.com",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      })
+    ).rejects.toThrow("runtime returned an invalid committed entry mutation");
+  });
+
+  it("rejects an unknown publication status even when an entry is present", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue({
+        ...committedEntryMutation(entryDetail(), "published"),
+        publication: { status: "future_status" }
+      })
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.updateEntryFields("vault-1", "entry-1", {
+        title: "Published edit",
+        username: "alice",
+        password: "secret",
+        url: "https://example.com",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      })
+    ).rejects.toThrow("runtime returned an invalid committed entry mutation");
+  });
+
+  it("rejects a non-object active entry instead of asserting it as EntryDetail", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue(committedEntryMutation("not-an-entry", "published"))
     };
     const client = new RuntimeClient(transport);
 

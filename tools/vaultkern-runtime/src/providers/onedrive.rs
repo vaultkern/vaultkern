@@ -206,7 +206,7 @@ pub struct OneDriveVaultSourceProvider {
     memory_snapshot_from_state_reads: Cell<usize>,
     memory_writes: Cell<usize>,
     memory_write_behaviors: VecDeque<OneDriveMemoryWriteBehavior>,
-    memory_fail_next_remote_state: Cell<bool>,
+    memory_remote_state_failures: Cell<usize>,
     memory_fail_next_conflict_copy: Cell<bool>,
 }
 
@@ -369,7 +369,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
-            memory_fail_next_remote_state: Cell::new(false),
+            memory_remote_state_failures: Cell::new(0),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -393,7 +393,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
-            memory_fail_next_remote_state: Cell::new(false),
+            memory_remote_state_failures: Cell::new(0),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -491,7 +491,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
-            memory_fail_next_remote_state: Cell::new(false),
+            memory_remote_state_failures: Cell::new(0),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -561,7 +561,8 @@ impl OneDriveVaultSourceProvider {
     }
 
     pub fn fail_next_memory_remote_state(&self) {
-        self.memory_fail_next_remote_state.set(true);
+        self.memory_remote_state_failures
+            .set(self.memory_remote_state_failures.get().saturating_add(1));
     }
 
     pub fn remove_memory_item(&mut self, drive_id: &str, item_id: &str) {
@@ -816,7 +817,10 @@ impl OneDriveVaultSourceProvider {
 
         self.memory_remote_state_reads
             .set(self.memory_remote_state_reads.get() + 1);
-        if self.memory_fail_next_remote_state.replace(false) {
+        let queued_failures = self.memory_remote_state_failures.get();
+        if queued_failures > 0 {
+            self.memory_remote_state_failures
+                .set(queued_failures.saturating_sub(1));
             anyhow::bail!("injected OneDrive readback failure");
         }
         let item = self.item(drive_id, item_id)?;
@@ -895,13 +899,13 @@ impl OneDriveVaultSourceProvider {
                     OneDriveMemoryWriteBehavior::OutcomeUnknownCommittedReadbackUnavailable => {
                         item.bytes = bytes.to_vec();
                         item.revision += 1;
-                        self.memory_fail_next_remote_state.set(true);
+                        self.fail_next_memory_remote_state();
                         return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
                             message: "injected ambiguous committed write".into(),
                         });
                     }
                     OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommittedReadbackUnavailable => {
-                        self.memory_fail_next_remote_state.set(true);
+                        self.fail_next_memory_remote_state();
                         return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
                             message: "injected ambiguous uncommitted write".into(),
                         });

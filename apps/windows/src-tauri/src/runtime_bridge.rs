@@ -1063,10 +1063,12 @@ fn command_unlocks_vault(command: &RuntimeCommand) -> bool {
 }
 
 fn response_commits_active_vault(value: &RuntimeResponse) -> bool {
+    if matches!(value, RuntimeResponse::EntryMutationResult(_)) {
+        return true;
+    }
     let status = match value {
         RuntimeResponse::PublicationResult(result) => Some(&result.status),
         RuntimeResponse::DatabaseSettingsCommitResult(result) => Some(&result.publication.status),
-        RuntimeResponse::EntryMutationResult(result) => Some(&result.publication.status),
         RuntimeResponse::VaultMutationResult(result) => Some(&result.publication.status),
         _ => None,
     };
@@ -1554,7 +1556,7 @@ mod tests {
             (PublicationStatusDto::Published, true),
             (PublicationStatusDto::Reconciled, true),
             (PublicationStatusDto::Pending, true),
-            (PublicationStatusDto::ConflictSplit, false),
+            (PublicationStatusDto::ConflictSplit, true),
         ] {
             let response = RuntimeResponse::EntryMutationResult(EntryMutationResultDto {
                 commit: CommitStatusDto::Committed,
