@@ -21,7 +21,7 @@ fn quick_unlock_bridge_with_current_vault(name: &str) -> (tempfile::TempDir, Run
 
     let bridge = RuntimeBridge::new_for_tests_with_quick_unlock();
     let reference = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "add_local_vault_reference",
             "path": database_path.to_string_lossy()
@@ -229,7 +229,7 @@ fn runtime_bridge_serves_protocol_envelopes_from_its_runtime_thread() {
     let bridge = RuntimeBridge::new_for_tests();
 
     let response = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "get_session_state" }
     }));
 
@@ -250,7 +250,7 @@ fn password_unlock_handoff_is_wiped_and_acknowledged_before_the_response_returns
     let unlock = std::thread::spawn(move || {
         response
             .send(request_bridge.request(json!({
-                "version": 2,
+                "version": 3,
                 "command": {
                     "type": "unlock_current_vault",
                     "password": "demo-password",
@@ -294,7 +294,7 @@ fn disconnected_reconciler_wipes_the_handoff_without_failing_password_unlock() {
     drop(reconciliation_requests);
 
     let session = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -326,7 +326,7 @@ fn successful_password_handoff_enrolls_quick_unlock_before_returning() {
     });
 
     let session = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -338,7 +338,7 @@ fn successful_password_handoff_enrolls_quick_unlock_before_returning() {
     assert_eq!(session["unlocked"], true);
     assert_eq!(
         bridge.request(json!({
-            "version": 2,
+            "version": 3,
             "command": { "type": "list_recent_vaults" }
         }))["vaults"][0]["supportsQuickUnlock"],
         true
@@ -387,13 +387,13 @@ fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
     let bridge = RuntimeBridge::new_for_tests();
     let path = database_path.to_string_lossy().into_owned();
     let reference = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "add_local_vault_reference", "path": path }
     }));
     assert_eq!(reference["type"], "vault_reference");
 
     let session = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -405,13 +405,13 @@ fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
     let vault_id = session["activeVaultId"].as_str().unwrap();
 
     let entries = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "list_entries", "vault_id": vault_id }
     }));
     assert_eq!(entries["entries"][0]["title"], "Before Edit");
 
     let updated = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "update_entry_fields",
             "vault_id": vault_id,
@@ -425,15 +425,10 @@ fn runtime_bridge_opens_edits_and_saves_a_real_local_vault() {
             "custom_fields": []
         }
     }));
-    assert_eq!(updated["type"], "entry_detail");
-    assert_eq!(updated["title"], "After Edit");
-
-    let saved = bridge.request(json!({
-        "version": 2,
-        "command": { "type": "save_vault", "vault_id": vault_id }
-    }));
-    assert_eq!(saved["type"], "save_vault_result");
-    assert_eq!(saved["status"], "saved");
+    assert_eq!(updated["type"], "entry_mutation_result");
+    assert_eq!(updated["commit"], "committed");
+    assert_eq!(updated["publication"]["status"], "published");
+    assert_eq!(updated["entry"]["title"], "After Edit");
 
     let persisted = core
         .load_kdbx(&std::fs::read(&database_path).unwrap(), &key)
@@ -496,11 +491,11 @@ fn runtime_bridge_runs_platform_passkeys_on_the_same_resident_runtime_thread() {
     assert!(!bridge.platform_passkey_is_unlocked());
     let path = database_path.to_string_lossy().into_owned();
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "add_local_vault_reference", "path": path }
     }));
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -630,14 +625,14 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
 
     let bridge = RuntimeBridge::new_for_tests_with_quick_unlock();
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "add_local_vault_reference",
             "path": database_path.to_string_lossy()
         }
     }));
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -645,7 +640,7 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
         }
     }));
     let vault_ref_id = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "get_session_state" }
     }))["currentVaultRefId"]
         .as_str()
@@ -667,12 +662,12 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
             .unwrap()
     );
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "lock_session" }
     }));
     assert!(
         bridge.request(json!({
-            "version": 2,
+            "version": 3,
             "command": { "type": "list_recent_vaults" }
         }))["vaults"][0]["supportsQuickUnlock"]
             .as_bool()
@@ -683,7 +678,7 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
     assert!(bridge.reconcile_quick_unlock(false, None).unwrap());
     assert!(
         !bridge.request(json!({
-            "version": 2,
+            "version": 3,
             "command": { "type": "list_recent_vaults" }
         }))["vaults"][0]["supportsQuickUnlock"]
             .as_bool()
@@ -695,7 +690,7 @@ fn runtime_bridge_reconciles_quick_unlock_from_desired_state_while_locked() {
 fn resident_quick_unlock_policy_closes_before_stale_blob_cleanup() {
     let (_scratch, bridge) = quick_unlock_bridge_with_current_vault("quick-unlock-policy");
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -703,7 +698,7 @@ fn resident_quick_unlock_policy_closes_before_stale_blob_cleanup() {
         }
     }));
     let vault_ref_id = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "get_session_state" }
     }))["currentVaultRefId"]
         .as_str()
@@ -722,7 +717,7 @@ fn resident_quick_unlock_policy_closes_before_stale_blob_cleanup() {
         )
         .unwrap();
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "lock_session" }
     }));
 
@@ -733,7 +728,7 @@ fn resident_quick_unlock_policy_closes_before_stale_blob_cleanup() {
     );
 
     let response = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "unlock_current_vault_with_quick_unlock" }
     }));
     assert_eq!(response["type"], "error", "unexpected response: {response}");
@@ -766,14 +761,14 @@ fn resident_idle_lock_survives_when_all_ui_clients_are_gone() {
 
     let bridge = RuntimeBridge::new_for_tests();
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "add_local_vault_reference",
             "path": database_path.to_string_lossy()
         }
     }));
     let unlocked = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -793,7 +788,7 @@ fn resident_idle_lock_survives_when_all_ui_clients_are_gone() {
     std::thread::sleep(std::time::Duration::from_millis(80));
 
     let session = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "get_session_state" }
     }));
     assert_eq!(session["unlocked"], false);
@@ -819,14 +814,14 @@ fn cold_platform_operation_quick_unlocks_and_returns_the_authoritative_credentia
 
     let bridge = RuntimeBridge::new_for_tests_with_quick_unlock();
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "add_local_vault_reference",
             "path": database_path.to_string_lossy()
         }
     }));
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "unlock_current_vault",
             "password": "demo-password",
@@ -834,7 +829,7 @@ fn cold_platform_operation_quick_unlocks_and_returns_the_authoritative_credentia
         }
     }));
     let vault_ref_id = bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "get_session_state" }
     }))["currentVaultRefId"]
         .as_str()
@@ -875,7 +870,7 @@ fn cold_platform_operation_quick_unlocks_and_returns_the_authoritative_credentia
         )
         .unwrap();
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "lock_session" }
     }));
 
@@ -894,7 +889,7 @@ fn cold_platform_operation_quick_unlocks_and_returns_the_authoritative_credentia
     assert!(!bridge.platform_passkey_is_unlocked());
 
     bridge.request(json!({
-        "version": 2,
+        "version": 3,
         "command": { "type": "unlock_current_vault_with_quick_unlock" }
     }));
     let warm_operation = vec![5; 16];

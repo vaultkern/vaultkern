@@ -58,8 +58,9 @@ export interface DatabaseSettings {
 
 export interface DatabaseSettingsCommitResult {
   type: "database_settings_commit_result";
+  commit: "committed";
   settings: DatabaseSettings;
-  saveResult: SaveVaultResult;
+  publication: PublicationResult;
 }
 
 export interface DatabaseSettingsUpdate {
@@ -232,10 +233,10 @@ export interface EntryAttachmentContentUpdate {
   dataBase64: string;
 }
 
-export type SaveVaultResult = {
-  type: "save_vault_result";
-  status: "saved" | "merged" | "saved_to_cache" | "conflict_copy";
-  mergeSummary?: {
+export type PublicationResult = {
+  type: "publication_result";
+  status: "published" | "reconciled" | "pending" | "conflict_split";
+  reconciliationSummary?: {
     mergedEntries: number;
     historySnapshotsAdded: number;
   } | null;
@@ -244,8 +245,40 @@ export type SaveVaultResult = {
 
 export interface CommittedMutation<T> {
   value: T;
-  saveResult: SaveVaultResult;
-  operationId: string;
+  publication: PublicationResult;
+}
+
+export type CommittedEntryMutation = CommittedMutation<EntryDetail | null>;
+
+export interface CommittedVaultMutation {
+  publication: PublicationResult;
+  createdGroupId?: string;
+}
+
+export interface CommittedAutofillMutation {
+  commit: "committed";
+  publication: PublicationResult;
+}
+
+interface EntryMutationResponse<T> {
+  type: "entry_mutation_result";
+  commit: "committed";
+  publication: Omit<PublicationResult, "type">;
+  entry?: T | null;
+}
+
+interface VaultMutationResponse {
+  type: "vault_mutation_result";
+  commit: "committed";
+  publication: Omit<PublicationResult, "type">;
+  createdGroupId?: string;
+}
+
+interface DatabaseSettingsMutationResponse {
+  type: "database_settings_commit_result";
+  commit: "committed";
+  settings: DatabaseSettings;
+  publication: Omit<PublicationResult, "type">;
 }
 
 export interface EntryHistoryItem {
@@ -285,91 +318,12 @@ export interface EntryDraft {
   customFields: EntryCustomField[];
 }
 
-export type AutofillPersistPlan =
-  | {
-      mode: "update";
-      entryId: string;
-      expectedFields: AutofillUpdateFields;
-      desiredFields: AutofillUpdateFields;
-    }
-  | {
-      mode: "create";
-      parentGroupId: string;
-      plannedEntryId: string;
-      expectedMatchingEntryIds: string[];
-      desiredFields: EntryDraft;
-    };
-
-export interface PersistAutofillMutationRequest {
-  transactionId: string;
-  operationId: string;
-  vaultId: string;
-  plan: AutofillPersistPlan;
-}
-
-export type AutofillPersistConflictCode =
-  | "active_vault_mismatch"
-  | "update_precondition_failed"
-  | "create_matching_set_changed"
-  | "planned_entry_id_collision"
-  | "operation_binding_mismatch"
-  | "concurrent_vault_changes"
-  | "source_changed_retry_exhausted"
-  | "legacy_create_outcome_ambiguous";
-
-interface AutofillPersistResultBase {
-  type: "autofill_persist_result";
-  transactionId: string;
-  operationId: string;
-  vaultId: string;
-}
-
-export type AutofillPersistResult = AutofillPersistResultBase &
-  (
-    | ({
-        outcome: "durable";
-        disposition: "committed" | "replayed";
-        entryId: string;
-        committedFingerprint: {
-          contentSha256: string;
-          sizeBytes: number;
-        };
-        mergeSummary: {
-          mergedEntries: number;
-          historySnapshotsAdded: number;
-        } | null;
-        receiptVersion: 1;
-      } &
-        (
-          | {
-              durability: "source";
-              cacheState: "not_applicable" | "current" | "write_failed";
-            }
-          | {
-              durability: "pending_remote_cache";
-              cacheState: "pending_sync";
-            }
-        ))
-    | ({
-        outcome: "conflict";
-      } &
-        (
-          | {
-              code: "active_vault_mismatch" | "source_changed_retry_exhausted";
-              retryable: true;
-            }
-          | {
-              code: Exclude<
-                AutofillPersistConflictCode,
-                "active_vault_mismatch" | "source_changed_retry_exhausted"
-              >;
-              retryable: false;
-            }
-        ))
-  );
-
 export interface EntryCreateInput extends EntryDraft {
   parentGroupId: string;
+}
+
+export interface AutofillEntryCreateInput extends EntryCreateInput {
+  expectedMatchingEntryIds: string[];
 }
 
 export interface FillCandidates {
@@ -626,6 +580,76 @@ export class RuntimeClient {
     });
   }
 
+  async createGroup(
+    vaultId: string,
+    parentGroupId: string,
+    title: string
+  ): Promise<CommittedVaultMutation> {
+    const result = await this.sendVaultMutationCommand({
+      type: "create_group",
+      vault_id: vaultId,
+      parent_group_id: parentGroupId,
+      title
+    });
+    if (
+      result.createdGroupId === undefined &&
+      result.publication.status !== "conflict_split"
+    ) {
+      throw new TypeError("runtime omitted the created group id");
+    }
+    return result;
+  }
+
+  async renameGroup(
+    vaultId: string,
+    groupId: string,
+    title: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "rename_group",
+      vault_id: vaultId,
+      group_id: groupId,
+      title
+    });
+  }
+
+  async moveGroup(
+    vaultId: string,
+    groupId: string,
+    targetParentGroupId: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "move_group",
+      vault_id: vaultId,
+      group_id: groupId,
+      target_parent_group_id: targetParentGroupId
+    });
+  }
+
+  async deleteGroup(
+    vaultId: string,
+    groupId: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "delete_group",
+      vault_id: vaultId,
+      group_id: groupId
+    });
+  }
+
+  async moveEntryToGroup(
+    vaultId: string,
+    entryId: string,
+    targetGroupId: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "move_entry_to_group",
+      vault_id: vaultId,
+      entry_id: entryId,
+      target_group_id: targetGroupId
+    });
+  }
+
   async getEntryDetail(
     vaultId: string,
     entryId: string
@@ -672,141 +696,138 @@ export class RuntimeClient {
     });
   }
 
-  async createEntry(
+  async createAutofillEntry(
     vaultId: string,
-    input: EntryCreateInput,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "create_entry",
+    input: AutofillEntryCreateInput
+  ): Promise<CommittedAutofillMutation> {
+    return this.sendAutofillEntryMutationCommand({
+      type: "create_autofill_entry",
       vault_id: vaultId,
       parent_group_id: input.parentGroupId,
+      expected_matching_entry_ids: input.expectedMatchingEntryIds,
       title: input.title,
       username: input.username,
       password: input.password,
       url: input.url,
       notes: input.notes,
       totp_uri: input.totpUri
-    }, operationId);
+    });
+  }
+
+  async updateAutofillEntryFields(
+    vaultId: string,
+    entryId: string,
+    expectedFields: AutofillUpdateFields,
+    desiredFields: AutofillUpdateFields
+  ): Promise<CommittedAutofillMutation> {
+    return this.sendAutofillEntryMutationCommand({
+      type: "update_autofill_entry_fields",
+      vault_id: vaultId,
+      entry_id: entryId,
+      expected_fields: autofillUpdateFieldsCommand(expectedFields),
+      desired_fields: autofillUpdateFieldsCommand(desiredFields)
+    });
+  }
+
+  async createEntry(
+    vaultId: string,
+    input: EntryCreateInput
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "create_entry",
+        vault_id: vaultId,
+        parent_group_id: input.parentGroupId,
+        title: input.title,
+        username: input.username,
+        password: input.password,
+        url: input.url,
+        notes: input.notes,
+        totp_uri: input.totpUri
+      },
+      true
+    );
   }
 
   async updateEntryFields(
     vaultId: string,
     entryId: string,
-    input: EntryDraft,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "update_entry_fields",
-      vault_id: vaultId,
-      entry_id: entryId,
-      title: input.title,
-      username: input.username,
-      password: input.password,
-      url: input.url,
-      notes: input.notes,
-      totp_uri: input.totpUri,
-      custom_fields: input.customFields
-    }, operationId);
-  }
-
-  async compareAndUpdateEntryFields(
-    vaultId: string,
-    entryId: string,
-    expectedFields: EntryDraft,
-    desiredFields: EntryDraft
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "compare_and_update_entry_fields",
-      vault_id: vaultId,
-      entry_id: entryId,
-      expected_fields: entryFieldsCommand(expectedFields),
-      desired_fields: entryFieldsCommand(desiredFields)
-    });
-  }
-
-  async persistAutofillMutation(
-    request: PersistAutofillMutationRequest
-  ): Promise<AutofillPersistResult> {
-    const snapshot = snapshotAutofillPersistRequest(request);
-    if (
-      snapshot.binding.mode === "create" &&
-      !isCanonicalNonNilUuid(snapshot.binding.entryId)
-    ) {
-      throw new TypeError("planned entry id must be a canonical non-nil UUID");
-    }
-    const response = await this.sendCommand<unknown>({
-      type: "persist_autofill_mutation",
-      transaction_id: snapshot.binding.transactionId,
-      operation_id: snapshot.binding.operationId,
-      vault_id: snapshot.binding.vaultId,
-      plan: snapshot.commandPlan
-    });
-    return parseAutofillPersistResult(response, snapshot.binding);
+    input: EntryDraft
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "update_entry_fields",
+        vault_id: vaultId,
+        entry_id: entryId,
+        title: input.title,
+        username: input.username,
+        password: input.password,
+        url: input.url,
+        notes: input.notes,
+        totp_uri: input.totpUri,
+        custom_fields: input.customFields
+      },
+      true
+    );
   }
 
   async clearEntryTotp(
     vaultId: string,
     entryId: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "clear_entry_totp",
-      vault_id: vaultId,
-      entry_id: entryId
-    });
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "clear_entry_totp",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      true
+    );
   }
 
   async setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskeyUpdate,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "set_entry_passkey",
-      vault_id: vaultId,
-      entry_id: entryId,
-      passkey
-    }, operationId);
+    passkey: EntryPasskeyUpdate
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "set_entry_passkey",
+        vault_id: vaultId,
+        entry_id: entryId,
+        passkey
+      },
+      true
+    );
   }
 
   async clearEntryPasskey(
     vaultId: string,
-    entryId: string,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "clear_entry_passkey",
-      vault_id: vaultId,
-      entry_id: entryId
-    }, operationId);
+    entryId: string
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "clear_entry_passkey",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      true
+    );
   }
 
   async deleteEntry(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<CommittedMutation<void>> {
-    const result = await this.sendMutationCommand<{ type: "saved" }>(vaultId, {
-      type: "delete_entry",
-      vault_id: vaultId,
-      entry_id: entryId
-    }, operationId);
+    const result = await this.sendEntryMutationCommand<undefined>(
+      {
+        type: "delete_entry",
+        vault_id: vaultId,
+        entry_id: entryId
+      },
+      false
+    );
     return { ...result, value: undefined };
-  }
-
-  async saveVault(vaultId: string): Promise<SaveVaultResult> {
-    return this.sendCommand<SaveVaultResult>({
-      type: "save_vault",
-      vault_id: vaultId
-    });
-  }
-
-  async retryMutationSave(
-    vaultId: string,
-    operationId: string
-  ): Promise<SaveVaultResult> {
-    return this.sendMutationSave(vaultId, operationId);
   }
 
   async getDatabaseSettings(vaultId: string): Promise<DatabaseSettings> {
@@ -820,7 +841,7 @@ export class RuntimeClient {
     vaultId: string,
     update: DatabaseSettingsUpdate
   ): Promise<DatabaseSettingsCommitResult> {
-    return this.sendCommand<DatabaseSettingsCommitResult>({
+    return this.sendDatabaseSettingsMutationCommand({
       type: "update_database_settings",
       vault_id: vaultId,
       update
@@ -843,62 +864,70 @@ export class RuntimeClient {
   async addEntryAttachment(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentInput,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "add_entry_attachment",
-      vault_id: vaultId,
-      entry_id: entryId,
-      name: input.name,
-      data_base64: input.dataBase64,
-      protect_in_memory: input.protectInMemory
-    }, operationId);
+    input: EntryAttachmentInput
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "add_entry_attachment",
+        vault_id: vaultId,
+        entry_id: entryId,
+        name: input.name,
+        data_base64: input.dataBase64,
+        protect_in_memory: input.protectInMemory
+      },
+      true
+    );
   }
 
   async updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentMetadataUpdate,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "update_entry_attachment_metadata",
-      vault_id: vaultId,
-      entry_id: entryId,
-      old_name: input.oldName,
-      new_name: input.newName,
-      protect_in_memory: input.protectInMemory
-    }, operationId);
+    input: EntryAttachmentMetadataUpdate
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "update_entry_attachment_metadata",
+        vault_id: vaultId,
+        entry_id: entryId,
+        old_name: input.oldName,
+        new_name: input.newName,
+        protect_in_memory: input.protectInMemory
+      },
+      true
+    );
   }
 
   async replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentContentUpdate,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "replace_entry_attachment_content",
-      vault_id: vaultId,
-      entry_id: entryId,
-      name: input.name,
-      data_base64: input.dataBase64
-    }, operationId);
+    input: EntryAttachmentContentUpdate
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "replace_entry_attachment_content",
+        vault_id: vaultId,
+        entry_id: entryId,
+        name: input.name,
+        data_base64: input.dataBase64
+      },
+      true
+    );
   }
 
   async deleteEntryAttachment(
     vaultId: string,
     entryId: string,
-    name: string,
-    operationId?: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendMutationCommand<EntryDetail>(vaultId, {
-      type: "delete_entry_attachment",
-      vault_id: vaultId,
-      entry_id: entryId,
-      name
-    }, operationId);
+    name: string
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
+      {
+        type: "delete_entry_attachment",
+        vault_id: vaultId,
+        entry_id: entryId,
+        name
+      },
+      true
+    );
   }
 
   async listEntryHistory(
@@ -923,6 +952,54 @@ export class RuntimeClient {
       vault_id: vaultId,
       entry_id: entryId,
       history_index: historyIndex
+    });
+  }
+
+  async restoreEntryHistory(
+    vaultId: string,
+    entryId: string,
+    historyIndex: number
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "restore_entry_history",
+      vault_id: vaultId,
+      entry_id: entryId,
+      history_index: historyIndex
+    });
+  }
+
+  async clearEntryHistory(
+    vaultId: string,
+    entryId: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "clear_entry_history",
+      vault_id: vaultId,
+      entry_id: entryId
+    });
+  }
+
+  async recycleEntry(
+    vaultId: string,
+    entryId: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "recycle_entry",
+      vault_id: vaultId,
+      entry_id: entryId
+    });
+  }
+
+  async restoreRecycledEntry(
+    vaultId: string,
+    entryId: string,
+    targetGroupId?: string
+  ): Promise<CommittedVaultMutation> {
+    return this.sendVaultMutationCommand({
+      type: "restore_recycled_entry",
+      vault_id: vaultId,
+      entry_id: entryId,
+      target_group_id: targetGroupId
     });
   }
 
@@ -953,71 +1030,100 @@ export class RuntimeClient {
     return response.entryIds;
   }
 
-  private async sendMutationCommand<T>(
-    vaultId: string,
+  private async sendEntryMutationCommand<T>(
     command: Record<string, unknown>,
-    requestedOperationId?: string
+    requiresEntry: boolean
   ): Promise<CommittedMutation<T>> {
-    const operationId = requestedOperationId ?? createLogicalOperationId();
-    const replayableCommand =
-      command.type === "create_entry"
-        ? { ...command, entry_id: operationId }
-        : command;
-    let response: T;
-    try {
-      response = await this.sendCommand<T>(replayableCommand, operationId);
-    } catch (error) {
-      if (!isAmbiguousMutationFailure(error)) {
-        throw error;
-      }
-      try {
-        response = await this.sendCommand<T>(replayableCommand, operationId);
-      } catch (retryError) {
-        // Once an attempt may have reached the resident writer, a later
-        // business error cannot prove that the first attempt did not commit.
-        // Preserve the logical operation identity so the caller can reload or
-        // retry the same operation instead of treating the replay as a
-        // definitive failure.
-        throw new RuntimeMutationOutcomeUnknownError(operationId, retryError);
-      }
+    const response = await this.sendCommand<unknown>(command);
+    if (
+      !isRecord(response) ||
+      response.type !== "entry_mutation_result" ||
+      response.commit !== "committed" ||
+      !isPublicationResultPayload(response.publication) ||
+      (requiresEntry &&
+        response.entry == null &&
+        response.publication.status !== "conflict_split") ||
+      (requiresEntry &&
+        response.entry != null &&
+        !isEntryDetailPayload(response.entry))
+    ) {
+      throw new TypeError("runtime returned an invalid committed entry mutation");
     }
-    try {
-      const saveResult = await this.sendMutationSave(vaultId, operationId);
-      return { value: response, saveResult, operationId };
-    } catch (error) {
-      if (error instanceof RuntimeMutationSaveError) {
-        throw error.withMutationResult(response);
-      }
-      throw error;
-    }
+    const value = requiresEntry
+      ? response.entry == null
+        ? (null as T)
+        : ({
+            ...response.entry,
+            type: "entry_detail"
+          } as T)
+      : (undefined as T);
+    return {
+      value,
+      publication: publicationResult(response.publication)
+    };
   }
 
-  private async sendMutationSave(
-    vaultId: string,
-    operationId: string
-  ): Promise<SaveVaultResult> {
-    const command = { type: "save_vault", vault_id: vaultId };
-    try {
-      return await this.sendCommand<SaveVaultResult>(command, operationId);
-    } catch (error) {
-      if (!isAmbiguousMutationFailure(error)) {
-        throw new RuntimeMutationSaveError(operationId, error);
-      }
-      try {
-        return await this.sendCommand<SaveVaultResult>(command, operationId);
-      } catch (retryError) {
-        throw new RuntimeMutationSaveError(operationId, retryError);
-      }
+  private async sendAutofillEntryMutationCommand(
+    command: Record<string, unknown>
+  ): Promise<CommittedAutofillMutation> {
+    const response =
+      await this.sendCommand<EntryMutationResponse<never>>(command);
+    if (
+      response.type !== "entry_mutation_result" ||
+      response.commit !== "committed"
+    ) {
+      throw new TypeError("runtime returned an invalid committed autofill mutation");
     }
+    return {
+      commit: response.commit,
+      publication: publicationResult(response.publication)
+    };
   }
 
-  private async sendCommand<T>(
-    command: Record<string, unknown>,
-    operationId?: string
-  ): Promise<T> {
+  private async sendVaultMutationCommand(
+    command: Record<string, unknown>
+  ): Promise<CommittedVaultMutation> {
+    const response = await this.sendCommand<unknown>(command);
+    if (
+      !isRecord(response) ||
+      response.type !== "vault_mutation_result" ||
+      response.commit !== "committed" ||
+      !isPublicationResultPayload(response.publication) ||
+      (response.createdGroupId !== undefined &&
+        typeof response.createdGroupId !== "string")
+    ) {
+      throw new TypeError("runtime returned an invalid committed vault mutation");
+    }
+    return {
+      publication: publicationResult(response.publication),
+      ...(response.createdGroupId === undefined
+        ? {}
+        : { createdGroupId: response.createdGroupId })
+    };
+  }
+
+  private async sendDatabaseSettingsMutationCommand(
+    command: Record<string, unknown>
+  ): Promise<DatabaseSettingsCommitResult> {
+    const response =
+      await this.sendCommand<DatabaseSettingsMutationResponse>(command);
+    if (
+      response.type !== "database_settings_commit_result" ||
+      response.commit !== "committed"
+    ) {
+      throw new TypeError(
+        "runtime returned an invalid committed database settings mutation"
+      );
+    }
+    return {
+      ...response,
+      publication: publicationResult(response.publication)
+    };
+  }
+
+  private async sendCommand<T>(command: Record<string, unknown>): Promise<T> {
     const response = await this.transport.send({
       version: RUNTIME_PROTOCOL_VERSION,
-      ...(operationId ? { operationId } : {}),
       command
     });
 
@@ -1027,108 +1133,6 @@ export class RuntimeClient {
 
     return response as T;
   }
-}
-
-class RuntimeMutationOutcomeUnknownError extends Error {
-  readonly code: string;
-
-  constructor(
-    readonly operationId: string,
-    cause: unknown
-  ) {
-    super(
-      cause instanceof Error
-        ? `runtime mutation outcome is unknown: ${cause.message}`
-        : "runtime mutation outcome is unknown",
-      { cause }
-    );
-    this.name = "RuntimeMutationOutcomeUnknownError";
-    this.code = "request_outcome_unknown";
-  }
-}
-
-class RuntimeMutationSaveError extends Error {
-  readonly code: string;
-
-  constructor(
-    readonly operationId: string,
-    cause: unknown,
-    readonly mutationResult?: unknown
-  ) {
-    super(cause instanceof Error ? cause.message : "runtime mutation save failed", {
-      cause
-    });
-    this.name = "RuntimeMutationSaveError";
-    this.code =
-      typeof cause === "object" &&
-      cause !== null &&
-      "code" in cause &&
-      typeof (cause as { code?: unknown }).code === "string"
-        ? (cause as { code: string }).code
-        : "mutation_save_failed";
-  }
-
-  withMutationResult(result: unknown) {
-    return new RuntimeMutationSaveError(this.operationId, this.cause, result);
-  }
-}
-
-export function runtimeMutationOperationId(error: unknown): string | null {
-  if (
-    typeof error !== "object" ||
-    error === null ||
-    !("operationId" in error) ||
-    typeof (error as { operationId?: unknown }).operationId !== "string"
-  ) {
-    return null;
-  }
-  const operationId = (error as { operationId: string }).operationId;
-  return isCanonicalNonNilUuid(operationId) ? operationId : null;
-}
-
-export function runtimeMutationResult<T>(error: unknown): T | null {
-  if (!(error instanceof RuntimeMutationSaveError)) {
-    return null;
-  }
-  return (error.mutationResult as T | undefined) ?? null;
-}
-
-let logicalOperationSequence = 0;
-
-function createLogicalOperationId(): string {
-  if (typeof globalThis.crypto?.randomUUID === "function") {
-    return globalThis.crypto.randomUUID();
-  }
-  const bytes = new Uint8Array(16);
-  if (typeof globalThis.crypto?.getRandomValues === "function") {
-    globalThis.crypto.getRandomValues(bytes);
-  } else {
-    logicalOperationSequence += 1;
-    for (let index = 0; index < bytes.length; index += 1) {
-      bytes[index] = Math.floor(Math.random() * 256);
-    }
-    const sequence = logicalOperationSequence;
-    bytes[0] ^= sequence & 0xff;
-    bytes[1] ^= (sequence >>> 8) & 0xff;
-  }
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0"));
-  return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex
-    .slice(6, 8)
-    .join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10).join("")}`;
-}
-
-function isAmbiguousMutationFailure(error: unknown) {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return false;
-  }
-  const code = (error as { code?: unknown }).code;
-  return (
-    code === "native_port_disconnected" ||
-    code === "native_timeout" ||
-    code === "request_outcome_unknown"
-  );
 }
 
 export type { RuntimeTransport };
@@ -1145,6 +1149,137 @@ function isRuntimeErrorResponse(value: unknown): value is RuntimeErrorResponse {
     (value as { type?: unknown }).type === "error" &&
     typeof (value as { code?: unknown }).code === "string" &&
     typeof (value as { message?: unknown }).message === "string"
+  );
+}
+
+function publicationResult(
+  result: unknown
+): PublicationResult {
+  if (!isPublicationResultPayload(result)) {
+    throw new TypeError("runtime returned an invalid publication result");
+  }
+  return {
+    ...result,
+    type: "publication_result"
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isPublicationResultPayload(
+  value: unknown
+): value is Omit<PublicationResult, "type"> {
+  if (!isRecord(value)) {
+    return false;
+  }
+  if (
+    value.status !== "published" &&
+    value.status !== "reconciled" &&
+    value.status !== "pending" &&
+    value.status !== "conflict_split"
+  ) {
+    return false;
+  }
+  if (
+    value.conflictCopyPath !== undefined &&
+    typeof value.conflictCopyPath !== "string"
+  ) {
+    return false;
+  }
+  const summary = value.reconciliationSummary;
+  return (
+    summary === undefined ||
+    summary === null ||
+    (isRecord(summary) &&
+      typeof summary.mergedEntries === "number" &&
+      typeof summary.historySnapshotsAdded === "number")
+  );
+}
+
+function isEntryDetailPayload(
+  value: unknown
+): value is Omit<EntryDetail, "type"> {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.title === "string" &&
+    typeof value.username === "string" &&
+    typeof value.password === "string" &&
+    typeof value.url === "string" &&
+    typeof value.notes === "string" &&
+    (value.modifiedAt === undefined || isNonNegativeInteger(value.modifiedAt)) &&
+    isOptionalStringOrNull(value.totp) &&
+    isOptionalStringOrNull(value.totpUri) &&
+    (value.passkey === undefined ||
+      value.passkey === null ||
+      isEntryPasskeyPayload(value.passkey)) &&
+    (value.fieldProtection === undefined ||
+      isEntryFieldProtectionPayload(value.fieldProtection)) &&
+    (value.customFields === undefined ||
+      (Array.isArray(value.customFields) &&
+        value.customFields.every(isEntryCustomFieldPayload))) &&
+    (value.attachments === undefined ||
+      (Array.isArray(value.attachments) &&
+        value.attachments.every(isEntryAttachmentPayload)))
+  );
+}
+
+function isOptionalStringOrNull(value: unknown): boolean {
+  return value === undefined || value === null || typeof value === "string";
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && (value as number) >= 0;
+}
+
+function isEntryPasskeyPayload(value: unknown): value is EntryPasskey {
+  return (
+    isRecord(value) &&
+    typeof value.username === "string" &&
+    typeof value.credentialId === "string" &&
+    (value.generatedUserId === null ||
+      typeof value.generatedUserId === "string") &&
+    typeof value.relyingParty === "string" &&
+    (value.userHandle === null || typeof value.userHandle === "string") &&
+    typeof value.backupEligible === "boolean" &&
+    typeof value.backupState === "boolean"
+  );
+}
+
+function isEntryFieldProtectionPayload(
+  value: unknown
+): value is EntryFieldProtection {
+  return (
+    isRecord(value) &&
+    typeof value.protectTitle === "boolean" &&
+    typeof value.protectUsername === "boolean" &&
+    typeof value.protectPassword === "boolean" &&
+    typeof value.protectUrl === "boolean" &&
+    typeof value.protectNotes === "boolean"
+  );
+}
+
+function isEntryCustomFieldPayload(
+  value: unknown
+): value is EntryCustomField {
+  return (
+    isRecord(value) &&
+    typeof value.key === "string" &&
+    typeof value.value === "string" &&
+    typeof value.protected === "boolean"
+  );
+}
+
+function isEntryAttachmentPayload(
+  value: unknown
+): value is EntryAttachment {
+  return (
+    isRecord(value) &&
+    typeof value.name === "string" &&
+    isNonNegativeInteger(value.size) &&
+    typeof value.protectInMemory === "boolean"
   );
 }
 
@@ -1177,243 +1312,4 @@ function autofillUpdateFieldsCommand(fields: AutofillUpdateFields) {
     password: fields.password,
     url: fields.url
   };
-}
-
-interface AutofillPersistRequestBinding {
-  readonly transactionId: string;
-  readonly operationId: string;
-  readonly vaultId: string;
-  readonly mode: AutofillPersistPlan["mode"];
-  readonly entryId: string;
-}
-
-function snapshotAutofillPersistRequest(request: PersistAutofillMutationRequest) {
-  const transactionId = request.transactionId;
-  const operationId = request.operationId;
-  const vaultId = request.vaultId;
-  const plan = request.plan;
-  if (plan.mode === "update") {
-    const entryId = plan.entryId;
-    return {
-      binding: Object.freeze({
-        transactionId,
-        operationId,
-        vaultId,
-        mode: "update" as const,
-        entryId
-      }),
-      commandPlan: {
-        mode: "update",
-        entry_id: entryId,
-        expected_fields: autofillUpdateFieldsCommand(plan.expectedFields),
-        desired_fields: autofillUpdateFieldsCommand(plan.desiredFields)
-      }
-    };
-  }
-
-  const entryId = plan.plannedEntryId;
-  return {
-    binding: Object.freeze({
-      transactionId,
-      operationId,
-      vaultId,
-      mode: "create" as const,
-      entryId
-    }),
-    commandPlan: {
-      mode: "create",
-      parent_group_id: plan.parentGroupId,
-      planned_entry_id: entryId,
-      expected_matching_entry_ids: [...plan.expectedMatchingEntryIds],
-      desired_fields: entryFieldsCommand(plan.desiredFields)
-    }
-  };
-}
-
-function isCanonicalNonNilUuid(value: string): boolean {
-  return (
-    value !== "00000000-0000-0000-0000-000000000000" &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value)
-  );
-}
-
-const AUTOFILL_CONFLICT_CODES = new Set<AutofillPersistConflictCode>([
-  "active_vault_mismatch",
-  "update_precondition_failed",
-  "create_matching_set_changed",
-  "planned_entry_id_collision",
-  "operation_binding_mismatch",
-  "concurrent_vault_changes",
-  "source_changed_retry_exhausted",
-  "legacy_create_outcome_ambiguous"
-]);
-
-function parseAutofillPersistResult(
-  value: unknown,
-  binding: AutofillPersistRequestBinding
-): AutofillPersistResult {
-  if (!isRecord(value) || value.type !== "autofill_persist_result") {
-    throw invalidAutofillPersistResult("unexpected response type");
-  }
-  if (
-    value.transactionId !== binding.transactionId ||
-    value.operationId !== binding.operationId ||
-    value.vaultId !== binding.vaultId
-  ) {
-    throw invalidAutofillPersistResult("response identity does not match request");
-  }
-
-  if (value.outcome === "conflict") {
-    requireExactKeys(value, [
-      "type",
-      "transactionId",
-      "operationId",
-      "vaultId",
-      "outcome",
-      "code",
-      "retryable"
-    ]);
-    if (
-      typeof value.code !== "string" ||
-      !AUTOFILL_CONFLICT_CODES.has(value.code as AutofillPersistConflictCode) ||
-      typeof value.retryable !== "boolean" ||
-      !validConflictForPlan(
-        binding.mode,
-        value.code as AutofillPersistConflictCode,
-        value.retryable
-      )
-    ) {
-      throw invalidAutofillPersistResult("invalid conflict outcome");
-    }
-    return value as unknown as AutofillPersistResult;
-  }
-
-  if (value.outcome !== "durable") {
-    throw invalidAutofillPersistResult("unknown outcome");
-  }
-  requireExactKeys(value, [
-    "type",
-    "transactionId",
-    "operationId",
-    "vaultId",
-    "outcome",
-    "disposition",
-    "entryId",
-    "durability",
-    "cacheState",
-    "committedFingerprint",
-    "mergeSummary",
-    "receiptVersion"
-  ]);
-
-  if (
-    (value.disposition !== "committed" && value.disposition !== "replayed") ||
-    value.entryId !== binding.entryId ||
-    (value.durability !== "source" && value.durability !== "pending_remote_cache") ||
-    !validCacheState(value.cacheState) ||
-    !validDurabilityCachePair(value.durability, value.cacheState) ||
-    !validCommittedFingerprint(value.committedFingerprint) ||
-    !validMergeSummary(value.mergeSummary) ||
-    value.receiptVersion !== 1
-  ) {
-    throw invalidAutofillPersistResult("invalid durable outcome");
-  }
-  return value as unknown as AutofillPersistResult;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function requireExactKeys(value: Record<string, unknown>, expected: string[]): void {
-  const actual = Object.keys(value);
-  if (actual.length !== expected.length || expected.some((key) => !hasOwn(value, key))) {
-    throw invalidAutofillPersistResult("unexpected response fields");
-  }
-}
-
-function hasOwn(value: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(value, key);
-}
-
-function validCacheState(
-  value: unknown
-): value is "not_applicable" | "current" | "pending_sync" | "write_failed" {
-  return (
-    value === "not_applicable" ||
-    value === "current" ||
-    value === "pending_sync" ||
-    value === "write_failed"
-  );
-}
-
-function validDurabilityCachePair(
-  durability: "source" | "pending_remote_cache",
-  cacheState: "not_applicable" | "current" | "pending_sync" | "write_failed"
-): boolean {
-  return durability === "pending_remote_cache"
-    ? cacheState === "pending_sync"
-    : cacheState !== "pending_sync";
-}
-
-function validConflictForPlan(
-  mode: AutofillPersistPlan["mode"],
-  code: AutofillPersistConflictCode,
-  retryable: boolean
-): boolean {
-  const expectedRetryable =
-    code === "active_vault_mismatch" || code === "source_changed_retry_exhausted";
-  if (retryable !== expectedRetryable) {
-    return false;
-  }
-  if (mode === "update") {
-    return (
-      code !== "create_matching_set_changed" &&
-      code !== "planned_entry_id_collision" &&
-      code !== "legacy_create_outcome_ambiguous"
-    );
-  }
-  return code !== "update_precondition_failed";
-}
-
-function validCommittedFingerprint(value: unknown): boolean {
-  if (!isRecord(value)) {
-    return false;
-  }
-  try {
-    requireExactKeys(value, ["contentSha256", "sizeBytes"]);
-  } catch {
-    return false;
-  }
-  return (
-    typeof value.contentSha256 === "string" &&
-    /^[0-9a-f]{64}$/.test(value.contentSha256) &&
-    typeof value.sizeBytes === "number" &&
-    Number.isSafeInteger(value.sizeBytes) &&
-    value.sizeBytes >= 0
-  );
-}
-
-function validMergeSummary(value: unknown): boolean {
-  if (value === null) {
-    return true;
-  }
-  if (!isRecord(value)) {
-    return false;
-  }
-  try {
-    requireExactKeys(value, ["mergedEntries", "historySnapshotsAdded"]);
-  } catch {
-    return false;
-  }
-  return isNonnegativeSafeInteger(value.mergedEntries) &&
-    isNonnegativeSafeInteger(value.historySnapshotsAdded);
-}
-
-function isNonnegativeSafeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
-}
-
-function invalidAutofillPersistResult(reason: string): TypeError {
-  return new TypeError(`invalid autofill persist result: ${reason}`);
 }

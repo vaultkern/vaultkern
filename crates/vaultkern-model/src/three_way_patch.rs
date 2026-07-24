@@ -1214,7 +1214,7 @@ fn merge_entry(
     );
     merged.custom_data = custom_data;
 
-    merged.history = history_union(&base.history, &local.history, &remote.history);
+    merged.history = merge_history(&base.history, &local.history, &remote.history);
     merged.modified_at = local.modified_at.max(remote.modified_at);
     if state.conflict {
         add_losing_history_snapshot(
@@ -1801,7 +1801,17 @@ fn rebuild_tree(
     Ok(group)
 }
 
-fn history_union(base: &[Entry], local: &[Entry], remote: &[Entry]) -> Vec<Entry> {
+fn merge_history(base: &[Entry], local: &[Entry], remote: &[Entry]) -> Vec<Entry> {
+    if local == remote {
+        return local.to_vec();
+    }
+    if local == base {
+        return remote.to_vec();
+    }
+    if remote == base {
+        return local.to_vec();
+    }
+
     let mut merged = remote.to_vec();
     for entry in base.iter().chain(local) {
         if !merged.contains(entry) {

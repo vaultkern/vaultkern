@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "MergeSummaryDto",
+  "title": "ReconciliationSummaryDto",
   "type": "object",
   "required": [
     "historySnapshotsAdded",
@@ -13,7 +13,7 @@
       "minimum": 0.0
     },
     "iconConflictsResolved": {
-      "description": "001 merge algebra: custom icon conflicts where the losing version was discarded (counted so the user can see a configuration conflict occurred). Additive extension pinned by the Phase 0 contract freeze.",
+      "description": "007 field patch: custom-icon conflicts where the losing version was discarded, counted so the user can see that a configuration conflict occurred.",
       "default": 0,
       "type": "integer",
       "format": "uint32",
@@ -25,7 +25,7 @@
       "minimum": 0.0
     },
     "metaConflictsResolved": {
-      "description": "001 merge algebra: resolved Meta / recycle-bin config conflicts. Additive extension pinned by the Phase 0 contract freeze (004).",
+      "description": "007 field patch: resolved Meta / recycle-bin configuration conflicts.",
       "default": 0,
       "type": "integer",
       "format": "uint32",

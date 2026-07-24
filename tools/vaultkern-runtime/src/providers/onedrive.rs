@@ -8,17 +8,20 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use vaultkern_runtime_protocol::{
     OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto, OneDriveItemListDto,
 };
 
-use crate::providers::local_file::VaultSourceFingerprint;
 use crate::providers::onedrive_token_store::{
     EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore, is_unavailable_error,
     production_default, production_for_extension_id,
+};
+use crate::providers::provider::{
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
 };
 use zeroize::Zeroizing;
 
@@ -34,11 +37,12 @@ const GRAPH_ITEM_SELECT: &str = "id,name,size,eTag,parentReference,@microsoft.gr
 const GRAPH_CHILDREN_PAGE_SIZE: &str = "200";
 const ACCESS_TOKEN_EXPIRY_SKEW: Duration = Duration::from_secs(120);
 const MAX_AUTHORIZED_GET_ATTEMPTS: usize = 2;
+const ONEDRIVE_PROVIDER_REVISION_PREFIX: &[u8] = b"onedrive:v1:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OneDriveSnapshot {
     pub bytes: Vec<u8>,
-    pub fingerprint: VaultSourceFingerprint,
+    pub fingerprint: ContentIdentity,
     pub name: String,
     pub account_label: String,
 }
@@ -61,6 +65,13 @@ pub struct OneDriveRemoteState {
     memory_revision: Option<u64>,
 }
 
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OneDriveProviderRevision {
+    e_tag: Option<String>,
+    memory_revision: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct OneDriveMemoryAccessCounts {
     pub remote_state_reads: usize,
@@ -72,7 +83,7 @@ pub struct OneDriveMemoryAccessCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OneDriveConditionalWriteOutcome {
     Committed {
-        fingerprint: VaultSourceFingerprint,
+        fingerprint: ContentIdentity,
         e_tag: Option<String>,
     },
     PreconditionFailed,
@@ -149,21 +160,21 @@ impl fmt::Display for OneDriveConditionalWriteError {
 impl std::error::Error for OneDriveConditionalWriteError {}
 
 impl OneDriveRemoteState {
-    pub fn matches_fingerprint(&self, fingerprint: &VaultSourceFingerprint) -> bool {
+    pub(crate) fn content_revision_marker(&self) -> Option<u64> {
+        self.memory_revision
+            .or_else(|| self.e_tag.as_deref().map(stable_u64_for_text))
+    }
+
+    pub(crate) fn cache_validation_token(&self) -> Option<&str> {
+        self.e_tag.as_deref()
+    }
+
+    pub fn matches_fingerprint(&self, fingerprint: &ContentIdentity) -> bool {
         if self.size != Some(fingerprint.size_bytes) {
             return false;
         }
-        if let Some(revision) = self.memory_revision {
-            return fingerprint.modified_at == Some(revision);
-        }
-        self.e_tag
-            .as_deref()
-            .map(stable_u64_for_text)
-            .is_some_and(|etag| fingerprint.modified_at == Some(etag))
-    }
-
-    pub(crate) fn memory_revision(&self) -> Option<u64> {
-        self.memory_revision
+        self.content_revision_marker()
+            .is_some_and(|revision| fingerprint.observation_marker == Some(revision))
     }
 }
 
@@ -195,8 +206,14 @@ pub struct OneDriveVaultSourceProvider {
     memory_snapshot_from_state_reads: Cell<usize>,
     memory_writes: Cell<usize>,
     memory_write_behaviors: VecDeque<OneDriveMemoryWriteBehavior>,
-    memory_fail_next_remote_state: Cell<bool>,
+    memory_remote_state_failures: Cell<usize>,
     memory_fail_next_conflict_copy: Cell<bool>,
+}
+
+pub struct OneDriveProvider<'a> {
+    source: &'a mut OneDriveVaultSourceProvider,
+    drive_id: String,
+    item_id: String,
 }
 
 struct PendingOneDriveLogin {
@@ -285,6 +302,18 @@ struct GraphParentReference {
 }
 
 impl OneDriveVaultSourceProvider {
+    pub fn bind<'a>(
+        &'a mut self,
+        drive_id: impl Into<String>,
+        item_id: impl Into<String>,
+    ) -> OneDriveProvider<'a> {
+        OneDriveProvider {
+            source: self,
+            drive_id: drive_id.into(),
+            item_id: item_id.into(),
+        }
+    }
+
     pub fn new_from_env() -> Self {
         Self::new_from_env_with_refresh_token_store(production_default(), true)
     }
@@ -340,7 +369,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
-            memory_fail_next_remote_state: Cell::new(false),
+            memory_remote_state_failures: Cell::new(0),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -364,7 +393,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
-            memory_fail_next_remote_state: Cell::new(false),
+            memory_remote_state_failures: Cell::new(0),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -462,7 +491,7 @@ impl OneDriveVaultSourceProvider {
             memory_snapshot_from_state_reads: Cell::new(0),
             memory_writes: Cell::new(0),
             memory_write_behaviors: VecDeque::new(),
-            memory_fail_next_remote_state: Cell::new(false),
+            memory_remote_state_failures: Cell::new(0),
             memory_fail_next_conflict_copy: Cell::new(false),
         }
     }
@@ -529,6 +558,11 @@ impl OneDriveVaultSourceProvider {
 
     pub fn fail_next_memory_conflict_copy(&self) {
         self.memory_fail_next_conflict_copy.set(true);
+    }
+
+    pub fn fail_next_memory_remote_state(&self) {
+        self.memory_remote_state_failures
+            .set(self.memory_remote_state_failures.get().saturating_add(1));
     }
 
     pub fn remove_memory_item(&mut self, drive_id: &str, item_id: &str) {
@@ -783,7 +817,10 @@ impl OneDriveVaultSourceProvider {
 
         self.memory_remote_state_reads
             .set(self.memory_remote_state_reads.get() + 1);
-        if self.memory_fail_next_remote_state.replace(false) {
+        let queued_failures = self.memory_remote_state_failures.get();
+        if queued_failures > 0 {
+            self.memory_remote_state_failures
+                .set(queued_failures.saturating_sub(1));
             anyhow::bail!("injected OneDrive readback failure");
         }
         let item = self.item(drive_id, item_id)?;
@@ -862,13 +899,13 @@ impl OneDriveVaultSourceProvider {
                     OneDriveMemoryWriteBehavior::OutcomeUnknownCommittedReadbackUnavailable => {
                         item.bytes = bytes.to_vec();
                         item.revision += 1;
-                        self.memory_fail_next_remote_state.set(true);
+                        self.fail_next_memory_remote_state();
                         return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
                             message: "injected ambiguous committed write".into(),
                         });
                     }
                     OneDriveMemoryWriteBehavior::OutcomeUnknownNotCommittedReadbackUnavailable => {
-                        self.memory_fail_next_remote_state.set(true);
+                        self.fail_next_memory_remote_state();
                         return Ok(OneDriveConditionalWriteOutcome::OutcomeUnknown {
                             message: "injected ambiguous uncommitted write".into(),
                         });
@@ -1257,6 +1294,227 @@ impl OneDriveVaultSourceProvider {
     }
 }
 
+impl OneDriveProvider<'_> {
+    pub(crate) fn revision_for_state(
+        state: &OneDriveRemoteState,
+    ) -> Result<ProviderRevision, ProviderError> {
+        if state.e_tag.is_none() && state.memory_revision.is_none() {
+            return Err(ProviderError::Unavailable {
+                message: "OneDrive snapshot did not include conditional-commit evidence".into(),
+            });
+        }
+        Self::encode_revision(OneDriveProviderRevision {
+            e_tag: state.e_tag.clone(),
+            memory_revision: state.memory_revision,
+        })
+    }
+
+    pub(crate) fn read_from_state(
+        &mut self,
+        state: &OneDriveRemoteState,
+    ) -> Result<ProviderSnapshot, ProviderError> {
+        let revision = Self::revision_for_state(state)?;
+        let snapshot = self
+            .source
+            .read_snapshot_from_state(&self.drive_id, &self.item_id, state)
+            .map_err(Self::read_error)?;
+        Ok(ProviderSnapshot {
+            identity: snapshot.fingerprint,
+            cache_validation_token: state.e_tag.clone(),
+            bytes: snapshot.bytes,
+            revision,
+        })
+    }
+
+    pub(crate) fn read_runtime_snapshot_from_state(
+        &mut self,
+        state: &OneDriveRemoteState,
+    ) -> Result<OneDriveSnapshot, ProviderError> {
+        let ProviderSnapshot {
+            bytes,
+            identity: fingerprint,
+            ..
+        } = self.read_from_state(state)?;
+        let account_label = if self.source.memory_mode {
+            self.source
+                .item(&self.drive_id, &self.item_id)
+                .map_err(Self::read_error)?
+                .account_label
+                .clone()
+        } else {
+            "OneDrive".into()
+        };
+        Ok(OneDriveSnapshot {
+            bytes,
+            fingerprint,
+            name: state.name.clone(),
+            account_label,
+        })
+    }
+
+    fn encode_revision(
+        revision: OneDriveProviderRevision,
+    ) -> Result<ProviderRevision, ProviderError> {
+        let encoded =
+            serde_json::to_vec(&revision).map_err(|error| ProviderError::Unavailable {
+                message: format!("failed to encode OneDrive Provider Revision: {error}"),
+            })?;
+        let mut bytes = Vec::with_capacity(ONEDRIVE_PROVIDER_REVISION_PREFIX.len() + encoded.len());
+        bytes.extend_from_slice(ONEDRIVE_PROVIDER_REVISION_PREFIX);
+        bytes.extend_from_slice(&encoded);
+        Ok(ProviderRevision::from_opaque_bytes(bytes))
+    }
+
+    fn decode_revision(
+        revision: &ProviderRevision,
+    ) -> Result<OneDriveProviderRevision, ProviderError> {
+        let encoded = revision
+            .opaque_bytes()
+            .strip_prefix(ONEDRIVE_PROVIDER_REVISION_PREFIX)
+            .ok_or_else(|| ProviderError::StaleRevision {
+                message: "the expected revision belongs to another Provider".into(),
+            })?;
+        serde_json::from_slice(encoded).map_err(|_| ProviderError::StaleRevision {
+            message: "the expected OneDrive revision is invalid".into(),
+        })
+    }
+
+    pub(crate) fn observed_state(
+        revision: &ProviderRevision,
+    ) -> Result<OneDriveRemoteState, ProviderError> {
+        let revision = Self::decode_revision(revision)?;
+        Ok(OneDriveRemoteState {
+            name: String::new(),
+            size: None,
+            e_tag: revision.e_tag,
+            download_url: None,
+            memory_revision: revision.memory_revision,
+        })
+    }
+
+    fn read_error(error: anyhow::Error) -> ProviderError {
+        if is_onedrive_item_not_found(&error) {
+            ProviderError::NotFound {
+                message: format!("{error:#}"),
+            }
+        } else {
+            ProviderError::Unavailable {
+                message: format!("{error:#}"),
+            }
+        }
+    }
+}
+
+impl Provider for OneDriveProvider<'_> {
+    fn read(&mut self) -> Result<ProviderSnapshot, ProviderError> {
+        let state = self
+            .source
+            .remote_state(&self.drive_id, &self.item_id)
+            .map_err(OneDriveProvider::read_error)?;
+        self.read_from_state(&state)
+    }
+
+    fn publish(
+        &mut self,
+        expected: &ProviderRevision,
+        bytes: &[u8],
+    ) -> Result<ProviderCommit, ProviderError> {
+        let observed = Self::observed_state(expected)?;
+        let outcome = self
+            .source
+            .conditional_write(&self.drive_id, &self.item_id, bytes, &observed)
+            .map_err(|error| ProviderError::Unavailable {
+                message: error.to_string(),
+            })?;
+        match outcome {
+            OneDriveConditionalWriteOutcome::Committed { fingerprint, e_tag } => {
+                let cache_validation_token = e_tag.clone();
+                let revision = if self.source.memory_mode {
+                    Self::encode_revision(OneDriveProviderRevision {
+                        e_tag: None,
+                        memory_revision: fingerprint.observation_marker,
+                    })?
+                } else if e_tag.is_some() {
+                    Self::encode_revision(OneDriveProviderRevision {
+                        e_tag,
+                        memory_revision: None,
+                    })?
+                } else {
+                    let state = self
+                        .source
+                        .remote_state(&self.drive_id, &self.item_id)
+                        .map_err(|error| ProviderError::OutcomeUnknown {
+                            message: format!(
+                                "OneDrive accepted Publication but its resulting revision could not be confirmed: {error:#}"
+                            ),
+                        })?;
+                    Self::revision_for_state(&state)?
+                };
+                Ok(ProviderCommit {
+                    revision,
+                    identity: fingerprint,
+                    cache_validation_token,
+                    warnings: Vec::new(),
+                })
+            }
+            OneDriveConditionalWriteOutcome::PreconditionFailed => {
+                Err(ProviderError::StaleRevision {
+                    message: "OneDrive rejected the expected remote revision".into(),
+                })
+            }
+            OneDriveConditionalWriteOutcome::OutcomeUnknown { message } => {
+                Err(ProviderError::OutcomeUnknown { message })
+            }
+        }
+    }
+
+    fn preserve_conflict_copy(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ProviderConflictCopy, ProviderError> {
+        let state = self
+            .source
+            .remote_state(&self.drive_id, &self.item_id)
+            .map_err(OneDriveProvider::read_error)?;
+        let name = conflict_copy_name(&state.name, bytes);
+        let item = self
+            .source
+            .upload_sibling_conflict_copy(&self.drive_id, &self.item_id, &name, bytes)
+            .map_err(|error| {
+                if is_onedrive_item_not_found(&error) {
+                    ProviderError::NotFound {
+                        message: format!("{error:#}"),
+                    }
+                } else {
+                    ProviderError::OutcomeUnknown {
+                        message: format!(
+                            "OneDrive Conflict Copy outcome could not be confirmed: {error:#}"
+                        ),
+                    }
+                }
+            })?;
+        Ok(ProviderConflictCopy {
+            identity: item.item_id,
+            display_name: item.name,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn conflict_copy_name(display_name: &str, bytes: &[u8]) -> String {
+    let path = std::path::Path::new(display_name);
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("vault");
+    let digest = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("{stem} (VaultKern conflict {digest}).kdbx")
+}
+
 fn load_refresh_token_state(
     refresh_token_store: &dyn OneDriveRefreshTokenStore,
 ) -> (Option<OneDriveTokenState>, Option<String>) {
@@ -1275,7 +1533,7 @@ fn load_refresh_token_state(
     }
 }
 
-fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> VaultSourceFingerprint {
+fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> ContentIdentity {
     let mut hasher = Sha256::new();
     hasher.update(&item.bytes);
     let content_sha256 = hasher
@@ -1283,10 +1541,10 @@ fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> VaultSourceFingerpr
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    VaultSourceFingerprint {
+    ContentIdentity {
         content_sha256,
         size_bytes: item.bytes.len() as u64,
-        modified_at: Some(item.revision),
+        observation_marker: Some(item.revision),
     }
 }
 
@@ -1422,7 +1680,7 @@ fn callback_response(status: &str, body: &str) -> String {
     )
 }
 
-fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> VaultSourceFingerprint {
+fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> ContentIdentity {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let content_sha256 = hasher
@@ -1430,10 +1688,10 @@ fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> VaultSourceFi
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    VaultSourceFingerprint {
+    ContentIdentity {
         content_sha256,
         size_bytes: bytes.len() as u64,
-        modified_at: etag.map(stable_u64_for_text),
+        observation_marker: etag.map(stable_u64_for_text),
     }
 }
 

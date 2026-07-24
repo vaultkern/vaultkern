@@ -135,8 +135,6 @@ fn run_loop_with_io_with_limit(
                     RuntimeProtocolDispatch::Dispatch(command) => command,
                 };
                 let outcome = handle_command_response(&mut runtime, command);
-                #[cfg(debug_assertions)]
-                maybe_abort_after_autofill_source_commit(&outcome.response);
                 write_native_message(stdout, &outcome.response, request_id.as_deref())?;
                 if outcome.fatal {
                     return Ok(());
@@ -171,64 +169,6 @@ struct CommandOutcome {
 
 fn handle_command_response(runtime: &mut Runtime, command: RuntimeCommand) -> CommandOutcome {
     command_response_from_result(|| runtime.handle(command))
-}
-
-#[cfg(debug_assertions)]
-const AUTOFILL_SOURCE_COMMIT_CRASH_MARKER_ENV: &str =
-    "VAULTKERN_TEST_CRASH_AFTER_AUTOFILL_SOURCE_COMMIT_MARKER";
-
-#[cfg(any(debug_assertions, test))]
-fn is_committed_autofill_source_response(response: &RuntimeResponse) -> bool {
-    matches!(
-        response,
-        RuntimeResponse::AutofillPersistResult(result)
-            if matches!(
-                result.outcome,
-                vaultkern_runtime_protocol::AutofillPersistOutcomeDto::Durable {
-                    disposition: vaultkern_runtime_protocol::AutofillPersistDispositionDto::Committed,
-                    durability: vaultkern_runtime_protocol::AutofillPersistDurabilityDto::Source,
-                    ..
-                }
-            )
-    )
-}
-
-#[cfg(any(debug_assertions, test))]
-fn claim_autofill_source_commit_crash_marker(
-    response: &RuntimeResponse,
-    marker_path: &std::path::Path,
-) -> std::io::Result<bool> {
-    let RuntimeResponse::AutofillPersistResult(result) = response else {
-        return Ok(false);
-    };
-    if !is_committed_autofill_source_response(response) {
-        return Ok(false);
-    }
-
-    let mut marker = match std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(marker_path)
-    {
-        Ok(marker) => marker,
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    writeln!(marker, "{}:{}", result.transaction_id, result.operation_id)?;
-    marker.sync_all()?;
-    Ok(true)
-}
-
-#[cfg(debug_assertions)]
-fn maybe_abort_after_autofill_source_commit(response: &RuntimeResponse) {
-    let Some(marker_path) = std::env::var_os(AUTOFILL_SOURCE_COMMIT_CRASH_MARKER_ENV) else {
-        return;
-    };
-    if claim_autofill_source_commit_crash_marker(response, std::path::Path::new(&marker_path))
-        .unwrap_or(false)
-    {
-        std::process::abort();
-    }
 }
 
 fn command_response_from_result(run: impl FnOnce() -> Result<RuntimeResponse>) -> CommandOutcome {
@@ -538,105 +478,16 @@ unsafe extern "C" {
 #[cfg(test)]
 mod tests {
     use anyhow::Context;
-    use vaultkern_runtime_protocol::{
-        AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistDispositionDto,
-        AutofillPersistDurabilityDto, AutofillPersistOutcomeDto, AutofillPersistResultDto,
-        RuntimeCommand, RuntimeResponse,
-    };
+    use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse};
 
     use super::{
-        MAX_NATIVE_RESPONSE_BYTES, NativeMessage, claim_autofill_source_commit_crash_marker,
-        command_response_from_result, configure_stdio_for_native_messaging, encode_native_response,
-        format_error_chain, handle_command_response, is_committed_autofill_source_response,
-        native_message_length_prefix, read_native_message_or_eof_with_limit,
-        request_id_from_native_payload, run_loop_with_io, run_loop_with_io_with_limit,
-        write_chunked_native_message, write_native_message,
+        MAX_NATIVE_RESPONSE_BYTES, NativeMessage, command_response_from_result,
+        configure_stdio_for_native_messaging, encode_native_response, format_error_chain,
+        handle_command_response, native_message_length_prefix,
+        read_native_message_or_eof_with_limit, request_id_from_native_payload, run_loop_with_io,
+        run_loop_with_io_with_limit, write_chunked_native_message, write_native_message,
     };
     use crate::{Runtime, RuntimeProtocolSession};
-
-    fn durable_autofill_response(
-        disposition: AutofillPersistDispositionDto,
-        durability: AutofillPersistDurabilityDto,
-    ) -> RuntimeResponse {
-        RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
-            transaction_id: "transaction-crash-proof".into(),
-            operation_id: "operation-crash-proof".into(),
-            vault_id: "vault-crash-proof".into(),
-            outcome: AutofillPersistOutcomeDto::Durable {
-                disposition,
-                entry_id: "entry-crash-proof".into(),
-                durability,
-                cache_state: AutofillCacheStateDto::Current,
-                committed_fingerprint: AutofillCommittedFingerprintDto {
-                    content_sha256: "00".repeat(32),
-                    size_bytes: 42,
-                },
-                merge_summary: None,
-                receipt_version: 1,
-            },
-        })
-    }
-
-    #[test]
-    fn crash_hook_matches_only_new_source_commits() {
-        assert!(is_committed_autofill_source_response(
-            &durable_autofill_response(
-                AutofillPersistDispositionDto::Committed,
-                AutofillPersistDurabilityDto::Source,
-            )
-        ));
-        assert!(!is_committed_autofill_source_response(
-            &durable_autofill_response(
-                AutofillPersistDispositionDto::Replayed,
-                AutofillPersistDurabilityDto::Source,
-            )
-        ));
-        assert!(!is_committed_autofill_source_response(
-            &durable_autofill_response(
-                AutofillPersistDispositionDto::Committed,
-                AutofillPersistDurabilityDto::PendingRemoteCache,
-            )
-        ));
-        assert!(!is_committed_autofill_source_response(
-            &RuntimeResponse::Error(vaultkern_runtime_protocol::ErrorDto {
-                code: "persist_failed".into(),
-                message: "not durable".into(),
-            })
-        ));
-    }
-
-    #[test]
-    fn crash_marker_is_claimed_and_synced_at_most_once() {
-        let directory = std::env::temp_dir().join(format!(
-            "vaultkern-command-loop-crash-marker-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("clock after epoch")
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&directory).expect("create marker directory");
-        let marker = directory.join("committed.marker");
-        let response = durable_autofill_response(
-            AutofillPersistDispositionDto::Committed,
-            AutofillPersistDurabilityDto::Source,
-        );
-
-        assert!(
-            claim_autofill_source_commit_crash_marker(&response, &marker)
-                .expect("claim first marker")
-        );
-        assert_eq!(
-            std::fs::read_to_string(&marker).expect("read crash marker"),
-            "transaction-crash-proof:operation-crash-proof\n"
-        );
-        assert!(
-            !claim_autofill_source_commit_crash_marker(&response, &marker)
-                .expect("existing marker must be a no-op")
-        );
-
-        std::fs::remove_dir_all(directory).expect("remove marker directory");
-    }
 
     #[test]
     fn configures_stdio_before_native_message_loop() {
@@ -821,7 +672,7 @@ mod tests {
     #[test]
     fn native_message_loop_serializes_decode_errors_without_exiting_the_host() {
         let invalid_command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": "future-command",
             "command": { "type": "future_runtime_command" }
         });
@@ -858,7 +709,7 @@ mod tests {
     fn malformed_native_messages_extract_only_a_bounded_request_id() {
         let secret = "malformed-command-secret-must-not-be-retained";
         let invalid_command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": "request-1",
             "command": {
                 "type": "future_runtime_command",
@@ -874,7 +725,7 @@ mod tests {
 
         let oversized_request_id = "r".repeat(super::MAX_NATIVE_REQUEST_ID_BYTES + 1);
         let invalid_command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": oversized_request_id,
             "command": {
                 "type": "future_runtime_command",
@@ -888,7 +739,7 @@ mod tests {
     #[test]
     fn native_message_loop_echoes_request_id_in_response() {
         let command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": "request-1",
             "command": { "type": "get_session_state" }
         });

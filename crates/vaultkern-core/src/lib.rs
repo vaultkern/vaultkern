@@ -2,6 +2,10 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
+pub mod vault_codec;
+pub use vault_codec::{
+    EncodedVault, KdbxVaultCodec, VAULTKERN_KDBX_GENERATOR, VaultCodec, enforce_history_limits,
+};
 pub use vaultkern_crypto::{CompositeKey, CryptoError, KdfProfile, parse_key_file_bytes};
 pub use vaultkern_kdbx::{
     Compression, ExternalKdfAlgorithm, ExternalKdfConfirmation, ExternalKdfDecision,
@@ -20,9 +24,53 @@ pub use vaultkern_model::{
     GroupTimes, MemoryProtection, ModelError, PasskeyRecord, ThreeWayPatchError,
     ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, ThreeWayPatchResult, TotpAlgorithm,
     TotpSpec, Vault, is_totp_persistent_attribute_key, prepare_entry_history_snapshot,
-    three_way_field_patch,
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Vault metadata written by the retired browser atomic-persist implementation.
+///
+/// This key is migration-only. New candidates must never retain or create it.
+pub const RETIRED_AUTOFILL_RECEIPT_KEY: &str = "io.vaultkern.autofill.persist.receipts.v1";
+
+/// Removes retired Runtime-owned metadata before a vault participates in
+/// reconciliation or serialization.
+pub fn strip_retired_runtime_metadata(vault: &mut Vault) {
+    let removed = vault
+        .meta_custom_data
+        .remove(RETIRED_AUTOFILL_RECEIPT_KEY)
+        .is_some();
+    let retained_in_blocks = vault.meta_custom_data_blocks.iter().any(|block| {
+        block
+            .items
+            .iter()
+            .any(|item| item.key == RETIRED_AUTOFILL_RECEIPT_KEY)
+    });
+    if removed || retained_in_blocks {
+        canonicalize_custom_data_blocks(
+            &mut vault.meta_custom_data_blocks,
+            &mut vault.meta_opaque_xml,
+            &mut vault.meta_raw_state.node_order,
+            &vault.meta_custom_data,
+            None,
+        );
+    }
+}
+
+/// Applies the local field patch while excluding retired Runtime bookkeeping
+/// from all three domain snapshots.
+pub fn three_way_field_patch(
+    base: &Vault,
+    local: &Vault,
+    remote: &Vault,
+) -> Result<ThreeWayPatchResult, ThreeWayPatchError> {
+    let mut base = base.clone();
+    let mut local = local.clone();
+    let mut remote = remote.clone();
+    for vault in [&mut base, &mut local, &mut remote] {
+        strip_retired_runtime_metadata(vault);
+    }
+    vaultkern_model::three_way_field_patch(&base, &local, &remote)
+}
 
 #[derive(Clone, PartialEq, Eq)]
 pub struct Attachment {
@@ -1237,7 +1285,9 @@ impl KeepassCore {
         composite_key: &CompositeKey,
         profile: SaveProfile,
     ) -> Result<Vec<u8>, vaultkern_kdbx::KdbxError> {
-        save_kdbx_bytes(vault, composite_key, &profile)
+        KdbxVaultCodec
+            .encode_with_composite_key(vault.clone(), composite_key, profile)
+            .map(|encoded| encoded.bytes)
     }
 
     pub fn save_kdbx_with_stable_profile(
@@ -1254,7 +1304,12 @@ impl KeepassCore {
         bytes: &[u8],
         composite_key: &CompositeKey,
     ) -> Result<Vault, vaultkern_kdbx::KdbxError> {
-        load_kdbx_bytes(bytes, composite_key)
+        KdbxVaultCodec.decode_with_policy(
+            bytes,
+            composite_key,
+            &ExternalKdfPolicy::Mobile,
+            ExternalKdfConfirmation::Unconfirmed,
+        )
     }
 
     pub fn load_kdbx_with_policy(
@@ -1264,7 +1319,7 @@ impl KeepassCore {
         policy: &dyn KdfPolicyEvaluator,
         confirmation: ExternalKdfConfirmation,
     ) -> Result<Vault, vaultkern_kdbx::KdbxError> {
-        load_kdbx_with_policy(bytes, composite_key, policy, confirmation)
+        KdbxVaultCodec.decode_with_policy(bytes, composite_key, policy, confirmation)
     }
 
     pub fn inspect_kdbx_header(
@@ -3389,7 +3444,29 @@ impl KeepassCore {
     ) -> Result<EntryView, MutationError> {
         let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
             .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
-        entry.history.clear();
+        prepare_entry_history_snapshot(entry);
+        Ok(project_entry(entry))
+    }
+
+    pub fn restore_entry_history(
+        &self,
+        vault: &mut Vault,
+        entry_id: &str,
+        history_index: usize,
+    ) -> Result<EntryView, MutationError> {
+        let entry = find_entry_by_id_mut(&mut vault.root, entry_id)
+            .ok_or_else(|| MutationError::EntryNotFound(entry_id.into()))?;
+        let mut restored = entry
+            .history
+            .get(history_index)
+            .cloned()
+            .ok_or(MutationError::HistoryIndexOutOfBounds(history_index))?;
+        let retained_history = std::mem::take(&mut entry.history);
+        restored.id = entry.id;
+        restored.previous_parent = entry.previous_parent;
+        restored.location_changed_at = entry.location_changed_at;
+        restored.history = retained_history;
+        *entry = restored;
         Ok(project_entry(entry))
     }
 
@@ -3500,7 +3577,8 @@ impl KeepassCore {
         confirmation: ExternalKdfConfirmation,
     ) -> Result<LoadedDatabase, CoreError> {
         let header = inspect_kdbx_header(bytes)?;
-        let vault = load_kdbx_with_policy(bytes, composite_key, policy, confirmation)?;
+        let vault =
+            KdbxVaultCodec.decode_with_policy(bytes, composite_key, policy, confirmation)?;
         Ok(LoadedDatabase {
             summary: summarize_vault(&vault),
             inspection: build_inspection(header),
@@ -3529,7 +3607,8 @@ impl KeepassCore {
         confirmation: ExternalKdfConfirmation,
     ) -> Result<LoadedDatabaseView, CoreError> {
         let header = inspect_kdbx_header(bytes)?;
-        let vault = load_kdbx_with_policy(bytes, composite_key, policy, confirmation)?;
+        let vault =
+            KdbxVaultCodec.decode_with_policy(bytes, composite_key, policy, confirmation)?;
         Ok(LoadedDatabaseView {
             database: project_vault(&vault),
             inspection: build_inspection(header),
@@ -5288,6 +5367,131 @@ mod internal_tests {
     }
 
     #[test]
+    fn history_clear_removes_history_fidelity_with_anchor_mapping() {
+        let auto_type_anchor = vaultkern_model::OpaqueXmlAnchor {
+            element_name: "AutoType".into(),
+            occurrence: 1,
+        };
+        let mut entry = Entry::new("current");
+        let entry_id = entry.id.to_string();
+        let mut snapshot = entry.clone();
+        super::prepare_entry_history_snapshot(&mut snapshot);
+        entry.history.push(snapshot);
+        entry.raw_state.has_history_node = true;
+        entry.raw_state.node_order = vec!["AutoType".into(), "History".into()];
+        entry.opaque_xml = vec![vaultkern_model::OpaqueXmlFragment {
+            xml: "<AfterHistory />".into(),
+            after: Some(vaultkern_model::OpaqueXmlAnchor {
+                element_name: "History".into(),
+                occurrence: 1,
+            }),
+        }];
+        let mut vault = Vault::empty("clear");
+        vault.root.entries.push(entry);
+
+        KeepassCore::new()
+            .clear_entry_history(&mut vault, &entry_id)
+            .expect("clear entry history");
+
+        let entry = &vault.root.entries[0];
+        assert!(entry.history.is_empty());
+        assert!(!entry.raw_state.has_history_node);
+        assert_eq!(entry.raw_state.node_order, ["AutoType"]);
+        assert_eq!(entry.opaque_xml[0].after.as_ref(), Some(&auto_type_anchor));
+    }
+
+    #[test]
+    fn history_restore_keeps_current_entry_lineage() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("History");
+        let mut entry = Entry::new("Current");
+        let entry_id = entry.id.to_string();
+        let current_id = entry.id;
+        let current_previous_parent = Uuid::from_u128(10);
+        entry.previous_parent = Some(current_previous_parent);
+        entry.location_changed_at = Some(200);
+        let mut snapshot = entry.clone();
+        snapshot.id = Uuid::from_u128(20);
+        snapshot.title = "Older".into();
+        snapshot.username = "historic-user".into();
+        snapshot.previous_parent = Some(Uuid::from_u128(30));
+        snapshot.location_changed_at = Some(100);
+        snapshot.history.clear();
+        entry.history.push(snapshot);
+        vault.root.entries.push(entry);
+
+        let restored = core
+            .restore_entry_history(&mut vault, &entry_id, 0)
+            .expect("restore history");
+        let entry = &vault.root.entries[0];
+
+        assert_eq!(restored.id, entry_id);
+        assert_eq!(restored.title, "Older");
+        assert_eq!(restored.history_count, 1);
+        assert_eq!(entry.id, current_id);
+        assert_eq!(entry.username, "historic-user");
+        assert_eq!(entry.previous_parent, Some(current_previous_parent));
+        assert_eq!(entry.location_changed_at, Some(200));
+        assert_eq!(entry.history.len(), 1);
+        assert_eq!(entry.history[0].title, "Older");
+    }
+
+    #[test]
+    fn invalid_history_restore_is_atomic() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("History");
+        let mut entry = Entry::new("Current");
+        let entry_id = entry.id.to_string();
+        let mut snapshot = entry.clone();
+        snapshot.title = "Older".into();
+        snapshot.history.clear();
+        entry.history.push(snapshot);
+        vault.root.entries.push(entry);
+        let before = vault.clone();
+
+        assert_eq!(
+            core.restore_entry_history(&mut vault, &entry_id, 1),
+            Err(MutationError::HistoryIndexOutOfBounds(1))
+        );
+        assert_eq!(vault, before);
+    }
+
+    #[test]
+    fn restored_then_cleared_history_stays_empty_after_kdbx_roundtrip() {
+        let core = KeepassCore::new();
+        let mut vault = Vault::empty("History");
+        let mut entry = Entry::new("Historic");
+        let entry_id = entry.id.to_string();
+        vault.root.entries.push(entry.clone());
+        core.snapshot_entry_to_history(&mut vault, &entry_id)
+            .expect("snapshot historic state");
+        entry = vault.root.entries.remove(0);
+        entry.title = "Current".into();
+        vault.root.entries.push(entry);
+        core.snapshot_entry_to_history(&mut vault, &entry_id)
+            .expect("snapshot current state");
+        core.restore_entry_history(&mut vault, &entry_id, 0)
+            .expect("restore historic state");
+        core.clear_entry_history(&mut vault, &entry_id)
+            .expect("clear restored history");
+
+        let mut key = CompositeKey::default();
+        key.add_password("history-clear");
+        let bytes = core
+            .save_kdbx(&vault, &key, SaveProfile::recommended())
+            .expect("save cleared history");
+        let loaded = core
+            .load_kdbx(&bytes, &key)
+            .expect("reload cleared history");
+
+        assert!(
+            core.list_entry_history(&loaded, &entry_id)
+                .expect("list cleared history")
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn core_load_facades_require_an_external_kdf_policy_decision() {
         let core = KeepassCore::new();
         let key = CompositeKey::default();
@@ -5786,6 +5990,37 @@ mod internal_tests {
             url: "https://example.com/login".into(),
             notes: "planned UUID".into(),
         }
+    }
+
+    #[test]
+    fn retired_autofill_receipts_do_not_participate_in_domain_reconciliation() {
+        let mut base = Vault::empty("Retired runtime metadata");
+        base.meta_custom_data.insert(
+            super::RETIRED_AUTOFILL_RECEIPT_KEY.into(),
+            r#"{"version":1,"receipts":[{"operationId":"base"}]}"#.into(),
+        );
+        let mut local = base.clone();
+        let mut remote = base.clone();
+        local.meta_custom_data.insert(
+            super::RETIRED_AUTOFILL_RECEIPT_KEY.into(),
+            r#"{"version":1,"receipts":[{"operationId":"local"}]}"#.into(),
+        );
+        remote.meta_custom_data.insert(
+            super::RETIRED_AUTOFILL_RECEIPT_KEY.into(),
+            r#"{"version":1,"receipts":[{"operationId":"remote"}]}"#.into(),
+        );
+        local.name = "Local edit".into();
+
+        let patched = super::three_way_field_patch(&base, &local, &remote)
+            .expect("retired runtime metadata must not conflict");
+
+        assert_eq!(patched.vault.name, "Local edit");
+        assert!(
+            !patched
+                .vault
+                .meta_custom_data
+                .contains_key(super::RETIRED_AUTOFILL_RECEIPT_KEY)
+        );
     }
 }
 

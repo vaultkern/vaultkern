@@ -93,9 +93,6 @@ const unsupportedClient = {
   setEntryPasskey: unsupported,
   clearEntryPasskey: unsupported,
   deleteEntry: unsupported,
-  async saveVault() {
-    return { type: "save_vault_result" as const, status: "saved" as const };
-  },
   getDatabaseSettings: unsupported,
   updateDatabaseSettings: unsupported,
   getEntryAttachmentContent: unsupported,

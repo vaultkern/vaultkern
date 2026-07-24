@@ -1056,14 +1056,14 @@ mod tests {
 
         let bridge = RuntimeBridge::new_for_tests();
         bridge.request(json!({
-            "version": 2,
+            "version": 3,
             "command": {
                 "type": "add_local_vault_reference",
                 "path": database_path.to_string_lossy()
             }
         }));
         bridge.request(json!({
-            "version": 2,
+            "version": 3,
             "command": {
                 "type": "unlock_current_vault",
                 "password": "demo-password",

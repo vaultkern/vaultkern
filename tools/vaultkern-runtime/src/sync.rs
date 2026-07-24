@@ -177,66 +177,6 @@ impl SyncedBaseStore {
     }
 }
 
-pub(crate) fn write_local_conflict_copy(
-    source_path: &Path,
-    bytes: &[u8],
-    timestamp: u64,
-) -> io::Result<PathBuf> {
-    let source_path = match fs::canonicalize(source_path) {
-        Ok(source_path) => source_path,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            let parent = source_path.parent().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent")
-            })?;
-            let file_name = source_path.file_name().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no file name")
-            })?;
-            fs::canonicalize(parent)?.join(file_name)
-        }
-        Err(error) => return Err(error),
-    };
-    let parent = source_path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent"))?;
-    let stem = source_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("vault");
-    let faults = DurableFaultInjector::default();
-
-    for collision in 0..128u32 {
-        let suffix = if collision == 0 {
-            String::new()
-        } else {
-            format!("-{collision}")
-        };
-        let target = parent.join(format!(
-            "{stem} (VaultKern conflict {timestamp}{suffix}).kdbx"
-        ));
-        let temp = write_verified_temp(&target, bytes, &faults, BASE_WRITE_POINTS)?;
-        match publish_temp(
-            temp,
-            &target,
-            TargetExpectation::Missing,
-            None,
-            &faults,
-            DurableFaultPoint::BeforeGenerationPublish,
-            DurableFaultPoint::GenerationPublished,
-            DurableFaultPoint::GenerationParentSynced,
-        ) {
-            Ok(()) => return Ok(target),
-            Err(error) if error.target_conflict => continue,
-            Err(error) => return Err(error.source),
-        }
-    }
-
-    Err(io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        "could not allocate a unique conflict-copy path",
-    ))
-}
-
 pub(crate) fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
     let expectation = match fs::symlink_metadata(target) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => TargetExpectation::Missing,
@@ -286,7 +226,7 @@ pub(crate) fn durable_replace(target: &Path, bytes: &[u8]) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BASE_WRITE_POINTS, SyncedBaseStore, write_local_conflict_copy};
+    use super::{BASE_WRITE_POINTS, SyncedBaseStore};
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, TargetExpectation,
         publish_temp, write_verified_temp,
@@ -333,32 +273,6 @@ mod tests {
             .expect("synced-base contender waited indefinitely for the held lock")
             .expect_err("synced-base contender unexpectedly acquired the held lock");
         assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
-    }
-
-    #[test]
-    fn conflict_copy_is_a_durable_kdbx_sibling() {
-        let dir = tempfile::tempdir().unwrap();
-        let source = dir.path().join("personal.kdbx");
-        std::fs::write(&source, b"remote-head").unwrap();
-
-        let copy = write_local_conflict_copy(&source, b"local-edits", 1_784_439_300).unwrap();
-
-        assert_eq!(
-            copy.parent(),
-            std::fs::canonicalize(&source).unwrap().parent()
-        );
-        assert_eq!(
-            copy.extension().and_then(|value| value.to_str()),
-            Some("kdbx")
-        );
-        assert!(
-            copy.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .contains("VaultKern conflict")
-        );
-        assert_eq!(std::fs::read(&copy).unwrap(), b"local-edits");
-        assert_eq!(std::fs::read(&source).unwrap(), b"remote-head");
     }
 
     #[test]

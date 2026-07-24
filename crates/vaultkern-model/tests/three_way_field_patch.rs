@@ -705,6 +705,85 @@ fn same_field_timestamp_tie_keeps_remote() {
 }
 
 #[test]
+fn one_sided_history_clear_is_not_reintroduced_by_the_untouched_peer() {
+    let (mut base, entry_id) = base_vault();
+    let mut snapshot = entry(&base.root, entry_id).unwrap().clone();
+    snapshot.title = "Historic".into();
+    snapshot.history.clear();
+    entry_mut(&mut base.root, entry_id)
+        .unwrap()
+        .history
+        .push(snapshot);
+
+    let mut local_clear = base.clone();
+    entry_mut(&mut local_clear.root, entry_id)
+        .unwrap()
+        .history
+        .clear();
+    let patched = three_way_field_patch(&base, &local_clear, &base).unwrap();
+    assert!(
+        entry(&patched.vault.root, entry_id)
+            .unwrap()
+            .history
+            .is_empty()
+    );
+
+    let mut remote_clear = base.clone();
+    entry_mut(&mut remote_clear.root, entry_id)
+        .unwrap()
+        .history
+        .clear();
+    let patched = three_way_field_patch(&base, &base, &remote_clear).unwrap();
+    assert!(
+        entry(&patched.vault.root, entry_id)
+            .unwrap()
+            .history
+            .is_empty()
+    );
+}
+
+#[test]
+fn concurrent_history_additions_still_form_a_lossless_union() {
+    let (mut base, entry_id) = base_vault();
+    let mut base_snapshot = entry(&base.root, entry_id).unwrap().clone();
+    base_snapshot.title = "Base history".into();
+    base_snapshot.history.clear();
+    entry_mut(&mut base.root, entry_id)
+        .unwrap()
+        .history
+        .push(base_snapshot);
+
+    let mut local = base.clone();
+    let mut local_snapshot = entry(&local.root, entry_id).unwrap().clone();
+    local_snapshot.title = "Local history".into();
+    local_snapshot.history.clear();
+    entry_mut(&mut local.root, entry_id)
+        .unwrap()
+        .history
+        .push(local_snapshot);
+
+    let mut remote = base.clone();
+    let mut remote_snapshot = entry(&remote.root, entry_id).unwrap().clone();
+    remote_snapshot.title = "Remote history".into();
+    remote_snapshot.history.clear();
+    entry_mut(&mut remote.root, entry_id)
+        .unwrap()
+        .history
+        .push(remote_snapshot);
+
+    let patched = three_way_field_patch(&base, &local, &remote).unwrap();
+    let titles = entry(&patched.vault.root, entry_id)
+        .unwrap()
+        .history
+        .iter()
+        .map(|snapshot| snapshot.title.as_str())
+        .collect::<Vec<_>>();
+    assert!(titles.contains(&"Base history"));
+    assert!(titles.contains(&"Local history"));
+    assert!(titles.contains(&"Remote history"));
+}
+
+#[test]
 fn edit_beats_delete_but_untouched_peer_allows_delete() {
     let (base, entry_id) = base_vault();
     let mut local_edit = base.clone();

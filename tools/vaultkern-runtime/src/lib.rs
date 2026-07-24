@@ -1,4 +1,3 @@
-mod autofill_persist;
 mod command_loop;
 mod match_fill;
 pub mod native_host;
@@ -8,10 +7,14 @@ mod providers;
 #[cfg(any(windows, test))]
 pub mod resident_ipc;
 mod runtime;
+mod runtime_api;
+mod runtime_dispatch;
 mod session;
 mod state_paths;
 mod sync;
 mod unlock;
+mod vault_core;
+mod vault_format;
 mod vault_reference_store;
 
 pub use command_loop::{
@@ -24,7 +27,16 @@ pub use passkey::{
 };
 pub use protocol_session::{RuntimeProtocolDispatch, RuntimeProtocolSession};
 pub use providers::biometric::BiometricProvider;
+pub use providers::local_file::LocalFileProvider;
+pub use providers::memory::InMemoryProvider;
+pub use providers::onedrive::{
+    OneDriveMemoryWriteBehavior, OneDriveProvider, OneDriveVaultSourceProvider,
+};
 pub use providers::onedrive_token_store::OneDriveRefreshTokenStore;
+pub use providers::provider::{
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
+};
 pub use providers::secure_storage::{SecureStorageError, SecureStorageProvider};
 pub use runtime::{
     ExternalKdfDisposition, ExternalKdfFailure, QuickUnlockOutcome,

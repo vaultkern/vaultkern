@@ -10,10 +10,10 @@ use vaultkern_runtime_protocol::{
 
 #[test]
 fn runtime_phase_graph_uses_shared_active_transition_contract() {
-    let runtime_source = include_str!("../src/runtime.rs");
+    let vault_core_source = include_str!("../src/vault_core.rs");
     assert!(
-        runtime_source.contains("passkey_ceremony_transitions.json"),
-        "runtime phase graph must include the shared active transition contract"
+        vault_core_source.contains("passkey_ceremony_transitions.json"),
+        "Vault Core phase graph must include the shared active transition contract"
     );
 }
 

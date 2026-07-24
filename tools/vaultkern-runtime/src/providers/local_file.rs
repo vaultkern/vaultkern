@@ -4,35 +4,38 @@ use super::durable_file::{
     path_file_identity, publish_temp, remove_if_exists, sha256_hex, sync_parent,
     sync_published_target, unique_sibling_path, write_verified_temp,
 };
-use serde::{Deserialize, Serialize};
+use super::provider::{
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
+};
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::{self, File, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const LOCAL_WRITER_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const LOCAL_PROVIDER_REVISION_PREFIX: &[u8] = b"local-file:v1:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFileSnapshot {
     pub bytes: Vec<u8>,
-    pub fingerprint: VaultSourceFingerprint,
+    pub fingerprint: ContentIdentity,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultSourceFingerprint {
-    pub content_sha256: String,
-    pub size_bytes: u64,
-    pub modified_at: Option<u64>,
-}
-
+#[derive(Clone)]
 pub struct LocalFileVaultSourceProvider {
     write_faults: DurableFaultInjector,
     writer_lock_timeout: Duration,
     #[cfg(test)]
     before_write: Option<std::sync::Arc<dyn Fn() + Send + Sync>>,
+}
+
+pub struct LocalFileProvider {
+    source: LocalFileVaultSourceProvider,
+    path: PathBuf,
 }
 
 impl Default for LocalFileVaultSourceProvider {
@@ -52,13 +55,13 @@ pub struct LocalFileWriteTxn {
     target: PathBuf,
     initial_file: File,
     initial_identity: DurableFileIdentity,
-    initial_fingerprint: VaultSourceFingerprint,
+    initial_fingerprint: ContentIdentity,
     initial_metadata: Metadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableCommit {
-    pub fingerprint: VaultSourceFingerprint,
+    pub fingerprint: ContentIdentity,
     pub warnings: Vec<String>,
 }
 
@@ -99,6 +102,13 @@ impl std::error::Error for LocalFileCommitError {
 }
 
 impl LocalFileVaultSourceProvider {
+    pub fn bind(&self, path: impl Into<PathBuf>) -> LocalFileProvider {
+        LocalFileProvider {
+            source: self.clone(),
+            path: path.into(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn with_before_write_hook(
         before_write: std::sync::Arc<dyn Fn() + Send + Sync>,
@@ -163,7 +173,7 @@ impl LocalFileVaultSourceProvider {
     pub fn write_if_unchanged(
         &self,
         path: &str,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
     ) -> Result<DurableCommit, LocalFileCommitError> {
         #[cfg(test)]
@@ -173,6 +183,203 @@ impl LocalFileVaultSourceProvider {
         let (transaction, _) = self.begin_write(path).map_err(classify_begin_write_error)?;
         transaction.commit_inner(expected, bytes, &self.write_faults)
     }
+}
+
+impl LocalFileProvider {
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        LocalFileVaultSourceProvider::default().bind(path)
+    }
+
+    fn path(&self) -> Result<&str, ProviderError> {
+        self.path
+            .to_str()
+            .ok_or_else(|| ProviderError::Unavailable {
+                message: "local vault path is not valid UTF-8".into(),
+            })
+    }
+
+    fn revision(fingerprint: &ContentIdentity) -> ProviderRevision {
+        let encoded = serde_json::to_vec(fingerprint).expect("ContentIdentity must serialize");
+        let mut revision = Vec::with_capacity(LOCAL_PROVIDER_REVISION_PREFIX.len() + encoded.len());
+        revision.extend_from_slice(LOCAL_PROVIDER_REVISION_PREFIX);
+        revision.extend_from_slice(&encoded);
+        ProviderRevision::from_opaque_bytes(revision)
+    }
+
+    fn fingerprint(revision: &ProviderRevision) -> Result<ContentIdentity, ProviderError> {
+        let encoded = revision
+            .opaque_bytes()
+            .strip_prefix(LOCAL_PROVIDER_REVISION_PREFIX)
+            .ok_or_else(|| ProviderError::StaleRevision {
+                message: "the expected revision belongs to another Provider".into(),
+            })?;
+        serde_json::from_slice(encoded).map_err(|_| ProviderError::StaleRevision {
+            message: "the expected local-file revision is invalid".into(),
+        })
+    }
+}
+
+impl Provider for LocalFileProvider {
+    fn read(&mut self) -> Result<ProviderSnapshot, ProviderError> {
+        let snapshot =
+            self.source
+                .read_snapshot(self.path()?)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::NotFound => ProviderError::NotFound {
+                        message: error.to_string(),
+                    },
+                    _ => ProviderError::Unavailable {
+                        message: error.to_string(),
+                    },
+                })?;
+        Ok(ProviderSnapshot {
+            revision: Self::revision(&snapshot.fingerprint),
+            identity: snapshot.fingerprint,
+            cache_validation_token: None,
+            bytes: snapshot.bytes,
+        })
+    }
+
+    fn publish(
+        &mut self,
+        expected: &ProviderRevision,
+        bytes: &[u8],
+    ) -> Result<ProviderCommit, ProviderError> {
+        let fingerprint = Self::fingerprint(expected)?;
+        match self
+            .source
+            .write_if_unchanged(self.path()?, &fingerprint, bytes)
+        {
+            Ok(commit) => Ok(ProviderCommit {
+                revision: Self::revision(&commit.fingerprint),
+                identity: commit.fingerprint,
+                cache_validation_token: None,
+                warnings: commit.warnings,
+            }),
+            Err(LocalFileCommitError::Conflict { message }) => {
+                Err(ProviderError::StaleRevision { message })
+            }
+            Err(LocalFileCommitError::BeforePublish { source }) => {
+                Err(ProviderError::Unavailable {
+                    message: format!("local vault write failed before publish: {source}"),
+                })
+            }
+            Err(LocalFileCommitError::OutcomeUnknown { source }) => {
+                match self.source.read_snapshot(self.path()?) {
+                    Ok(snapshot) if snapshot.bytes == bytes => Ok(ProviderCommit {
+                        revision: Self::revision(&snapshot.fingerprint),
+                        identity: snapshot.fingerprint,
+                        cache_validation_token: None,
+                        warnings: vec![format!(
+                            "local vault Publication initially had an unknown outcome but readback confirmed the intended generation: {source}"
+                        )],
+                    }),
+                    Ok(snapshot) if same_content(&snapshot.fingerprint, &fingerprint) => {
+                        Err(ProviderError::Unavailable {
+                            message: format!(
+                                "{source}; readback confirmed that the previous generation remains active"
+                            ),
+                        })
+                    }
+                    Ok(_) => Err(ProviderError::OutcomeUnknown {
+                        message: format!(
+                            "{source}; readback found a third generation instead of either the expected or intended bytes"
+                        ),
+                    }),
+                    Err(readback_error) => Err(ProviderError::OutcomeUnknown {
+                        message: format!(
+                            "{source}; independent outcome readback failed: {readback_error}"
+                        ),
+                    }),
+                }
+            }
+        }
+    }
+
+    fn preserve_conflict_copy(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<ProviderConflictCopy, ProviderError> {
+        let path =
+            write_conflict_copy(&self.path, bytes).map_err(|error| ProviderError::Unavailable {
+                message: format!("failed to preserve local Conflict Copy: {error}"),
+            })?;
+        Ok(ProviderConflictCopy {
+            display_name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("VaultKern conflict.kdbx")
+                .to_owned(),
+            identity: path.to_string_lossy().into_owned(),
+            warnings: Vec::new(),
+        })
+    }
+}
+
+fn write_conflict_copy(source_path: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+    let source_path = match fs::canonicalize(source_path) {
+        Ok(source_path) => source_path,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            let parent = source_path.parent().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent")
+            })?;
+            let file_name = source_path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "vault path has no file name")
+            })?;
+            fs::canonicalize(parent)?.join(file_name)
+        }
+        Err(error) => return Err(error),
+    };
+    let parent = source_path
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "vault path has no parent"))?;
+    let stem = source_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("vault");
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let faults = DurableFaultInjector::default();
+    let points = TempWriteFaultPoints {
+        created: DurableFaultPoint::GenerationTempCreated,
+        written: DurableFaultPoint::GenerationTempWritten,
+        synced: DurableFaultPoint::GenerationTempSynced,
+        verified: DurableFaultPoint::GenerationReadbackVerified,
+    };
+
+    for collision in 0..128u32 {
+        let suffix = if collision == 0 {
+            String::new()
+        } else {
+            format!("-{collision}")
+        };
+        let target = parent.join(format!(
+            "{stem} (VaultKern conflict {timestamp}{suffix}).kdbx"
+        ));
+        let temp = write_verified_temp(&target, bytes, &faults, points)?;
+        match publish_temp(
+            temp,
+            &target,
+            TargetExpectation::Missing,
+            None,
+            &faults,
+            DurableFaultPoint::BeforeGenerationPublish,
+            DurableFaultPoint::GenerationPublished,
+            DurableFaultPoint::GenerationParentSynced,
+        ) {
+            Ok(()) => return Ok(target),
+            Err(error) if error.target_conflict => continue,
+            Err(error) => return Err(error.source),
+        }
+    }
+
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a unique conflict-copy path",
+    ))
 }
 
 fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {
@@ -185,9 +392,10 @@ fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {
 }
 
 impl LocalFileWriteTxn {
+    #[cfg(test)]
     pub fn commit(
         self,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
     ) -> Result<DurableCommit, LocalFileCommitError> {
         self.commit_inner(expected, bytes, &DurableFaultInjector::default())
@@ -196,7 +404,7 @@ impl LocalFileWriteTxn {
     #[cfg(test)]
     fn commit_with_faults(
         self,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
         faults: &DurableFaultInjector,
     ) -> Result<DurableCommit, LocalFileCommitError> {
@@ -205,7 +413,7 @@ impl LocalFileWriteTxn {
 
     fn commit_inner(
         self,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
         faults: &DurableFaultInjector,
     ) -> Result<DurableCommit, LocalFileCommitError> {
@@ -494,7 +702,7 @@ fn reconcile_published_commit(
     target: &Path,
     backup: &Path,
     initial_identity: DurableFileIdentity,
-    initial_fingerprint: &VaultSourceFingerprint,
+    initial_fingerprint: &ContentIdentity,
     intended_bytes: &[u8],
     faults: &DurableFaultInjector,
 ) -> io::Result<DurableCommit> {
@@ -539,7 +747,7 @@ fn rollback_published_commit(
     target: &Path,
     backup: &Path,
     initial_identity: DurableFileIdentity,
-    initial_fingerprint: &VaultSourceFingerprint,
+    initial_fingerprint: &ContentIdentity,
     intended_bytes: &[u8],
     faults: &DurableFaultInjector,
 ) -> io::Result<()> {
@@ -795,7 +1003,7 @@ fn cleanup_pre_publish_hardlink_backups(_target: &Path) -> io::Result<()> {
 fn verify_backup_generation(
     backup: &Path,
     expected_identity: DurableFileIdentity,
-    expected: &VaultSourceFingerprint,
+    expected: &ContentIdentity,
 ) -> io::Result<()> {
     let opened = read_opened_snapshot(backup, false)?;
     #[cfg(unix)]
@@ -815,7 +1023,7 @@ fn verify_backup_generation(
     Ok(())
 }
 
-fn same_content(left: &VaultSourceFingerprint, right: &VaultSourceFingerprint) -> bool {
+fn same_content(left: &ContentIdentity, right: &ContentIdentity) -> bool {
     left.content_sha256 == right.content_sha256 && left.size_bytes == right.size_bytes
 }
 
@@ -1093,17 +1301,17 @@ fn decode_picker_stdout(stdout: Vec<u8>) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn fingerprint_for_bytes(bytes: &[u8], metadata: &std::fs::Metadata) -> VaultSourceFingerprint {
+fn fingerprint_for_bytes(bytes: &[u8], metadata: &std::fs::Metadata) -> ContentIdentity {
     let modified_at = metadata
         .modified()
         .ok()
         .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
         .map(|value| value.as_secs());
 
-    VaultSourceFingerprint {
+    ContentIdentity {
         content_sha256: sha256_hex(bytes),
         size_bytes: bytes.len() as u64,
-        modified_at,
+        observation_marker: modified_at,
     }
 }
 
@@ -1141,8 +1349,8 @@ fn pick_local_vault_path() -> anyhow::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalFileCommitError, LocalFileVaultSourceProvider, VaultSourceFingerprint,
-        decode_picker_stdout, local_lock_path,
+        ContentIdentity, LocalFileCommitError, LocalFileVaultSourceProvider, decode_picker_stdout,
+        local_lock_path,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, sha256_hex,
@@ -1258,7 +1466,12 @@ mod tests {
             .read_snapshot(path.to_str().unwrap())
             .unwrap()
             .fingerprint;
-        expected.modified_at = Some(expected.modified_at.unwrap_or_default().saturating_add(1));
+        expected.observation_marker = Some(
+            expected
+                .observation_marker
+                .unwrap_or_default()
+                .saturating_add(1),
+        );
 
         let error = provider
             .write_if_unchanged(path.to_str().unwrap(), &expected, b"generation-c")
@@ -1904,7 +2117,7 @@ mod tests {
                 .env(
                     "VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT",
                     expected
-                        .modified_at
+                        .observation_marker
                         .map(|value| value.to_string())
                         .unwrap_or_default(),
                 )
@@ -1953,13 +2166,13 @@ mod tests {
             return;
         };
         let candidate = std::env::var("VAULTKERN_LOCAL_WRITER_CANDIDATE").unwrap();
-        let expected = VaultSourceFingerprint {
+        let expected = ContentIdentity {
             content_sha256: std::env::var("VAULTKERN_LOCAL_EXPECTED_SHA256").unwrap(),
             size_bytes: std::env::var("VAULTKERN_LOCAL_EXPECTED_SIZE")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            modified_at: std::env::var("VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT")
+            observation_marker: std::env::var("VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT")
                 .unwrap()
                 .parse()
                 .ok(),

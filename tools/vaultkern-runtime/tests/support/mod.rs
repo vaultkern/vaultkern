@@ -1,0 +1,236 @@
+use vaultkern_runtime::{Runtime, RuntimeProtocolDispatch, RuntimeProtocolSession};
+use vaultkern_runtime_protocol::{ErrorDto, RuntimeCommand, RuntimeResponse};
+
+const DRIVE_ID: &str = "memory-drive";
+const ITEM_ID: &str = "memory-item";
+
+pub struct ProviderSnapshot {
+    pub bytes: Vec<u8>,
+    pub revision: u64,
+}
+
+pub struct RuntimeProtocolHarness {
+    runtime: Runtime,
+    protocol_session: RuntimeProtocolSession,
+    remote_cache_dir: Option<tempfile::TempDir>,
+    _local_source_dir: Option<tempfile::TempDir>,
+}
+
+impl RuntimeProtocolHarness {
+    pub fn resident() -> Self {
+        Self {
+            runtime: Runtime::for_tests(),
+            protocol_session: RuntimeProtocolSession::resident_app(),
+            remote_cache_dir: None,
+            _local_source_dir: None,
+        }
+    }
+
+    pub fn resident_with_in_memory_vault(bytes: Vec<u8>) -> Self {
+        Self::with_protocol_session(bytes, RuntimeProtocolSession::resident_app())
+    }
+
+    pub fn browser_with_in_memory_vault(bytes: Vec<u8>) -> Self {
+        Self::with_protocol_session(bytes, RuntimeProtocolSession::browser_extension())
+    }
+
+    pub fn browser_with_unlocked_in_memory_vault(bytes: Vec<u8>) -> Self {
+        let mut harness =
+            Self::with_protocol_session(bytes, RuntimeProtocolSession::browser_extension());
+        harness
+            .runtime
+            .handle(RuntimeCommand::AddOneDriveVaultReference {
+                drive_id: DRIVE_ID.into(),
+                item_id: ITEM_ID.into(),
+            })
+            .expect("add browser acceptance vault reference");
+        harness
+            .runtime
+            .handle(RuntimeCommand::UnlockCurrentVaultWithPassword {
+                password: "demo-password".into(),
+            })
+            .expect("unlock browser acceptance vault in the resident");
+        harness
+    }
+
+    pub fn browser_with_unlocked_local_vault(bytes: Vec<u8>) -> (Self, std::path::PathBuf) {
+        let local_source_dir =
+            tempfile::tempdir().expect("create architecture local source directory");
+        let source_path = local_source_dir.path().join("Architecture Acceptance.kdbx");
+        std::fs::write(&source_path, bytes).expect("write architecture local source");
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime
+            .open_local_vault(source_path.to_str().expect("UTF-8 local source path"))
+            .expect("open architecture local source");
+        runtime
+            .unlock_with_password(&opened.vault_id, "demo-password")
+            .expect("unlock architecture local source");
+        (
+            Self {
+                runtime,
+                protocol_session: RuntimeProtocolSession::browser_extension(),
+                remote_cache_dir: None,
+                _local_source_dir: Some(local_source_dir),
+            },
+            source_path,
+        )
+    }
+
+    fn with_protocol_session(bytes: Vec<u8>, protocol_session: RuntimeProtocolSession) -> Self {
+        let remote_cache_dir = tempfile::tempdir().expect("create architecture cache directory");
+        Self {
+            runtime: Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+                1_700_000_000,
+                DRIVE_ID,
+                ITEM_ID,
+                "Architecture Acceptance.kdbx",
+                "acceptance@example.com",
+                bytes,
+                remote_cache_dir.path(),
+            ),
+            protocol_session,
+            remote_cache_dir: Some(remote_cache_dir),
+            _local_source_dir: None,
+        }
+    }
+
+    pub fn drive_id(&self) -> &'static str {
+        DRIVE_ID
+    }
+
+    pub fn item_id(&self) -> &'static str {
+        ITEM_ID
+    }
+
+    pub fn command(&mut self, command: RuntimeCommand) -> RuntimeResponse {
+        match self.protocol_session.accept(command) {
+            RuntimeProtocolDispatch::Respond(response) => response,
+            RuntimeProtocolDispatch::Dispatch(command) => {
+                self.runtime.handle(command).unwrap_or_else(|error| {
+                    RuntimeResponse::Error(ErrorDto {
+                        code: "runtime_error".into(),
+                        message: format!("{error:#}"),
+                    })
+                })
+            }
+        }
+    }
+
+    pub fn provider_snapshot(&self) -> ProviderSnapshot {
+        ProviderSnapshot {
+            bytes: self
+                .runtime
+                .read_test_onedrive_item_bytes(DRIVE_ID, ITEM_ID)
+                .expect("read in-memory Provider snapshot"),
+            revision: self
+                .runtime
+                .test_onedrive_item_revision(DRIVE_ID, ITEM_ID)
+                .expect("read in-memory Provider revision"),
+        }
+    }
+
+    pub fn provider_write_count(&self) -> usize {
+        self.runtime.test_onedrive_access_counts().writes
+    }
+
+    pub fn replace_provider_snapshot(&mut self, bytes: Vec<u8>) {
+        self.runtime
+            .replace_test_onedrive_item(DRIVE_ID, ITEM_ID, bytes);
+    }
+
+    pub fn restart_resident(&mut self) {
+        let snapshot = self.provider_snapshot();
+        let provider_items = match self
+            .runtime
+            .handle(RuntimeCommand::ListOneDriveChildren {
+                parent_item_id: None,
+            })
+            .expect("list in-memory Provider items before restart")
+        {
+            RuntimeResponse::OneDriveItemList(list) => list
+                .items
+                .into_iter()
+                .filter(|item| !item.folder)
+                .map(|item| {
+                    let bytes = self
+                        .runtime
+                        .read_test_onedrive_item_bytes(&item.drive_id, &item.item_id)
+                        .expect("read in-memory Provider item before restart");
+                    let revision = self
+                        .runtime
+                        .test_onedrive_item_revision(&item.drive_id, &item.item_id)
+                        .expect("read in-memory Provider item revision before restart");
+                    (item, bytes, revision)
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected in-memory Provider item list, got {other:?}"),
+        };
+        let remote_cache_dir = self
+            .remote_cache_dir
+            .as_ref()
+            .expect("restart requires an in-memory Provider harness");
+        let mut runtime = Runtime::for_tests_at_with_onedrive_item_and_remote_cache(
+            1_700_000_001,
+            DRIVE_ID,
+            ITEM_ID,
+            "Architecture Acceptance.kdbx",
+            "acceptance@example.com",
+            snapshot.bytes,
+            remote_cache_dir.path(),
+        );
+        runtime
+            .set_test_onedrive_item_revision(DRIVE_ID, ITEM_ID, snapshot.revision)
+            .expect("restore in-memory Provider revision");
+        for (item, bytes, revision) in provider_items {
+            if item.item_id == ITEM_ID {
+                continue;
+            }
+            runtime.insert_test_onedrive_item(
+                &item.drive_id,
+                &item.item_id,
+                &item.name,
+                "acceptance@example.com",
+                bytes,
+            );
+            runtime
+                .set_test_onedrive_item_revision(&item.drive_id, &item.item_id, revision)
+                .expect("restore in-memory Provider item revision");
+        }
+        self.runtime = runtime;
+        self.protocol_session = RuntimeProtocolSession::resident_app();
+    }
+
+    pub fn reject_next_publication_as_stale(&mut self, remote_head: Vec<u8>) {
+        self.runtime
+            .queue_test_onedrive_precondition_failure(Some(remote_head));
+    }
+
+    pub fn fail_next_conflict_copy_preservation(&self) {
+        self.runtime.fail_next_test_onedrive_conflict_copy();
+    }
+
+    pub fn fail_next_remote_state_read(&self) {
+        self.runtime.fail_next_test_onedrive_remote_state();
+    }
+
+    pub fn interrupt_next_conflict_split_after_receipt_intent(&mut self) {
+        self.runtime
+            .interrupt_next_test_conflict_split_after_receipt_intent();
+    }
+
+    pub fn interrupt_next_conflict_split_after_conflict_copy(&mut self) {
+        self.runtime
+            .interrupt_next_test_conflict_split_after_conflict_copy();
+    }
+
+    pub fn provider_item_bytes(&self, item_id: &str) -> Vec<u8> {
+        self.runtime
+            .read_test_onedrive_item_bytes(DRIVE_ID, item_id)
+            .expect("read in-memory Provider item")
+    }
+
+    pub fn make_next_publication_outcome_unknown_and_readback_unavailable(&mut self) {
+        self.runtime
+            .queue_test_onedrive_ambiguous_write_with_unavailable_readback(false);
+    }
+}

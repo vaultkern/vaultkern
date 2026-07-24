@@ -242,7 +242,10 @@ impl ExclusiveFileLock {
         let file = open_validated_lock_file(path)?;
         let mut first_attempt = true;
         loop {
-            if (!first_attempt || !timeout.is_zero()) && started.elapsed() >= timeout {
+            // Always attempt the lock once. Opening and validating the lock file
+            // may itself exceed a short timeout under system load, but that
+            // setup time is not lock contention.
+            if !first_attempt && started.elapsed() >= timeout {
                 return Err(lock_timeout_error(path));
             }
             first_attempt = false;

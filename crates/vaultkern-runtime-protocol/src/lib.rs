@@ -4,7 +4,7 @@ use std::ops::Deref;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub struct SensitiveString(Zeroizing<String>);
 
@@ -125,12 +125,6 @@ pub struct ProtocolEnvelope {
     pub version: u32,
     #[serde(default, rename = "requestId", skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
-    #[serde(
-        default,
-        rename = "operationId",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub operation_id: Option<String>,
     pub command: RuntimeCommand,
 }
 
@@ -139,7 +133,6 @@ impl ProtocolEnvelope {
         Self {
             version: PROTOCOL_VERSION,
             request_id: None,
-            operation_id: None,
             command,
         }
     }
@@ -237,11 +230,51 @@ pub enum RuntimeCommand {
         entry_id: String,
         history_index: usize,
     },
+    CreateGroup {
+        vault_id: String,
+        parent_group_id: String,
+        title: String,
+    },
+    RenameGroup {
+        vault_id: String,
+        group_id: String,
+        title: String,
+    },
+    MoveGroup {
+        vault_id: String,
+        group_id: String,
+        target_parent_group_id: String,
+    },
+    DeleteGroup {
+        vault_id: String,
+        group_id: String,
+    },
+    MoveEntryToGroup {
+        vault_id: String,
+        entry_id: String,
+        target_group_id: String,
+    },
+    RestoreEntryHistory {
+        vault_id: String,
+        entry_id: String,
+        history_index: usize,
+    },
+    ClearEntryHistory {
+        vault_id: String,
+        entry_id: String,
+    },
+    RecycleEntry {
+        vault_id: String,
+        entry_id: String,
+    },
+    RestoreRecycledEntry {
+        vault_id: String,
+        entry_id: String,
+        target_group_id: Option<String>,
+    },
     CreateEntry {
         vault_id: String,
         parent_group_id: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        entry_id: Option<String>,
         title: SensitiveString,
         username: SensitiveString,
         password: SensitiveString,
@@ -260,17 +293,22 @@ pub enum RuntimeCommand {
         totp_uri: Option<SensitiveString>,
         custom_fields: Vec<EntryCustomFieldDto>,
     },
-    CompareAndUpdateEntryFields {
+    CreateAutofillEntry {
+        vault_id: String,
+        parent_group_id: String,
+        expected_matching_entry_ids: Vec<String>,
+        title: SensitiveString,
+        username: SensitiveString,
+        password: SensitiveString,
+        url: SensitiveString,
+        notes: SensitiveString,
+        totp_uri: Option<SensitiveString>,
+    },
+    UpdateAutofillEntryFields {
         vault_id: String,
         entry_id: String,
-        expected_fields: EntryFieldsDto,
-        desired_fields: EntryFieldsDto,
-    },
-    PersistAutofillMutation {
-        transaction_id: String,
-        operation_id: String,
-        vault_id: String,
-        plan: AutofillPersistPlanDto,
+        expected_fields: AutofillUpdateFieldsDto,
+        desired_fields: AutofillUpdateFieldsDto,
     },
     ClearEntryTotp {
         vault_id: String,
@@ -436,16 +474,7 @@ pub enum RuntimeCommand {
         entry_id: String,
         name: String,
     },
-    UpdateEntry {
-        vault_id: String,
-        entry_id: String,
-        title: SensitiveString,
-        username: SensitiveString,
-        password: SensitiveString,
-        url: SensitiveString,
-        notes: SensitiveString,
-    },
-    SaveVault {
+    RetryVaultPublication {
         vault_id: String,
     },
     GetDatabaseSettings {
@@ -502,6 +531,8 @@ pub enum RuntimeResponse {
     GroupTree(GroupTreeDto),
     EntryList(EntryListDto),
     EntryDetail(EntryDetailDto),
+    EntryMutationResult(EntryMutationResultDto),
+    VaultMutationResult(VaultMutationResultDto),
     EntryHistoryList(EntryHistoryListDto),
     EntryHistoryDetail(EntryHistoryDetailDto),
     EntryAttachmentContent(EntryAttachmentContentDto),
@@ -525,8 +556,7 @@ pub enum RuntimeResponse {
     DatabaseSettings(DatabaseSettingsDto),
     DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto),
     Saved,
-    SaveVaultResult(SaveVaultResultDto),
-    AutofillPersistResult(AutofillPersistResultDto),
+    PublicationResult(PublicationResultDto),
     ResidentAppActivated,
     Error(ErrorDto),
 }
@@ -648,8 +678,9 @@ pub struct DatabaseSettingsDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DatabaseSettingsCommitResultDto {
+    pub commit: CommitStatusDto,
     pub settings: DatabaseSettingsDto,
-    pub save_result: SaveVaultResultDto,
+    pub publication: PublicationResultDto,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -974,57 +1005,6 @@ impl Zeroize for EntryFieldsDto {
 impl ZeroizeOnDrop for EntryFieldsDto {}
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum AutofillPersistPlanDto {
-    Update {
-        entry_id: String,
-        expected_fields: AutofillUpdateFieldsDto,
-        desired_fields: AutofillUpdateFieldsDto,
-    },
-    Create {
-        parent_group_id: String,
-        planned_entry_id: String,
-        expected_matching_entry_ids: Vec<String>,
-        desired_fields: EntryFieldsDto,
-    },
-}
-
-impl fmt::Debug for AutofillPersistPlanDto {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("AutofillPersistPlanDto([REDACTED])")
-    }
-}
-
-impl Zeroize for AutofillPersistPlanDto {
-    fn zeroize(&mut self) {
-        match self {
-            Self::Update {
-                entry_id,
-                expected_fields,
-                desired_fields,
-            } => {
-                entry_id.zeroize();
-                expected_fields.zeroize();
-                desired_fields.zeroize();
-            }
-            Self::Create {
-                parent_group_id,
-                planned_entry_id,
-                expected_matching_entry_ids,
-                desired_fields,
-            } => {
-                parent_group_id.zeroize();
-                planned_entry_id.zeroize();
-                expected_matching_entry_ids.zeroize();
-                desired_fields.zeroize();
-            }
-        }
-    }
-}
-
-impl ZeroizeOnDrop for AutofillPersistPlanDto {}
-
-#[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
 pub struct EntryPasskeyDto {
@@ -1244,17 +1224,17 @@ pub struct PasskeyCeremonyReconciliationDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SaveVaultStatusDto {
-    Saved,
-    Merged,
-    SavedToCache,
-    ConflictCopy,
+pub enum PublicationStatusDto {
+    Published,
+    Reconciled,
+    Pending,
+    ConflictSplit,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "json-schema", derive(schemars::JsonSchema))]
 #[serde(rename_all = "camelCase")]
-pub struct MergeSummaryDto {
+pub struct ReconciliationSummaryDto {
     pub merged_entries: usize,
     pub history_snapshots_added: usize,
     /// 007 field patch: resolved Meta / recycle-bin configuration conflicts.
@@ -1268,86 +1248,54 @@ pub struct MergeSummaryDto {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct SaveVaultResultDto {
-    pub status: SaveVaultStatusDto,
-    pub merge_summary: Option<MergeSummaryDto>,
+pub struct PublicationResultDto {
+    pub status: PublicationStatusDto,
+    pub reconciliation_summary: Option<ReconciliationSummaryDto>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conflict_copy_path: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutofillPersistResultDto {
-    pub transaction_id: String,
-    pub operation_id: String,
-    pub vault_id: String,
-    #[serde(flatten)]
-    pub outcome: AutofillPersistOutcomeDto,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "outcome",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase"
-)]
-pub enum AutofillPersistOutcomeDto {
-    Durable {
-        disposition: AutofillPersistDispositionDto,
-        entry_id: String,
-        durability: AutofillPersistDurabilityDto,
-        cache_state: AutofillCacheStateDto,
-        committed_fingerprint: AutofillCommittedFingerprintDto,
-        merge_summary: Option<MergeSummaryDto>,
-        receipt_version: u32,
-    },
-    Conflict {
-        code: AutofillPersistConflictCodeDto,
-        retryable: bool,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AutofillCommittedFingerprintDto {
-    pub content_sha256: String,
-    pub size_bytes: u64,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AutofillPersistDispositionDto {
+pub enum CommitStatusDto {
     Committed,
-    Replayed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutofillPersistDurabilityDto {
-    Source,
-    PendingRemoteCache,
+#[derive(PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryMutationResultDto {
+    pub commit: CommitStatusDto,
+    pub publication: PublicationResultDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entry: Option<EntryDetailDto>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutofillCacheStateDto {
-    NotApplicable,
-    Current,
-    PendingSync,
-    WriteFailed,
+impl fmt::Debug for EntryMutationResultDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("EntryMutationResultDto")
+            .field("commit", &self.commit)
+            .field("publication", &self.publication)
+            .field("entry", &self.entry.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutofillPersistConflictCodeDto {
-    ActiveVaultMismatch,
-    UpdatePreconditionFailed,
-    CreateMatchingSetChanged,
-    PlannedEntryIdCollision,
-    OperationBindingMismatch,
-    ConcurrentVaultChanges,
-    SourceChangedRetryExhausted,
-    LegacyCreateOutcomeAmbiguous,
+impl Zeroize for EntryMutationResultDto {
+    fn zeroize(&mut self) {
+        self.entry.zeroize();
+    }
+}
+
+impl ZeroizeOnDrop for EntryMutationResultDto {}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultMutationResultDto {
+    pub commit: CommitStatusDto,
+    pub publication: PublicationResultDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

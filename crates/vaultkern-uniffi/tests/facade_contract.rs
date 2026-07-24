@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use vaultkern_uniffi::{
     EntryFieldsDto, OneDriveTokenAdapter, PlatformAdapterError, PlatformPasskeyAssertionInput,
-    PlatformPasskeyRegistrationInput, ResidentPlatform, SaveVaultStatusDto, SensitiveBytes,
-    SensitiveString, UnlockBlobAdapter, UnlockBlobStatusDto, VaultPasskeyOperation, VaultSession,
+    PlatformPasskeyRegistrationInput, ResidentPlatform, SensitiveBytes, SensitiveString,
+    UnlockBlobAdapter, UnlockBlobStatusDto, VaultPasskeyOperation, VaultSession,
     VaultSessionConfig,
 };
 
@@ -264,7 +264,7 @@ fn opened_session() -> (
 }
 
 #[test]
-fn ffi_session_opens_lists_reads_edits_and_saves_using_protocol_vocabulary() {
+fn ffi_session_edits_with_one_commit_and_no_follow_up_publication_call() {
     let (_dir, session, _adapter, vault_id) = opened_session();
 
     let entries = session.list_entries(vault_id.clone()).unwrap();
@@ -290,14 +290,50 @@ fn ffi_session_opens_lists_reads_edits_and_saves_using_protocol_vocabulary() {
             },
         )
         .unwrap();
+    assert_eq!(edited.commit, vaultkern_uniffi::CommitStatusDto::Committed);
+    assert_eq!(
+        edited.publication.status,
+        vaultkern_uniffi::PublicationStatusDto::Published
+    );
+    let edited = edited.entry.expect("published edit remains active");
     assert_eq!(edited.id.as_str(), entry_id);
     assert_eq!(edited.title.as_str(), edited_title);
 
-    let saved = session.save(vault_id).unwrap();
-    assert!(matches!(
-        saved.status,
-        SaveVaultStatusDto::Saved | SaveVaultStatusDto::Merged
-    ));
+    session.lock_session().unwrap();
+    session
+        .unlock()
+        .unlock_vault(vault_id.clone(), Some(FIXTURE_PASSWORD.into()), None, false)
+        .unwrap();
+    let committed = session
+        .read_entry(vault_id.clone(), entry_id)
+        .expect("Entry Commit must survive lock without a follow-up save");
+    assert_eq!(committed.title.as_str(), edited_title);
+}
+
+#[test]
+fn ffi_entry_mutation_result_preserves_conflict_split_publication() {
+    let result: vaultkern_uniffi::EntryMutationResultDto =
+        vaultkern_runtime_protocol::EntryMutationResultDto {
+            commit: vaultkern_runtime_protocol::CommitStatusDto::Committed,
+            publication: vaultkern_runtime_protocol::PublicationResultDto {
+                status: vaultkern_runtime_protocol::PublicationStatusDto::ConflictSplit,
+                reconciliation_summary: None,
+                conflict_copy_path: Some("/vaults/example.conflict.kdbx".into()),
+            },
+            entry: None,
+        }
+        .into();
+
+    assert_eq!(result.commit, vaultkern_uniffi::CommitStatusDto::Committed);
+    assert_eq!(
+        result.publication.status,
+        vaultkern_uniffi::PublicationStatusDto::ConflictSplit
+    );
+    assert_eq!(
+        result.publication.conflict_copy_path.as_deref(),
+        Some("/vaults/example.conflict.kdbx")
+    );
+    assert!(result.entry.is_none());
 }
 
 #[test]
@@ -561,8 +597,23 @@ fn session_lock_is_rejected_while_a_platform_passkey_lease_is_active() {
 }
 
 #[test]
-fn ordinary_session_save_cannot_persist_an_uncommitted_passkey_registration() {
+fn ordinary_session_mutation_cannot_persist_an_uncommitted_passkey_registration() {
     let (_dir, session, _adapter, vault_id) = opened_session();
+    let entry_id = session.list_entries(vault_id.clone()).unwrap()[0]
+        .id
+        .clone();
+    let entry = session
+        .read_entry(vault_id.clone(), entry_id.clone())
+        .unwrap();
+    let fields = || EntryFieldsDto {
+        title: entry.title.as_str().into(),
+        username: entry.username.as_str().into(),
+        password: entry.password.as_str().into(),
+        url: entry.url.as_str().into(),
+        notes: entry.notes.as_str().into(),
+        totp_uri: entry.totp_uri.as_ref().map(|value| value.as_str().into()),
+        custom_fields: Vec::new(),
+    };
     let operation = session.begin_passkey_operation(vec![7; 16]).unwrap();
     operation
         .register_passkey(PlatformPasskeyRegistrationInput {
@@ -576,9 +627,13 @@ fn ordinary_session_save_cannot_persist_an_uncommitted_passkey_registration() {
         })
         .unwrap();
 
-    assert!(session.save(vault_id.clone()).is_err());
+    assert!(
+        session
+            .edit_entry(vault_id.clone(), entry_id.clone(), fields())
+            .is_err()
+    );
     drop(operation);
-    assert!(session.save(vault_id).is_ok());
+    assert!(session.edit_entry(vault_id, entry_id, fields()).is_ok());
 }
 
 #[test]

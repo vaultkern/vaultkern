@@ -11,11 +11,12 @@ use vaultkern_core::{
 };
 use vaultkern_runtime::{QuickUnlockReconciliationCredentials, Runtime};
 use vaultkern_runtime_protocol::{
-    DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto, EntryPasskeyDto,
-    EntryPasskeyUpdateDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
-    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyFrameKindDto,
-    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto, RuntimeCommand,
-    RuntimeResponse,
+    CommitStatusDto, DatabaseCredentialsUpdateDto, DatabaseSettingsUpdateDto,
+    EntryMutationResultDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
+    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
+    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyFrameKindDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto, PublicationStatusDto,
+    RuntimeCommand, RuntimeResponse,
 };
 
 const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
@@ -23,6 +24,15 @@ const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBM
 fn clone_test_passkey_update(passkey: &EntryPasskeyUpdateDto) -> EntryPasskeyUpdateDto {
     serde_json::from_value(serde_json::to_value(passkey).expect("serialize test passkey update"))
         .expect("deserialize test passkey update")
+}
+
+fn expect_committed_entry_mutation(response: RuntimeResponse) -> EntryMutationResultDto {
+    let RuntimeResponse::EntryMutationResult(result) = response else {
+        panic!("expected committed entry mutation, got {response:?}");
+    };
+    assert_eq!(result.commit, CommitStatusDto::Committed);
+    assert_eq!(result.publication.status, PublicationStatusDto::Published);
+    result
 }
 
 #[test]
@@ -923,7 +933,6 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
-            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -936,21 +945,19 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         })
         .unwrap();
 
-    let entry_id = match created {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.title, "Example");
-            assert_eq!(detail.username, "alice");
-            assert_eq!(detail.totp.as_deref(), Some("287082"));
-            assert_eq!(
-                detail.totp_uri.as_deref(),
-                Some(
-                    "otpauth://totp/Test:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test&algorithm=SHA1&digits=6&period=30"
-                )
-            );
-            detail.id
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    };
+    let detail = expect_committed_entry_mutation(created)
+        .entry
+        .expect("create returns the committed entry");
+    assert_eq!(detail.title, "Example");
+    assert_eq!(detail.username, "alice");
+    assert_eq!(detail.totp.as_deref(), Some("287082"));
+    assert_eq!(
+        detail.totp_uri.as_deref(),
+        Some(
+            "otpauth://totp/Test:alice?secret=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ&issuer=Test&algorithm=SHA1&digits=6&period=30"
+        )
+    );
+    let entry_id = detail.id;
 
     let updated = runtime
         .handle(RuntimeCommand::UpdateEntryFields {
@@ -969,19 +976,17 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
             }],
         })
         .unwrap();
-    match updated {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.title, "Example 2");
-            assert_eq!(detail.password, "secret-2");
-            assert_eq!(detail.totp, None);
-            assert_eq!(detail.totp_uri, None);
-            assert_eq!(detail.custom_fields.len(), 1);
-            assert_eq!(detail.custom_fields[0].key, "RecoveryCode");
-            assert_eq!(detail.custom_fields[0].value, "edited-code");
-            assert!(detail.custom_fields[0].protected);
-        }
-        other => panic!("expected updated entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(updated)
+        .entry
+        .expect("update returns the committed entry");
+    assert_eq!(detail.title, "Example 2");
+    assert_eq!(detail.password, "secret-2");
+    assert_eq!(detail.totp, None);
+    assert_eq!(detail.totp_uri, None);
+    assert_eq!(detail.custom_fields.len(), 1);
+    assert_eq!(detail.custom_fields[0].key, "RecoveryCode");
+    assert_eq!(detail.custom_fields[0].value, "edited-code");
+    assert!(detail.custom_fields[0].protected);
 
     let deleted = runtime
         .handle(RuntimeCommand::DeleteEntry {
@@ -989,69 +994,10 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
             entry_id: entry_id.clone(),
         })
         .unwrap();
-    assert_eq!(deleted, RuntimeResponse::Saved);
-}
-
-#[test]
-fn runtime_replays_a_create_with_the_same_planned_entry_id_without_duplication() {
-    let core = KeepassCore::new();
-    let mut key = CompositeKey::default();
-    key.add_password("demo-password");
-    let bytes = core
-        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
-        .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("demo.kdbx");
-    std::fs::write(&path, bytes).unwrap();
-    let mut runtime = Runtime::for_tests();
-    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
-    runtime
-        .unlock_with_password(&handle.vault_id, "demo-password")
-        .unwrap();
-    let root_id = runtime.list_groups(&handle.vault_id).unwrap().root.id;
-    let entry_id = "11111111-1111-4111-8111-111111111111";
-
-    for _ in 0..2 {
-        let response = runtime
-            .handle(RuntimeCommand::CreateEntry {
-                vault_id: handle.vault_id.clone(),
-                parent_group_id: root_id.clone(),
-                entry_id: Some(entry_id.into()),
-                title: "Original".into(),
-                username: "alice".into(),
-                password: "secret".into(),
-                url: "https://example.com".into(),
-                notes: String::new().into(),
-                totp_uri: None,
-            })
-            .unwrap();
-        let RuntimeResponse::EntryDetail(detail) = response else {
-            panic!("expected entry detail");
-        };
-        assert_eq!(detail.id, entry_id);
-        assert_eq!(detail.title, "Original");
-    }
-
-    let collision = runtime.handle(RuntimeCommand::CreateEntry {
-        vault_id: handle.vault_id.clone(),
-        parent_group_id: root_id,
-        entry_id: Some(entry_id.into()),
-        title: "must not overwrite the committed entry".into(),
-        username: "alice".into(),
-        password: "secret".into(),
-        url: "https://example.com".into(),
-        notes: String::new().into(),
-        totp_uri: None,
-    });
     assert!(
-        collision
-            .unwrap_err()
-            .to_string()
-            .contains("planned entry id collision")
+        expect_committed_entry_mutation(deleted).entry.is_none(),
+        "delete does not return a committed entry"
     );
-
-    let entries = runtime.list_entries(&handle.vault_id).unwrap();
-    assert_eq!(entries.len(), 1);
 }
 
 #[test]
@@ -1116,13 +1062,11 @@ fn runtime_sets_and_clears_entry_passkey() {
             passkey: clone_test_passkey_update(&passkey),
         })
         .unwrap();
-    match updated {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.id, entry_id);
-            assert_eq!(detail.passkey.as_ref(), Some(&expected_passkey));
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(updated)
+        .entry
+        .expect("set passkey returns the committed entry");
+    assert_eq!(detail.id, entry_id);
+    assert_eq!(detail.passkey.as_ref(), Some(&expected_passkey));
 
     let detail = runtime
         .handle(RuntimeCommand::GetEntryDetail {
@@ -1154,12 +1098,10 @@ fn runtime_sets_and_clears_entry_passkey() {
             entry_id: entry_id.clone(),
         })
         .unwrap();
-    match cleared {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.passkey, None);
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(cleared)
+        .entry
+        .expect("clear passkey returns the committed entry");
+    assert_eq!(detail.passkey, None);
 
     let history = runtime
         .handle(RuntimeCommand::ListEntryHistory {
@@ -2647,7 +2589,7 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     );
 
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: handle.vault_id.clone(),
         })
         .expect("save registered passkey entry");
@@ -3185,11 +3127,11 @@ fn runtime_reregistration_preserves_user_fields_and_enforces_history_limit() {
     );
 
     let saved = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: handle.vault_id.clone(),
         })
         .unwrap();
-    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+    assert!(matches!(saved, RuntimeResponse::PublicationResult(_)));
 
     let history = runtime
         .handle(RuntimeCommand::ListEntryHistory {
@@ -3279,11 +3221,11 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
     assert!(!second_registration.created);
 
     let saved = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: handle.vault_id.clone(),
         })
         .unwrap();
-    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+    assert!(matches!(saved, RuntimeResponse::PublicationResult(_)));
 
     runtime
         .handle(RuntimeCommand::AbortPasskeyRegistration {
@@ -3747,7 +3689,7 @@ fn runtime_aborts_saved_uncommitted_passkey_registration_by_ceremony_token() {
             vault_id: handle.vault_id.clone(),
         })
         .unwrap();
-    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+    assert!(matches!(saved, RuntimeResponse::PublicationResult(_)));
 
     let aborted = runtime
         .handle(RuntimeCommand::AbortPasskeyRegistration {
@@ -4829,7 +4771,6 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
-            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -4838,10 +4779,10 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             totp_uri: None,
         })
         .unwrap();
-    let entry_id = match created {
-        RuntimeResponse::EntryDetail(detail) => detail.id,
-        other => panic!("expected entry detail, got {other:?}"),
-    };
+    let entry_id = expect_committed_entry_mutation(created)
+        .entry
+        .expect("create returns the committed entry")
+        .id;
 
     let added = runtime
         .handle(RuntimeCommand::AddEntryAttachment {
@@ -4852,15 +4793,13 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             protect_in_memory: true,
         })
         .unwrap();
-    match added {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.attachments.len(), 1);
-            assert_eq!(detail.attachments[0].name, "backup.txt");
-            assert_eq!(detail.attachments[0].size, 5);
-            assert!(detail.attachments[0].protect_in_memory);
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(added)
+        .entry
+        .expect("add attachment returns the committed entry");
+    assert_eq!(detail.attachments.len(), 1);
+    assert_eq!(detail.attachments[0].name, "backup.txt");
+    assert_eq!(detail.attachments[0].size, 5);
+    assert!(detail.attachments[0].protect_in_memory);
 
     let content = runtime
         .handle(RuntimeCommand::GetEntryAttachmentContent {
@@ -4889,16 +4828,14 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             protect_in_memory: false,
         })
         .unwrap();
-    match renamed {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert_eq!(detail.attachments.len(), 1);
-            assert_eq!(detail.attachments[0].name, "backup-renamed.txt");
-            assert!(!detail.attachments[0].protect_in_memory);
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(renamed)
+        .entry
+        .expect("rename attachment returns the committed entry");
+    assert_eq!(detail.attachments.len(), 1);
+    assert_eq!(detail.attachments[0].name, "backup-renamed.txt");
+    assert!(!detail.attachments[0].protect_in_memory);
 
-    runtime
+    let replaced = runtime
         .handle(RuntimeCommand::ReplaceEntryAttachmentContent {
             vault_id: handle.vault_id.clone(),
             entry_id: entry_id.clone(),
@@ -4906,6 +4843,10 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             data_base64: "dXBkYXRlZA==".into(),
         })
         .unwrap();
+    let detail = expect_committed_entry_mutation(replaced)
+        .entry
+        .expect("replace attachment content returns the committed entry");
+    assert_eq!(detail.attachments[0].size, 7);
     let replaced_content = runtime
         .handle(RuntimeCommand::GetEntryAttachmentContent {
             vault_id: handle.vault_id.clone(),
@@ -4931,12 +4872,10 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
             name: "backup-renamed.txt".into(),
         })
         .unwrap();
-    match deleted {
-        RuntimeResponse::EntryDetail(detail) => {
-            assert!(detail.attachments.is_empty());
-        }
-        other => panic!("expected entry detail, got {other:?}"),
-    }
+    let detail = expect_committed_entry_mutation(deleted)
+        .entry
+        .expect("delete attachment returns the committed entry");
+    assert!(detail.attachments.is_empty());
 }
 
 #[test]
@@ -5068,29 +5007,22 @@ fn runtime_updates_entry_modified_time_after_manager_mutations() {
         .unlock_with_password(&vault.vault_id, "demo-password")
         .unwrap();
     let root_id = runtime.list_groups(&vault.vault_id).unwrap().root.id;
-    let created = match runtime
-        .handle(RuntimeCommand::CreateEntry {
-            vault_id: vault.vault_id.clone(),
-            parent_group_id: root_id,
-            entry_id: None,
-            title: "Created".into(),
-            username: "alice".into(),
-            password: "secret".into(),
-            url: "https://example.com".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-        })
-        .unwrap()
-    {
-        RuntimeResponse::EntryDetail(detail) => detail,
-        other => panic!("expected entry detail, got {other:?}"),
-    };
-
-    runtime
-        .handle(RuntimeCommand::SaveVault {
-            vault_id: vault.vault_id.clone(),
-        })
-        .unwrap();
+    let created = expect_committed_entry_mutation(
+        runtime
+            .handle(RuntimeCommand::CreateEntry {
+                vault_id: vault.vault_id.clone(),
+                parent_group_id: root_id,
+                title: "Created".into(),
+                username: "alice".into(),
+                password: "secret".into(),
+                url: "https://example.com".into(),
+                notes: String::new().into(),
+                totp_uri: None,
+            })
+            .unwrap(),
+    )
+    .entry
+    .expect("create returns the committed entry");
 
     let loaded = core
         .load_kdbx(&std::fs::read(&path).unwrap(), &key)

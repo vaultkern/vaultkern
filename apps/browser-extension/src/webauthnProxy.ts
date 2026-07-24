@@ -2592,7 +2592,7 @@ function requirePasskeySaveSuccess(response: unknown) {
   if (
     typeof response === "object" &&
     response !== null &&
-    (response as { type?: unknown }).type === "save_vault_result" &&
+    (response as { type?: unknown }).type === "publication_result" &&
     isDurablePasskeySaveStatus((response as { status?: unknown }).status)
   ) {
     return;
@@ -2603,7 +2603,11 @@ function requirePasskeySaveSuccess(response: unknown) {
 }
 
 function isDurablePasskeySaveStatus(status: unknown) {
-  return status === "saved" || status === "merged" || status === "saved_to_cache";
+  return (
+    status === "published" ||
+    status === "reconciled" ||
+    status === "pending"
+  );
 }
 
 async function loadPasskeyCeremonyMirrors(chromeApi: ChromeLike | null | undefined) {

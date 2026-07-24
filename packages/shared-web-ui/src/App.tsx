@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ReactNode } from "react";
 
 import type {
+  CommittedEntryMutation,
   CommittedMutation,
   DatabaseSettings,
   DatabaseSettingsCommitResult,
@@ -23,16 +24,12 @@ import type {
   OneDriveAuthStatus,
   OneDriveItem,
   ResidentAppRoute,
-  SaveVaultResult,
+  PublicationResult,
   SessionState,
   VaultSourceStatus,
   UnlockCredentials,
   VaultHandle,
   VaultReference
-} from "@vaultkern/runtime-web-client";
-import {
-  runtimeMutationOperationId,
-  runtimeMutationResult
 } from "@vaultkern/runtime-web-client";
 
 import { archiveTheme } from "./designTokens";
@@ -95,36 +92,26 @@ export interface RuntimeClientLike {
   getEntryDetail(vaultId: string, entryId: string): Promise<EntryDetail>;
   createEntry(
     vaultId: string,
-    input: EntryDraft & { parentGroupId: string },
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    input: EntryDraft & { parentGroupId: string }
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   updateEntryFields(
     vaultId: string,
     entryId: string,
-    input: EntryDraft,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    input: EntryDraft
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   setEntryPasskey(
     vaultId: string,
     entryId: string,
-    passkey: EntryPasskeyUpdate,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    passkey: EntryPasskeyUpdate
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   clearEntryPasskey(
     vaultId: string,
-    entryId: string,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    entryId: string
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   deleteEntry(
     vaultId: string,
-    entryId: string,
-    operationId?: string
+    entryId: string
   ): Promise<void | CommittedMutation<void>>;
-  saveVault(vaultId: string): Promise<SaveVaultResult | void>;
-  retryMutationSave?(
-    vaultId: string,
-    operationId: string
-  ): Promise<SaveVaultResult | void>;
   getDatabaseSettings(vaultId: string): Promise<DatabaseSettings>;
   updateDatabaseSettings(
     vaultId: string,
@@ -138,27 +125,23 @@ export interface RuntimeClientLike {
   addEntryAttachment(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentInput,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    input: EntryAttachmentInput
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentMetadataUpdate,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    input: EntryAttachmentMetadataUpdate
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
-    input: EntryAttachmentContentUpdate,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    input: EntryAttachmentContentUpdate
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   deleteEntryAttachment(
     vaultId: string,
     entryId: string,
-    name: string,
-    operationId?: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+    name: string
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   listEntryHistory(vaultId: string, entryId: string): Promise<EntryHistoryItem[]>;
   getEntryHistoryDetail(
     vaultId: string,
@@ -229,36 +212,6 @@ type DialogState =
   | { type: "unsaved"; action: PendingAction }
   | { type: "delete-entry"; entryId: string; title: string };
 
-interface PendingEntrySave {
-  vaultId: string;
-  detail: EntryDetail;
-  operationId: string | null;
-}
-
-interface PendingEntryDelete {
-  vaultId: string;
-  entryId: string;
-  operationId: string | null;
-}
-
-interface PendingAttachmentSave extends PendingEntrySave {
-  fallbackMessage: string;
-}
-
-interface PendingUnknownDetailMutation {
-  owner: EntryRequestOwner;
-  operationId: string;
-  fallbackMessage: string;
-  replay: (
-    operationId: string
-  ) => Promise<EntryDetail | CommittedMutation<EntryDetail>>;
-  stagePendingSave: (
-    detail: EntryDetail,
-    operationId: string | null
-  ) => void;
-  clearPendingSave: () => void;
-}
-
 interface PendingDatabaseSettingsSave {
   vaultId: string;
   sessionEpoch: number;
@@ -281,9 +234,20 @@ function isCommittedMutation<T>(
   return (
     typeof value === "object" &&
     value !== null &&
-    "operationId" in value &&
-    "saveResult" in value &&
+    "publication" in value &&
     "value" in value
+  );
+}
+
+function isUnknownMutationOutcome(value: unknown) {
+  if (typeof value !== "object" || value === null || !("code" in value)) {
+    return false;
+  }
+  const code = (value as { code?: unknown }).code;
+  return (
+    code === "native_port_disconnected" ||
+    code === "native_timeout" ||
+    code === "request_outcome_unknown"
   );
 }
 
@@ -475,26 +439,13 @@ export function App({
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<EntryEditorMode>("view");
   const [draft, setDraft] = useState<EntryDraft | null>(null);
-  const [pendingEntrySave, setPendingEntrySave] = useState<PendingEntrySave | null>(
-    null
-  );
-  const [entryMutationOutcomeUnknown, setEntryMutationOutcomeUnknown] =
+  const [entryDraftOutcomeUnknown, setEntryDraftOutcomeUnknown] =
     useState(false);
-  const [pendingPasskeySave, setPendingPasskeySave] = useState<PendingEntrySave | null>(
-    null
-  );
-  const [pendingAttachmentSave, setPendingAttachmentSave] =
-    useState<PendingAttachmentSave | null>(null);
-  const [pendingUnknownDetailMutation, setPendingUnknownDetailMutation] =
-    useState<PendingUnknownDetailMutation | null>(null);
-  const [pendingEntryDelete, setPendingEntryDelete] =
-    useState<PendingEntryDelete | null>(null);
   const [entryActionError, setEntryActionError] = useState<string | null>(null);
   const [dialogState, setDialogState] = useState<DialogState | null>(null);
   const [entryActionBusy, setEntryActionBusy] = useState(false);
   const [saveAndContinueBusy, setSaveAndContinueBusy] = useState(false);
   const saveDraftInFlight = useRef<Promise<boolean> | null>(null);
-  const pendingEntryMutationOperationId = useRef<string | null>(null);
   const entryDraftBaseline = useRef<EntryDetail | null>(null);
   const secretViewEpoch = useRef(0);
   const historyDetailRequestEpoch = useRef(0);
@@ -612,10 +563,6 @@ export function App({
     saveDraftInFlight.current = null;
     saveAndContinueInFlight.current = false;
     clearDetailSelection();
-    setPendingPasskeySave(null);
-    setPendingAttachmentSave(null);
-    setPendingUnknownDetailMutation(null);
-    setPendingEntryDelete(null);
     setEntryActionBusy(false);
     setSaveAndContinueBusy(false);
     databaseSettingsSaveInFlight.current = null;
@@ -875,11 +822,9 @@ export function App({
 
   function resetEditorState(nextMode: EntryEditorMode = "view") {
     entryDraftBaseline.current = null;
-    pendingEntryMutationOperationId.current = null;
-    setEntryMutationOutcomeUnknown(false);
+    setEntryDraftOutcomeUnknown(false);
     setEditorMode(nextMode);
     setDraft(null);
-    setPendingEntrySave(null);
     setEntryActionError(null);
     setDialogState(null);
   }
@@ -914,21 +859,40 @@ export function App({
     resetEditorState();
   }
 
-  function handleSaveResult(vaultId: string, result: SaveVaultResult | void) {
+  function applyEntryMutationDetail(
+    detail: EntryDetail | null,
+    selectCreatedEntry = false
+  ) {
+    if (detail === null) {
+      clearDetailSelection();
+      return;
+    }
+
+    setEntryDetail(detail);
+    if (selectCreatedEntry) {
+      setSelectedEntryId(detail.id);
+      setShowEntryListWithDetail(true);
+    }
+  }
+
+  function handlePublicationResult(
+    vaultId: string,
+    result: PublicationResult | void
+  ) {
     if (
       result &&
-      (result.status === "saved" ||
-        result.status === "merged" ||
-        result.status === "saved_to_cache")
+      (result.status === "published" ||
+        result.status === "reconciled" ||
+        result.status === "pending")
     ) {
       void reconcileSavedSettings("vault-save");
     }
-    if (result?.status === "merged") {
+    if (result?.status === "reconciled") {
       setSaveTip(
         translate(extensionSettings.language, "Vault changed on disk. Merged and saved.")
       );
       setSourceDetailReloadKey((current) => current + 1);
-    } else if (result?.status === "saved_to_cache") {
+    } else if (result?.status === "pending") {
       setSaveTip(
         translate(extensionSettings.language, "Saved to local cache. Remote sync pending.")
       );
@@ -942,7 +906,7 @@ export function App({
           lastError: current.sourceStatus?.lastError ?? null
         }
       }));
-    } else if (result?.status === "conflict_copy") {
+    } else if (result?.status === "conflict_split") {
       setSaveTip(
         result.conflictCopyPath
           ? `${translate(
@@ -954,31 +918,23 @@ export function App({
               "Vault changed on disk. Local edits were saved as a conflict copy."
             )
       );
+      setSourceDetailReloadKey((current) => current + 1);
     }
   }
 
-  async function settleMutationResult<T>(
-    vaultId: string,
+  function settleMutationResult<T>(
     result: T | CommittedMutation<T>
-  ): Promise<{ value: T; saveResult: SaveVaultResult | void; operationId: string | null }> {
+  ): { value: T; publication: PublicationResult | void } {
     if (isCommittedMutation(result)) {
       return {
         value: result.value,
-        saveResult: result.saveResult,
-        operationId: result.operationId
+        publication: result.publication
       };
     }
     return {
       value: result,
-      saveResult: await client.saveVault(vaultId),
-      operationId: null
+      publication: undefined
     };
-  }
-
-  function retryMutationSave(vaultId: string, operationId: string | null) {
-    return operationId && client.retryMutationSave
-      ? client.retryMutationSave(vaultId, operationId)
-      : client.saveVault(vaultId);
   }
 
   async function handleRetrySourceSync() {
@@ -1166,12 +1122,6 @@ export function App({
     }
   }
 
-  const pendingDetailSave =
-    pendingAttachmentSave || pendingPasskeySave || pendingUnknownDetailMutation;
-  const hasPendingEntrySave = Boolean(
-    pendingEntrySave || pendingDetailSave || entryMutationOutcomeUnknown
-  );
-  const hasPendingDurableSave = hasPendingEntrySave || Boolean(pendingEntryDelete);
   const draftDirty =
     editorMode === "create-pending"
       ? hasDraftChangesFromEmpty(draft)
@@ -1179,7 +1129,7 @@ export function App({
         ? !draftMatchesEntry(draft, entryDetail)
         : false;
   const dirty =
-    hasPendingDurableSave ||
+    entryDraftOutcomeUnknown ||
     draftDirty ||
     (showDatabaseSettingsPage && databaseSettingsDraftDirty) ||
     (showExtensionSettingsPage && extensionSettingsDraftDirty);
@@ -1378,98 +1328,25 @@ export function App({
     setEntryActionError(null);
 
     try {
-      let detail: EntryDetail;
-      let saveResult: SaveVaultResult | void;
-
-      async function runEntryMutation(
-        operation: (
-          operationId?: string
-        ) => Promise<EntryDetail | CommittedMutation<EntryDetail>>
-      ) {
-        const operationId = pendingEntryMutationOperationId.current;
-        const result = operationId
-          ? await operation(operationId)
-          : await operation();
-        if (!isCommittedMutation(result) && ownsVaultRequest(vaultId, requestEpoch)) {
-          setPendingEntrySave({
-            vaultId,
-            detail: result,
-            operationId: null
-          });
-        }
-        const settled = await settleMutationResult(vaultId, result);
-        if (ownsVaultRequest(vaultId, requestEpoch)) {
-          pendingEntryMutationOperationId.current = null;
-          setEntryMutationOutcomeUnknown(false);
-        }
-        return settled;
-      }
-
-      if (pendingEntrySave) {
-        if (pendingEntrySave.vaultId !== vaultId) {
-          throw new Error("The pending entry belongs to another vault");
-        }
-
-        detail = pendingEntrySave.detail;
-        if (draftMatchesEntry(draft, detail)) {
-          saveResult = await retryMutationSave(
-            vaultId,
-            pendingEntrySave.operationId
-          );
-        } else {
-          pendingEntryMutationOperationId.current = null;
-          setPendingEntrySave(null);
-          const settled = await runEntryMutation((operationId) =>
-            operationId
-              ? client.updateEntryFields(vaultId, detail.id, draft, operationId)
-              : client.updateEntryFields(vaultId, detail.id, draft)
-          );
-          detail = settled.value;
-          saveResult = settled.saveResult;
-          if (ownsVaultRequest(vaultId, requestEpoch)) {
-            setPendingEntrySave({
-              vaultId,
-              detail,
-              operationId: settled.operationId
-            });
-          }
-        }
-      } else if (wasCreating) {
-        const settled = await runEntryMutation((operationId) => {
-          const input = {
+      const mutation = wasCreating
+        ? await client.createEntry(vaultId, {
             parentGroupId: selectedGroupId ?? groupTree?.root.id ?? "",
             ...draft
-          };
-          return operationId
-            ? client.createEntry(vaultId, input, operationId)
-            : client.createEntry(vaultId, input);
-        });
-        detail = settled.value;
-        saveResult = settled.saveResult;
-      } else if (editorMode === "edit" && selectedEntryId) {
-        const settled = await runEntryMutation((operationId) =>
-          operationId
-            ? client.updateEntryFields(vaultId, selectedEntryId, draft, operationId)
-            : client.updateEntryFields(vaultId, selectedEntryId, draft)
-        );
-        detail = settled.value;
-        saveResult = settled.saveResult;
-      } else {
+          })
+        : editorMode === "edit" && selectedEntryId
+          ? await client.updateEntryFields(vaultId, selectedEntryId, draft)
+          : null;
+      if (mutation === null) {
         return false;
       }
-
-      if (ownsVaultRequest(vaultId, requestEpoch)) {
-        setPendingEntrySave({ vaultId, detail, operationId: null });
-      }
+      const { value: detail, publication } = settleMutationResult(mutation);
       if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return false;
       }
-      handleSaveResult(vaultId, saveResult);
-      setEntryDetail(detail);
-      if (wasCreating) {
-        setSelectedEntryId(detail.id);
-        setShowEntryListWithDetail(true);
-      } else {
+      setEntryDraftOutcomeUnknown(false);
+      handlePublicationResult(vaultId, publication);
+      applyEntryMutationDetail(detail, wasCreating);
+      if (!wasCreating && detail !== null) {
         setShowEntryListWithDetail(false);
       }
 
@@ -1478,17 +1355,7 @@ export function App({
       return true;
     } catch (mutationError) {
       if (ownsVaultRequest(vaultId, requestEpoch)) {
-        const operationId = runtimeMutationOperationId(mutationError);
-        const mutationDetail = runtimeMutationResult<EntryDetail>(mutationError);
-        pendingEntryMutationOperationId.current = operationId;
-        if (operationId && mutationDetail) {
-          setPendingEntrySave({
-            vaultId,
-            detail: mutationDetail,
-            operationId
-          });
-        }
-        setEntryMutationOutcomeUnknown(operationId !== null && !mutationDetail);
+        setEntryDraftOutcomeUnknown(isUnknownMutationOutcome(mutationError));
         setEntryActionError(
           errorMessage(
             mutationError,
@@ -1513,7 +1380,6 @@ export function App({
     setSaveAndContinueBusy(true);
 
     try {
-      const pendingDelete = pendingEntryDelete;
       const hadDatabaseSettingsDraft = Boolean(
         showDatabaseSettingsPage &&
           databaseSettingsDraftDirty &&
@@ -1529,17 +1395,12 @@ export function App({
         ? await handleSaveDatabaseSettings(databaseSettingsDraftUpdate.current!)
         : hadExtensionSettingsDraft
             ? await saveExtensionSettings(extensionSettingsDraft.current!)
-            : pendingDelete
-              ? await handleDeleteEntry(pendingDelete.entryId)
-            : pendingDetailSave
-              ? await retryPendingDetailSave()
-              : true;
+            : true;
       if (
         saved &&
         !handledDatabaseSettings &&
         !hadExtensionSettingsDraft &&
-        !pendingDelete &&
-        (draftDirty || !pendingDetailSave)
+        (draftDirty || entryDraftOutcomeUnknown)
       ) {
         saved = await saveDraft();
       }
@@ -1569,8 +1430,8 @@ export function App({
               ? "Save your database settings before leaving, discard your edits, or continue editing."
               : showExtensionSettingsPage && extensionSettingsDraftDirty
                 ? "Save your extension settings before leaving, discard your edits, or continue editing."
-                : hasPendingEntrySave || pendingEntryDelete
-                  ? "This entry changed in the current session but is not durable yet. Retry saving before leaving it."
+                : entryDraftOutcomeUnknown
+                  ? "The previous save request had an unknown outcome. Try again only if you intend to submit a new save request."
                   : "Save before leaving this entry, discard your edits, or continue editing."
         )}
         actions={[
@@ -1582,18 +1443,14 @@ export function App({
               void handleSaveAndContinue(dialogState.action);
             }
           },
-          ...(hasPendingDurableSave
-            ? []
-            : [
-                {
-                  label: translate(extensionSettings.language, "Discard changes"),
-                  disabled: saveAndContinueBusy,
-                  onClick: () => {
-                    discardAllDrafts();
-                    performAction(dialogState.action);
-                  }
-                }
-              ]),
+          {
+            label: translate(extensionSettings.language, "Discard changes"),
+            disabled: saveAndContinueBusy,
+            onClick: () => {
+              discardAllDrafts();
+              performAction(dialogState.action);
+            }
+          },
           {
             label: translate(extensionSettings.language, "Continue editing"),
             disabled: saveAndContinueBusy,
@@ -1611,61 +1468,28 @@ export function App({
 
     const requestEpoch = residentSessionEpoch.current;
     const vaultId = session.activeVaultId;
-    const matchingPendingDelete =
-      pendingEntryDelete?.vaultId === vaultId && pendingEntryDelete.entryId === entryId
-        ? pendingEntryDelete
-        : null;
-    let mutationApplied = matchingPendingDelete?.operationId === null;
     setEntryActionBusy(true);
     setEntryActionError(null);
 
     try {
-      if (pendingEntryDelete && !mutationApplied) {
-        if (!matchingPendingDelete) {
-          throw new Error("Another entry deletion is pending");
-        }
-      }
-      let saveResult: SaveVaultResult | void;
-      if (mutationApplied) {
-        saveResult = await client.saveVault(vaultId);
-      } else {
-        const mutation = matchingPendingDelete?.operationId
-          ? await client.deleteEntry(
-            vaultId,
-            entryId,
-            matchingPendingDelete.operationId
-          )
-          : await client.deleteEntry(vaultId, entryId);
-        mutationApplied = true;
-        if (!isCommittedMutation(mutation) && ownsVaultRequest(vaultId, requestEpoch)) {
-          setPendingEntryDelete({ vaultId, entryId, operationId: null });
-        }
-        saveResult = (await settleMutationResult(vaultId, mutation)).saveResult;
-      }
+      const mutation = await client.deleteEntry(vaultId, entryId);
+      const { publication } = settleMutationResult(mutation);
       if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return false;
       }
-      handleSaveResult(vaultId, saveResult);
-      setPendingEntryDelete(null);
+      handlePublicationResult(vaultId, publication);
       clearDetailSelection();
       setWorkspaceReloadKey((current) => current + 1);
       setDialogState(null);
       return true;
     } catch (deleteError) {
-      const operationId = runtimeMutationOperationId(deleteError);
       if (ownsVaultRequest(vaultId, requestEpoch)) {
-        if (operationId) {
-          setPendingEntryDelete({ vaultId, entryId, operationId });
-        }
         setEntryActionError(
           errorMessage(
             deleteError,
             translate(extensionSettings.language, "Failed to delete entry")
           )
         );
-        if (!mutationApplied && !operationId) {
-          setDialogState(null);
-        }
       }
       return false;
     } finally {
@@ -1677,12 +1501,8 @@ export function App({
 
   async function runEntryDetailMutation(
     owner: EntryRequestOwner,
-    operation: (
-      operationId?: string
-    ) => Promise<EntryDetail | CommittedMutation<EntryDetail>>,
-    fallbackMessage: string,
-    stagePendingSave: (detail: EntryDetail, operationId: string | null) => void,
-    clearPendingSave: () => void
+    operation: () => Promise<EntryDetail | CommittedEntryMutation>,
+    fallbackMessage: string
   ) {
     if (!ownsEntryProjection(owner)) {
       return;
@@ -1693,49 +1513,17 @@ export function App({
 
     try {
       const mutation = await operation();
-      if (
-        !isCommittedMutation(mutation) &&
-        ownsVaultRequest(owner.vaultId, owner.sessionEpoch)
-      ) {
-        if (ownsEntryProjection(owner)) {
-          setEntryDetail(mutation);
-        }
-        stagePendingSave(mutation, null);
-      }
-      const { value: detail, saveResult } = await settleMutationResult(
-        owner.vaultId,
-        mutation
-      );
+      const { value: detail, publication } = settleMutationResult(mutation);
       if (ownsEntryProjection(owner)) {
-        setEntryDetail(detail);
+        applyEntryMutationDetail(detail);
       }
       if (!ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
         return;
       }
-      handleSaveResult(owner.vaultId, saveResult);
-      clearPendingSave();
-      setPendingUnknownDetailMutation(null);
+      handlePublicationResult(owner.vaultId, publication);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (mutationError) {
       if (ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
-        const operationId = runtimeMutationOperationId(mutationError);
-        const mutationDetail = runtimeMutationResult<EntryDetail>(mutationError);
-        if (operationId && mutationDetail) {
-          if (ownsEntryProjection(owner)) {
-            setEntryDetail(mutationDetail);
-          }
-          stagePendingSave(mutationDetail, operationId);
-          setPendingUnknownDetailMutation(null);
-        } else if (operationId) {
-          setPendingUnknownDetailMutation({
-            owner,
-            operationId,
-            fallbackMessage,
-            replay: (replayOperationId) => operation(replayOperationId),
-            stagePendingSave,
-            clearPendingSave
-          });
-        }
         if (ownsEntryProjection(owner)) {
           setEntryActionError(errorMessage(mutationError, fallbackMessage));
         }
@@ -1755,19 +1543,8 @@ export function App({
 
     await runEntryDetailMutation(
       owner,
-      (operationId) =>
-        operationId
-          ? client.setEntryPasskey(
-              owner.vaultId,
-              owner.entryId,
-              passkey,
-              operationId
-            )
-          : client.setEntryPasskey(owner.vaultId, owner.entryId, passkey),
-      translate(extensionSettings.language, "Failed to save entry passkey"),
-      (detail, operationId) =>
-        setPendingPasskeySave({ vaultId: owner.vaultId, detail, operationId }),
-      () => setPendingPasskeySave(null)
+      () => client.setEntryPasskey(owner.vaultId, owner.entryId, passkey),
+      translate(extensionSettings.language, "Failed to save entry passkey")
     );
   }
 
@@ -1779,51 +1556,9 @@ export function App({
 
     await runEntryDetailMutation(
       owner,
-      (operationId) =>
-        operationId
-          ? client.clearEntryPasskey(owner.vaultId, owner.entryId, operationId)
-          : client.clearEntryPasskey(owner.vaultId, owner.entryId),
-      translate(extensionSettings.language, "Failed to save entry passkey"),
-      (detail, operationId) =>
-        setPendingPasskeySave({ vaultId: owner.vaultId, detail, operationId }),
-      () => setPendingPasskeySave(null)
+      () => client.clearEntryPasskey(owner.vaultId, owner.entryId),
+      translate(extensionSettings.language, "Failed to save entry passkey")
     );
-  }
-
-  async function retryPendingPasskeySave() {
-    if (!pendingPasskeySave) {
-      return false;
-    }
-
-    const requestEpoch = residentSessionEpoch.current;
-    const { vaultId, operationId } = pendingPasskeySave;
-    setEntryActionBusy(true);
-    setEntryActionError(null);
-
-    try {
-      const saveResult = await retryMutationSave(vaultId, operationId);
-      if (!ownsVaultRequest(vaultId, requestEpoch)) {
-        return false;
-      }
-      handleSaveResult(vaultId, saveResult);
-      setPendingPasskeySave(null);
-      setWorkspaceReloadKey((current) => current + 1);
-      return true;
-    } catch (passkeyError) {
-      if (ownsVaultRequest(vaultId, requestEpoch)) {
-        setEntryActionError(
-          errorMessage(
-            passkeyError,
-            translate(extensionSettings.language, "Failed to save entry passkey")
-          )
-        );
-      }
-      return false;
-    } finally {
-      if (ownsVaultRequest(vaultId, requestEpoch)) {
-        setEntryActionBusy(false);
-      }
-    }
   }
 
   async function handleDownloadAttachment(name: string) {
@@ -1860,136 +1595,15 @@ export function App({
     owner: EntryRequestOwner,
     operation: (
       vaultId: string,
-      entryId: string,
-      operationId?: string
-    ) => Promise<EntryDetail | CommittedMutation<EntryDetail>>,
+      entryId: string
+    ) => Promise<EntryDetail | CommittedEntryMutation>,
     fallbackMessage: string
   ) {
     await runEntryDetailMutation(
       owner,
-      (operationId) => operation(owner.vaultId, owner.entryId, operationId),
-      fallbackMessage,
-      (detail, operationId) =>
-        setPendingAttachmentSave({
-          vaultId: owner.vaultId,
-          detail,
-          operationId,
-          fallbackMessage
-        }),
-      () => setPendingAttachmentSave(null)
+      () => operation(owner.vaultId, owner.entryId),
+      fallbackMessage
     );
-  }
-
-  async function retryPendingAttachmentSave() {
-    if (!pendingAttachmentSave) {
-      return false;
-    }
-
-    const requestEpoch = residentSessionEpoch.current;
-    const { vaultId, operationId, fallbackMessage } = pendingAttachmentSave;
-    setEntryActionBusy(true);
-    setEntryActionError(null);
-
-    try {
-      const saveResult = await retryMutationSave(vaultId, operationId);
-      if (!ownsVaultRequest(vaultId, requestEpoch)) {
-        return false;
-      }
-      handleSaveResult(vaultId, saveResult);
-      setPendingAttachmentSave(null);
-      setWorkspaceReloadKey((current) => current + 1);
-      return true;
-    } catch (attachmentError) {
-      if (ownsVaultRequest(vaultId, requestEpoch)) {
-        setEntryActionError(errorMessage(attachmentError, fallbackMessage));
-      }
-      return false;
-    } finally {
-      if (ownsVaultRequest(vaultId, requestEpoch)) {
-        setEntryActionBusy(false);
-      }
-    }
-  }
-
-  async function retryPendingDetailSave() {
-    if (pendingUnknownDetailMutation) {
-      return retryUnknownDetailMutation();
-    }
-    if (pendingAttachmentSave) {
-      return retryPendingAttachmentSave();
-    }
-    if (pendingPasskeySave) {
-      return retryPendingPasskeySave();
-    }
-    return false;
-  }
-
-  async function retryUnknownDetailMutation() {
-    if (!pendingUnknownDetailMutation) {
-      return false;
-    }
-
-    const {
-      owner,
-      operationId,
-      fallbackMessage,
-      replay,
-      stagePendingSave,
-      clearPendingSave
-    } = pendingUnknownDetailMutation;
-    let replayedLegacyDetail: EntryDetail | null = null;
-    setEntryActionBusy(true);
-    setEntryActionError(null);
-
-    try {
-      const mutation = await replay(operationId);
-      if (!isCommittedMutation(mutation)) {
-        replayedLegacyDetail = mutation;
-        if (ownsEntryProjection(owner)) {
-          setEntryDetail(mutation);
-        }
-        if (ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
-          stagePendingSave(mutation, null);
-        }
-      }
-      const { value: detail, saveResult } = await settleMutationResult(
-        owner.vaultId,
-        mutation
-      );
-      if (!ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
-        return false;
-      }
-      if (ownsEntryProjection(owner)) {
-        setEntryDetail(detail);
-      }
-      handleSaveResult(owner.vaultId, saveResult);
-      clearPendingSave();
-      setPendingUnknownDetailMutation(null);
-      setWorkspaceReloadKey((current) => current + 1);
-      return true;
-    } catch (mutationError) {
-      if (ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
-        const mutationDetail =
-          runtimeMutationResult<EntryDetail>(mutationError) ??
-          replayedLegacyDetail;
-        if (mutationDetail && ownsEntryProjection(owner)) {
-          setEntryDetail(mutationDetail);
-        }
-        if (mutationDetail) {
-          stagePendingSave(
-            mutationDetail,
-            runtimeMutationOperationId(mutationError)
-          );
-          setPendingUnknownDetailMutation(null);
-        }
-        setEntryActionError(errorMessage(mutationError, fallbackMessage));
-      }
-      return false;
-    } finally {
-      if (ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
-        setEntryActionBusy(false);
-      }
-    }
   }
 
   async function handleAddAttachment(file: File, protectInMemory: boolean) {
@@ -2013,15 +1627,13 @@ export function App({
     }
     await updateAttachment(
       owner,
-      (vaultId, entryId, operationId) => {
+      (vaultId, entryId) => {
         const input = {
           name: file.name,
           dataBase64,
           protectInMemory
         };
-        return operationId
-          ? client.addEntryAttachment(vaultId, entryId, input, operationId)
-          : client.addEntryAttachment(vaultId, entryId, input);
+        return client.addEntryAttachment(vaultId, entryId, input);
       },
       fallbackMessage
     );
@@ -2039,20 +1651,13 @@ export function App({
 
     await updateAttachment(
       owner,
-      (vaultId, entryId, operationId) => {
+      (vaultId, entryId) => {
         const input = {
           oldName,
           newName,
           protectInMemory
         };
-        return operationId
-          ? client.updateEntryAttachmentMetadata(
-              vaultId,
-              entryId,
-              input,
-              operationId
-            )
-          : client.updateEntryAttachmentMetadata(vaultId, entryId, input);
+        return client.updateEntryAttachmentMetadata(vaultId, entryId, input);
       },
       translate(extensionSettings.language, "Failed to update attachment")
     );
@@ -2079,16 +1684,9 @@ export function App({
     }
     await updateAttachment(
       owner,
-      (vaultId, entryId, operationId) => {
+      (vaultId, entryId) => {
         const input = { name, dataBase64 };
-        return operationId
-          ? client.replaceEntryAttachmentContent(
-              vaultId,
-              entryId,
-              input,
-              operationId
-            )
-          : client.replaceEntryAttachmentContent(vaultId, entryId, input);
+        return client.replaceEntryAttachmentContent(vaultId, entryId, input);
       },
       fallbackMessage
     );
@@ -2102,10 +1700,8 @@ export function App({
 
     await updateAttachment(
       owner,
-      (vaultId, entryId, operationId) =>
-        operationId
-          ? client.deleteEntryAttachment(vaultId, entryId, name, operationId)
-          : client.deleteEntryAttachment(vaultId, entryId, name),
+      (vaultId, entryId) =>
+        client.deleteEntryAttachment(vaultId, entryId, name),
       translate(extensionSettings.language, "Failed to delete attachment")
     );
   }
@@ -2165,9 +1761,9 @@ export function App({
       setDatabaseName(result.settings.metadata.name);
       resetDatabaseSettingsDraftState();
       setSettingsDraftEpoch((current) => current + 1);
-      handleSaveResult(vaultId, result.saveResult);
+      handlePublicationResult(vaultId, result.publication);
       setWorkspaceReloadKey((current) => current + 1);
-      if (result.saveResult.status === "saved") {
+      if (result.publication.status === "published") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
       }
       return true;
@@ -2589,10 +2185,6 @@ export function App({
     setEntriesError(null);
     setShowEntryListWithDetail(false);
     resetEditorState();
-    setPendingPasskeySave(null);
-    setPendingAttachmentSave(null);
-    setPendingUnknownDetailMutation(null);
-    setPendingEntryDelete(null);
     setFillCandidates([]);
     setFillError(null);
     setStackedStage("groups");
@@ -3224,14 +2816,14 @@ export function App({
               draft={draft}
               dirty={dirty}
               busy={entryActionBusy}
-              pendingSave={hasPendingEntrySave}
+              pendingSave={entryDraftOutcomeUnknown}
               error={entryActionError ?? detailError}
               historyItems={historyItems}
               historyDetail={historyDetail}
               historyError={historyError}
               onBack={viewMode === "expanded" ? undefined : handleBackToEntries}
               onStartEdit={() => {
-                if (!entryDetail || pendingDetailSave) {
+                if (!entryDetail) {
                   return;
                 }
 
@@ -3311,10 +2903,10 @@ export function App({
                 void handleClearEntryPasskey();
               }}
               onRetrySave={() => {
-                void retryPendingDetailSave();
+                void saveDraft();
               }}
               onSave={() => {
-                void (pendingDetailSave ? retryPendingDetailSave() : saveDraft());
+                void saveDraft();
               }}
               onCancel={() => {
                 if (editorMode === "create-pending") {
@@ -3398,25 +2990,18 @@ export function App({
           }
           actions={[
             {
-              label: translate(
-                extensionSettings.language,
-                pendingEntryDelete ? "Retry save" : "Delete permanently"
-              ),
-              variant: pendingEntryDelete ? "primary" : "danger",
+              label: translate(extensionSettings.language, "Delete permanently"),
+              variant: "danger",
               disabled: entryActionBusy,
               onClick: () => {
                 void handleDeleteEntry(dialogState.entryId);
               }
             },
-            ...(pendingEntryDelete
-              ? []
-              : [
-                  {
-                    label: translate(extensionSettings.language, "Cancel"),
-                    disabled: entryActionBusy,
-                    onClick: () => setDialogState(null)
-                  }
-                ])
+            {
+              label: translate(extensionSettings.language, "Cancel"),
+              disabled: entryActionBusy,
+              onClick: () => setDialogState(null)
+            }
           ]}
         />
       ) : null}

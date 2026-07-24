@@ -44,9 +44,7 @@ const runtimeClientMocks = vi.hoisted(() => ({
   findFillCandidates: vi.fn(),
   findExactMatchingEntryIds: vi.fn(),
   createEntry: vi.fn(),
-  updateEntryFields: vi.fn(),
-  compareAndUpdateEntryFields: vi.fn(),
-  saveVault: vi.fn()
+  updateEntryFields: vi.fn()
 }));
 
 function createDeferred<T>() {
@@ -194,8 +192,6 @@ beforeEach(() => {
   runtimeClientMocks.findExactMatchingEntryIds.mockReset();
   runtimeClientMocks.createEntry.mockReset();
   runtimeClientMocks.updateEntryFields.mockReset();
-  runtimeClientMocks.compareAndUpdateEntryFields.mockReset();
-  runtimeClientMocks.saveVault.mockReset();
   runtimeClientMocks.enableQuickUnlockForCurrentVault.mockReset();
   runtimeClientMocks.recordUserActivity.mockResolvedValue({
     unlocked: true,
@@ -276,17 +272,6 @@ beforeEach(() => {
       ...fields
     })
   );
-  runtimeClientMocks.compareAndUpdateEntryFields.mockImplementation(
-    async (_vaultId, entryId, _expectedFields, desiredFields) => ({
-      type: "entry_detail",
-      id: entryId,
-      ...desiredFields
-    })
-  );
-  runtimeClientMocks.saveVault.mockResolvedValue({
-    type: "save_vault_result",
-    status: "saved"
-  });
 });
 
 describe("fillLoginForm", () => {

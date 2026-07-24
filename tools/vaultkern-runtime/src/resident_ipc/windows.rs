@@ -1447,8 +1447,8 @@ mod tests {
     use super::*;
     use crate::resident_ipc::read_frame;
     use vaultkern_runtime_protocol::{
-        AutofillCredentialDto, AutofillPersistPlanDto, EntryFieldsDto, FillCandidateListDto,
-        HandshakeDto, PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
+        AutofillCredentialDto, AutofillUpdateFieldsDto, FillCandidateListDto, HandshakeDto,
+        PROTOCOL_VERSION, RuntimeCommand, SessionStateDto,
     };
 
     const EXTENSION_ORIGIN: &str = "chrome-extension://kblgblkjghklighdgmejjfondchkjcgf/";
@@ -1476,24 +1476,19 @@ mod tests {
         })
     }
 
-    fn test_autofill_mutation(transaction_id: &str) -> RuntimeCommand {
-        RuntimeCommand::PersistAutofillMutation {
-            transaction_id: transaction_id.into(),
-            operation_id: format!("operation-{transaction_id}"),
+    fn test_entry_mutation(entry_id: &str) -> RuntimeCommand {
+        RuntimeCommand::UpdateAutofillEntryFields {
             vault_id: "vault-1".into(),
-            plan: AutofillPersistPlanDto::Create {
-                parent_group_id: "root".into(),
-                planned_entry_id: format!("entry-{transaction_id}"),
-                expected_matching_entry_ids: Vec::new(),
-                desired_fields: EntryFieldsDto {
-                    title: "test".into(),
-                    username: String::new().into(),
-                    password: String::new().into(),
-                    url: "https://example.test/".into(),
-                    notes: String::new().into(),
-                    totp_uri: None,
-                    custom_fields: Vec::new(),
-                },
+            entry_id: entry_id.into(),
+            expected_fields: AutofillUpdateFieldsDto {
+                username: "before".into(),
+                password: "before-secret".into(),
+                url: "https://example.test/".into(),
+            },
+            desired_fields: AutofillUpdateFieldsDto {
+                username: "after".into(),
+                password: "after-secret".into(),
+                url: "https://example.test/".into(),
             },
         }
     }
@@ -1541,7 +1536,7 @@ mod tests {
     #[test]
     fn unavailable_resident_app_returns_a_correlated_native_error() {
         let request = serde_json::to_vec(&json!({
-            "version": 2,
+            "version": 3,
             "requestId": "native-startup-1",
             "requestTimeoutMs": 30_000,
             "command": { "type": "get_session_state" }
@@ -1672,15 +1667,15 @@ mod tests {
                         handler_cancellations.fetch_add(1, Ordering::AcqRel);
                         RuntimeResponse::Saved
                     }
-                    RuntimeCommand::PersistAutofillMutation { transaction_id, .. }
-                        if transaction_id == "commit-after-dispatch" =>
+                    RuntimeCommand::UpdateAutofillEntryFields { entry_id, .. }
+                        if entry_id == "commit-after-dispatch" =>
                     {
                         handler_mutation_started.store(true, Ordering::Release);
                         std::thread::sleep(Duration::from_millis(50));
                         RuntimeResponse::Saved
                     }
-                    RuntimeCommand::PersistAutofillMutation { transaction_id, .. }
-                        if transaction_id == "commit-after-deadline" =>
+                    RuntimeCommand::UpdateAutofillEntryFields { entry_id, .. }
+                        if entry_id == "commit-after-deadline" =>
                     {
                         handler_deadline_mutation_started.store(true, Ordering::Release);
                         std::thread::sleep(Duration::from_millis(750));
@@ -1933,7 +1928,7 @@ mod tests {
             &request_frame(
                 "native-running-cancel-1",
                 5_000,
-                test_autofill_mutation("commit-after-dispatch"),
+                test_entry_mutation("commit-after-dispatch"),
             ),
         )
         .expect("send running mutation request");
@@ -1968,7 +1963,7 @@ mod tests {
             &request_frame(
                 "native-running-timeout-1",
                 250,
-                test_autofill_mutation("commit-after-deadline"),
+                test_entry_mutation("commit-after-deadline"),
             ),
         )
         .expect("send mutation that outlives its response deadline");

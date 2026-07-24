@@ -865,34 +865,47 @@ impl From<EntryFieldsDto> for protocol::EntryFieldsDto {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum SaveVaultStatusDto {
-    Saved,
-    Merged,
-    SavedToCache,
-    ConflictCopy,
+pub enum CommitStatusDto {
+    Committed,
 }
 
-impl From<protocol::SaveVaultStatusDto> for SaveVaultStatusDto {
-    fn from(value: protocol::SaveVaultStatusDto) -> Self {
+impl From<protocol::CommitStatusDto> for CommitStatusDto {
+    fn from(value: protocol::CommitStatusDto) -> Self {
         match value {
-            protocol::SaveVaultStatusDto::Saved => Self::Saved,
-            protocol::SaveVaultStatusDto::Merged => Self::Merged,
-            protocol::SaveVaultStatusDto::SavedToCache => Self::SavedToCache,
-            protocol::SaveVaultStatusDto::ConflictCopy => Self::ConflictCopy,
+            protocol::CommitStatusDto::Committed => Self::Committed,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PublicationStatusDto {
+    Published,
+    Reconciled,
+    Pending,
+    ConflictSplit,
+}
+
+impl From<protocol::PublicationStatusDto> for PublicationStatusDto {
+    fn from(value: protocol::PublicationStatusDto) -> Self {
+        match value {
+            protocol::PublicationStatusDto::Published => Self::Published,
+            protocol::PublicationStatusDto::Reconciled => Self::Reconciled,
+            protocol::PublicationStatusDto::Pending => Self::Pending,
+            protocol::PublicationStatusDto::ConflictSplit => Self::ConflictSplit,
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct MergeSummaryDto {
+pub struct ReconciliationSummaryDto {
     pub merged_entries: u64,
     pub history_snapshots_added: u64,
     pub meta_conflicts_resolved: u32,
     pub icon_conflicts_resolved: u32,
 }
 
-impl From<protocol::MergeSummaryDto> for MergeSummaryDto {
-    fn from(value: protocol::MergeSummaryDto) -> Self {
+impl From<protocol::ReconciliationSummaryDto> for ReconciliationSummaryDto {
+    fn from(value: protocol::ReconciliationSummaryDto) -> Self {
         Self {
             merged_entries: value.merged_entries as u64,
             history_snapshots_added: value.history_snapshots_added as u64,
@@ -903,18 +916,35 @@ impl From<protocol::MergeSummaryDto> for MergeSummaryDto {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SaveVaultResultDto {
-    pub status: SaveVaultStatusDto,
-    pub merge_summary: Option<MergeSummaryDto>,
+pub struct PublicationResultDto {
+    pub status: PublicationStatusDto,
+    pub reconciliation_summary: Option<ReconciliationSummaryDto>,
     pub conflict_copy_path: Option<String>,
 }
 
-impl From<protocol::SaveVaultResultDto> for SaveVaultResultDto {
-    fn from(value: protocol::SaveVaultResultDto) -> Self {
+impl From<protocol::PublicationResultDto> for PublicationResultDto {
+    fn from(value: protocol::PublicationResultDto) -> Self {
         Self {
             status: value.status.into(),
-            merge_summary: value.merge_summary.map(Into::into),
+            reconciliation_summary: value.reconciliation_summary.map(Into::into),
             conflict_copy_path: value.conflict_copy_path,
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, uniffi::Record)]
+pub struct EntryMutationResultDto {
+    pub commit: CommitStatusDto,
+    pub publication: PublicationResultDto,
+    pub entry: Option<EntryDetailDto>,
+}
+
+impl From<protocol::EntryMutationResultDto> for EntryMutationResultDto {
+    fn from(value: protocol::EntryMutationResultDto) -> Self {
+        Self {
+            commit: value.commit.into(),
+            publication: value.publication.into(),
+            entry: value.entry.map(Into::into),
         }
     }
 }
@@ -1254,34 +1284,35 @@ impl VaultSession {
         vault_id: String,
         entry_id: String,
         fields: EntryFieldsDto,
-    ) -> Result<EntryDetailDto, VaultKernError> {
-        let fields: protocol::EntryFieldsDto = fields.into();
-        self.shared
-            .lock_for_session_mutation()?
-            .update_entry_fields(
-                &vault_id,
-                &entry_id,
-                fields.title,
-                fields.username,
-                fields.password,
-                fields.url,
-                fields.notes,
-                fields.totp_uri,
-                fields.custom_fields,
-            )
-            .map(Into::into)
-            .map_err(Into::into)
-    }
-
-    pub fn save(&self, vault_id: String) -> Result<SaveVaultResultDto, VaultKernError> {
-        match self
-            .shared
-            .lock_for_session_mutation()?
-            .save_vault(&vault_id)?
-        {
-            protocol::RuntimeResponse::SaveVaultResult(result) => Ok(result.into()),
+    ) -> Result<EntryMutationResultDto, VaultKernError> {
+        let protocol::EntryFieldsDto {
+            title,
+            username,
+            password,
+            url,
+            notes,
+            totp_uri,
+            custom_fields,
+        } = fields.into();
+        match self.shared.lock_for_session_mutation()?.handle(
+            protocol::RuntimeCommand::UpdateEntryFields {
+                vault_id,
+                entry_id,
+                title,
+                username,
+                password,
+                url,
+                notes,
+                totp_uri,
+                custom_fields,
+            },
+        )? {
+            protocol::RuntimeResponse::EntryMutationResult(result) => Ok(result.into()),
+            protocol::RuntimeResponse::Error(error) => Err(VaultKernError::Core {
+                details: error.message,
+            }),
             _ => Err(VaultKernError::Core {
-                details: "vault save returned an unexpected runtime response".into(),
+                details: "entry Commit returned an unexpected runtime response".into(),
             }),
         }
     }

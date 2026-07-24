@@ -4,8 +4,14 @@ use vaultkern_core::{
 };
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
-    DatabaseSettingsUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+    DatabaseSettingsUpdateDto, PublicationStatusDto, RuntimeCommand, RuntimeResponse,
 };
+
+fn retry_publication(runtime: &mut Runtime, vault_id: &str) -> anyhow::Result<RuntimeResponse> {
+    runtime.handle(RuntimeCommand::RetryVaultPublication {
+        vault_id: vault_id.to_owned(),
+    })
+}
 
 fn key() -> CompositeKey {
     let mut key = CompositeKey::default();
@@ -49,6 +55,31 @@ fn create_entry(
     created.id
 }
 
+fn stage_entry_update(
+    runtime: &mut Runtime,
+    vault_id: &str,
+    entry_id: &str,
+    title: &str,
+    username: &str,
+    password: &str,
+    url: &str,
+    notes: &str,
+) {
+    runtime
+        .update_entry_fields(
+            vault_id,
+            entry_id,
+            title.into(),
+            username.into(),
+            password.into(),
+            url.into(),
+            notes.into(),
+            None,
+            vec![],
+        )
+        .expect("stage the Working Copy without invoking the Runtime Protocol commit path");
+}
+
 #[test]
 fn runtime_opens_unlocks_and_saves_onedrive_vault_reference() {
     let core = KeepassCore::new();
@@ -81,15 +112,15 @@ fn runtime_opens_unlocks_and_saves_onedrive_vault_reference() {
     assert!(session.unlocked);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: session.active_vault_id.unwrap(),
         })
         .unwrap();
 
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Saved && result.merge_summary.is_none()
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Published && result.reconciliation_summary.is_none()
     ));
 }
 
@@ -129,7 +160,7 @@ fn runtime_persists_a_local_onedrive_encryption_profile_change() {
         )
         .unwrap();
 
-    runtime.save_vault(&vault_id).unwrap();
+    retry_publication(&mut runtime, &vault_id).unwrap();
 
     let saved = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
@@ -571,7 +602,7 @@ fn runtime_retry_sync_refreshes_quick_unlock_after_remote_kdf_rotation() {
             .notes,
         "remote-retry-after-kdf-rotation"
     );
-    runtime.save_vault(&vault_id).unwrap();
+    retry_publication(&mut runtime, &vault_id).unwrap();
     let saved = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
@@ -610,21 +641,18 @@ fn runtime_updates_remote_cache_after_successful_save() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Saved Offline Cache",
+        "alice",
+        "saved-password",
+        "https://saved.example",
+        "published",
+    );
     runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Saved Offline Cache".into(),
-            username: "alice".into(),
-            password: "saved-password".into(),
-            url: "https://saved.example".into(),
-            notes: "saved".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
-    runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -682,30 +710,27 @@ fn runtime_saves_remote_vault_to_pending_cache_when_remote_write_fails() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Unsaved Remote Failure".into(),
-            username: "alice".into(),
-            password: "unsaved-password".into(),
-            url: "https://unsaved.example".into(),
-            notes: "unsaved".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Unsaved Remote Failure",
+        "alice",
+        "unsaved-password",
+        "https://unsaved.example",
+        "unsaved",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     match response {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::SavedToCache);
-            assert_eq!(result.merge_summary, None);
+        RuntimeResponse::PublicationResult(result) => {
+            assert_eq!(result.status, PublicationStatusDto::Pending);
+            assert_eq!(result.reconciliation_summary, None);
         }
         other => panic!("expected save result, got {other:?}"),
     }
@@ -775,22 +800,19 @@ fn runtime_retries_pending_cache_by_uploading_local_version() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Pending Local".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://pending.example".into(),
-            notes: "pending".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Pending Local",
+        "alice",
+        "pending-password",
+        "https://pending.example",
+        "pending",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -841,29 +863,21 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Pending Local".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://pending.example".into(),
-            notes: "pending".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Pending Local",
+        "alice",
+        "pending-password",
+        "https://pending.example",
+        "pending",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
-        .unwrap();
-
-    runtime.lock_session();
-    runtime
-        .unlock_current_vault_with_password("demo-password")
         .unwrap();
 
     let mut remote_changed = core.load_database(&initial_bytes, &key()).unwrap().vault;
@@ -879,18 +893,25 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
         remote_changed_bytes,
     );
 
-    runtime
+    let retry = runtime
         .handle(RuntimeCommand::RetryVaultSourceSync {
             vault_id: vault_id.clone(),
         })
         .unwrap();
+    assert!(matches!(
+        retry,
+        RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
+    ));
 
     let uploaded = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
     let database = core.load_database(&uploaded, &key()).unwrap();
     let entries = core.project_vault(&database.vault).root.entries;
-    assert!(entries.iter().any(|entry| entry.title == "Pending Local"));
+    assert!(
+        entries.iter().any(|entry| entry.title == "Pending Local"),
+        "uploaded entries: {entries:?}"
+    );
     assert!(entries.iter().any(|entry| entry.title == "Remote"));
 }
 
@@ -920,29 +941,26 @@ fn runtime_publishes_deleted_source_pending_as_conflict_copy_after_remote_kdf_ro
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "pending-password",
+        "https://account.example",
+        "",
+    );
     runtime.remove_test_onedrive_item("drive-1", "item-1");
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -1061,19 +1079,16 @@ fn kdf_rotated_rebase_with_unknown_put_keeps_a_retryable_remote_base() {
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-before-unknown-put".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-before-unknown-put",
+        "https://account.example",
+        "",
+    );
 
     let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1104,14 +1119,14 @@ fn kdf_rotated_rebase_with_unknown_put_keeps_a_retryable_remote_base() {
     runtime.queue_test_onedrive_ambiguous_write(false);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
                 && result.conflict_copy_path.is_none()
     ));
 
@@ -1159,29 +1174,26 @@ fn runtime_retries_generic_pending_with_fresh_three_way_patch_after_cas_failure(
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "pending-password",
+        "https://account.example",
+        "",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     let mut raced_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
@@ -1225,7 +1237,7 @@ fn runtime_retries_generic_pending_with_fresh_three_way_patch_after_cas_failure(
 }
 
 #[test]
-fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
+fn runtime_pending_cas_exhaustion_stays_pending_without_conflict_split() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");
     let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
@@ -1249,22 +1261,19 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "pending-password".into(),
-            url: "https://account.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "pending-password",
+        "https://account.example",
+        "keep me",
+    );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -1297,18 +1306,17 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
     let RuntimeResponse::VaultSourceStatus(status) = response else {
         panic!("expected source status");
     };
-    assert_eq!(status.remote_state, "online");
-    let error = status.last_error.expect("conflict-copy recovery message");
-    assert!(error.contains("onedrive:"), "{error}");
-    assert!(error.contains("VaultKern conflict"), "{error}");
-    assert_eq!(runtime.test_onedrive_access_counts().writes, 4);
+    assert_eq!(status.remote_state, "pending_sync");
+    let error = status.last_error.expect("Stale Revision recovery message");
+    assert!(error.contains("Stale Revision"), "{error}");
+    assert_eq!(runtime.test_onedrive_access_counts().writes, 3);
     assert_eq!(
         runtime
             .get_entry_detail(&vault_id, &entry_id)
             .unwrap()
             .notes,
-        "final-cas-race-3",
-        "the terminal state must adopt the head that caused the final CAS failure"
+        "keep me",
+        "Stale Revision must not replace Local with a rejected merge candidate"
     );
 
     let list = runtime
@@ -1319,42 +1327,24 @@ fn runtime_pending_cas_exhaustion_uploads_a_recoverable_conflict_copy() {
     let RuntimeResponse::OneDriveItemList(list) = list else {
         panic!("expected OneDrive list");
     };
-    assert_eq!(list.items.len(), 2);
-    let conflict = list
-        .items
-        .iter()
-        .find(|item| item.name.contains("VaultKern conflict"))
-        .expect("conflict copy");
-    let bytes = runtime
-        .read_test_onedrive_item_bytes("drive-1", &conflict.item_id)
-        .unwrap();
-    let vault = core.load_database(&bytes, &key()).unwrap().vault;
-    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
-    assert_eq!(entry.password, "pending-password");
+    assert_eq!(list.items.len(), 1);
 
     let retry = runtime
-        .handle(RuntimeCommand::RetryVaultSourceSync { vault_id })
+        .handle(RuntimeCommand::RetryVaultSourceSync {
+            vault_id: vault_id.clone(),
+        })
         .unwrap();
     assert!(matches!(
         retry,
         RuntimeResponse::VaultSourceStatus(status) if status.remote_state == "online"
     ));
-    let list = runtime
-        .handle(RuntimeCommand::ListOneDriveChildren {
-            parent_item_id: None,
-        })
+    let uploaded = runtime
+        .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
-    let RuntimeResponse::OneDriveItemList(list) = list else {
-        panic!("expected OneDrive list");
-    };
-    assert_eq!(
-        list.items
-            .iter()
-            .filter(|item| item.name.contains("VaultKern conflict"))
-            .count(),
-        1,
-        "a terminal conflict fallback must not upload duplicate copies"
-    );
+    let vault = core.load_database(&uploaded, &key()).unwrap().vault;
+    let entry = core.project_entry_detail(&vault, &entry_id).unwrap();
+    assert_eq!(entry.password, "pending-password");
+    assert_eq!(entry.notes, "keep me");
 }
 
 #[test]
@@ -1434,19 +1424,16 @@ fn runtime_rebases_local_fields_onto_a_changed_onedrive_source() {
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
 
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: local_entry_id,
-            title: "Local Updated".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example/app".into(),
-            notes: "local edit".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &local_entry_id,
+        "Local Updated",
+        "alice",
+        "local-password",
+        "https://local.example/app",
+        "local edit",
+    );
 
     let mut external = core.load_database(&initial_bytes, &key()).unwrap().vault;
     create_entry(&core, &mut external, "External", "bob", 90);
@@ -1456,16 +1443,16 @@ fn runtime_rebases_local_fields_onto_a_changed_onedrive_source() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", external_bytes);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .expect("007 field patch should rebase representable changes");
     assert!(
         matches!(
             &response,
-            RuntimeResponse::SaveVaultResult(result)
-                if result.status == SaveVaultStatusDto::Merged
-                    && result.merge_summary.is_some()
+            RuntimeResponse::PublicationResult(result)
+                if result.status == PublicationStatusDto::Reconciled
+                    && result.reconciliation_summary.is_some()
                     && result.conflict_copy_path.is_none()
         ),
         "unexpected save response: {response:?}"
@@ -1528,14 +1515,14 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
     runtime.reset_test_onedrive_access_counts();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
                 && result.conflict_copy_path.is_none()
     ));
     let counts = runtime.test_onedrive_access_counts();
@@ -1555,19 +1542,16 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
         remote_bytes
     );
 
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-after-adopt".into(),
-            url: "https://account.example".into(),
-            notes: "remote-only".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-after-adopt",
+        "https://account.example",
+        "remote-only",
+    );
 
     let mut changed_again = remote;
     core.update_entry_fields(
@@ -1603,14 +1587,14 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
     runtime.reset_test_onedrive_access_counts();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
                 && result.conflict_copy_path.is_none()
     ));
     assert_eq!(runtime.test_onedrive_access_counts().writes, 1);
@@ -1679,14 +1663,14 @@ fn runtime_adopts_untouched_remote_after_kdf_rotation_with_quick_unlock() {
     runtime.reset_test_onedrive_access_counts();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
                 && result.conflict_copy_path.is_none()
     ));
     assert_eq!(runtime.test_onedrive_access_counts().writes, 0);
@@ -1729,19 +1713,16 @@ fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut raced_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1774,14 +1755,14 @@ fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
     runtime.queue_test_onedrive_precondition_failure(Some(raced_remote_bytes));
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
     ));
     assert_eq!(runtime.test_onedrive_access_counts().writes, 2);
 
@@ -1818,19 +1799,16 @@ fn retention_that_cannot_keep_the_conflict_loser_uses_a_conflict_copy() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1863,12 +1841,12 @@ fn retention_that_cannot_keep_the_conflict_loser_uses_a_conflict_copy() {
     runtime.queue_test_onedrive_precondition_failure(Some(remote_bytes.clone()));
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.is_some()
     ));
     assert_eq!(
@@ -1906,19 +1884,16 @@ fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut rotated_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
     core.update_entry_fields(
@@ -1960,14 +1935,14 @@ fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", rotated_remote_bytes);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
     ));
 
     let uploaded = runtime
@@ -1987,7 +1962,7 @@ fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
 }
 
 #[test]
-fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
+fn remote_kdf_rotation_with_unrelated_lineage_splits_once_then_adopts_remote() {
     let core = KeepassCore::new();
     let mut initial = Vault::empty("Cloud Vault");
     let entry_id = create_entry(&core, &mut initial, "Account", "alice", 10);
@@ -2013,19 +1988,16 @@ fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
         .enable_quick_unlock_for_current_vault(Some("demo-password"), None)
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Local copy".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Local copy",
+        "alice",
+        "local-password",
+        "https://local.example",
+        "keep me",
+    );
 
     let unrelated = core
         .save_kdbx(
@@ -2039,18 +2011,24 @@ fn remote_kdf_rotation_with_unrelated_lineage_keeps_conflict_copy_retriable() {
         .unwrap();
     runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
 
-    for _ in 0..2 {
-        let response = runtime
-            .handle(RuntimeCommand::SaveVault {
-                vault_id: vault_id.clone(),
-            })
-            .expect("conflict-copy retry must retain a key for the kept base");
-        assert!(matches!(
-            response,
-            RuntimeResponse::SaveVaultResult(result)
-                if result.status == SaveVaultStatusDto::ConflictCopy
-        ));
-    }
+    let response = runtime
+        .handle(RuntimeCommand::RetryVaultPublication {
+            vault_id: vault_id.clone(),
+        })
+        .expect("Conflict Split must preserve Local before adopting Remote");
+    let RuntimeResponse::PublicationResult(result) = response else {
+        panic!("expected PublicationResult");
+    };
+    assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
+    assert!(runtime.list_entries(&vault_id).unwrap().is_empty());
+
+    let response = runtime
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
+        .expect("the adopted Remote Head must be the new common Base");
+    let RuntimeResponse::PublicationResult(result) = response else {
+        panic!("expected PublicationResult");
+    };
+    assert_eq!(result.status, PublicationStatusDto::Published);
 }
 
 #[test]
@@ -2076,19 +2054,16 @@ fn unrepresentable_remote_lineage_uploads_a_sibling_conflict_copy() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Local copy".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Local copy",
+        "alice",
+        "local-password",
+        "https://local.example",
+        "keep me",
+    );
 
     let unrelated = core
         .save_kdbx(
@@ -2100,11 +2075,11 @@ fn unrepresentable_remote_lineage_uploads_a_sibling_conflict_copy() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     let conflict_path = match response {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        RuntimeResponse::PublicationResult(result) => {
+            assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
             result
                 .conflict_copy_path
                 .expect("OneDrive conflict-copy path")
@@ -2153,19 +2128,16 @@ fn foreign_writer_with_same_root_uses_a_conflict_copy_instead_of_field_patch() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut foreign = core.load_database(&initial_bytes, &key()).unwrap().vault;
     foreign.generator = Some("KeePassXC".into());
@@ -2187,12 +2159,12 @@ fn foreign_writer_with_same_root_uses_a_conflict_copy_instead_of_field_patch() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", foreign_bytes.clone());
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
     ));
     assert_eq!(
         runtime
@@ -2228,19 +2200,16 @@ fn failed_conflict_copy_upload_falls_back_to_durable_pending_state() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id: entry_id.clone(),
-            title: "Account".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://account.example".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Account",
+        "alice",
+        "local-password",
+        "https://account.example",
+        "",
+    );
 
     let mut foreign = core.load_database(&initial_bytes, &key()).unwrap().vault;
     foreign.generator = Some("KeePassXC".into());
@@ -2263,14 +2232,14 @@ fn failed_conflict_copy_upload_falls_back_to_durable_pending_state() {
     runtime.fail_next_test_onedrive_conflict_copy();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -2311,19 +2280,16 @@ fn failed_unrepresentable_patch_conflict_copy_also_falls_back_to_pending() {
         .unlock_current_vault_with_password("demo-password")
         .unwrap();
     let vault_id = runtime.session_state().active_vault_id.unwrap();
-    runtime
-        .handle(RuntimeCommand::UpdateEntryFields {
-            vault_id: vault_id.clone(),
-            entry_id,
-            title: "Local".into(),
-            username: "alice".into(),
-            password: "local-password".into(),
-            url: "https://local.example".into(),
-            notes: "keep me".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        })
-        .unwrap();
+    stage_entry_update(
+        &mut runtime,
+        &vault_id,
+        &entry_id,
+        "Local",
+        "alice",
+        "local-password",
+        "https://local.example",
+        "keep me",
+    );
     let unrelated = core
         .save_kdbx(
             &Vault::empty("Unrelated remote"),
@@ -2335,12 +2301,12 @@ fn failed_unrepresentable_patch_conflict_copy_also_falls_back_to_pending() {
     runtime.fail_next_test_onedrive_conflict_copy();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -2425,7 +2391,7 @@ fn source_refresh_turns_unrepresentable_live_edits_into_a_terminal_conflict_copy
 }
 
 #[test]
-fn repeated_generic_pending_saves_keep_the_original_observed_base() {
+fn repeated_generic_pending_saves_keep_the_fixed_base() {
     let core = KeepassCore::new();
     let initial_bytes = core
         .save_kdbx(
@@ -2463,9 +2429,9 @@ fn repeated_generic_pending_saves_keep_the_original_observed_base() {
         .unwrap();
     runtime.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
-        runtime.save_vault(&vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        retry_publication(&mut runtime, &vault_id).unwrap(),
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     let mut second_edit = runtime.get_database_settings(&vault_id).unwrap().metadata;
@@ -2481,9 +2447,9 @@ fn repeated_generic_pending_saves_keep_the_original_observed_base() {
         .unwrap();
     runtime.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
-        runtime.save_vault(&vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        retry_publication(&mut runtime, &vault_id).unwrap(),
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     assert_eq!(
@@ -2542,7 +2508,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
         },
     )
     .unwrap();
-    seed.save_vault(&seed_vault_id).unwrap();
+    retry_publication(&mut seed, &seed_vault_id).unwrap();
     let initial_bytes = seed
         .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
@@ -2588,9 +2554,9 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
         .unwrap();
     first.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
-        first.save_vault(&vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        retry_publication(&mut first, &vault_id).unwrap(),
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     let mut second_edit = second.get_database_settings(&vault_id).unwrap().metadata;
@@ -2604,7 +2570,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
             },
         )
         .unwrap();
-    second.save_vault(&vault_id).unwrap();
+    retry_publication(&mut second, &vault_id).unwrap();
     first.replace_test_onedrive_item(
         "drive-1",
         "item-1",
@@ -2662,7 +2628,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
 }
 
 #[test]
-fn repeated_logical_conflict_save_reuses_one_published_onedrive_copy() {
+fn logical_conflict_splits_once_and_next_save_uses_the_adopted_remote() {
     let core = KeepassCore::new();
     let initial_bytes = core
         .save_kdbx(
@@ -2706,16 +2672,23 @@ fn repeated_logical_conflict_save_reuses_one_published_onedrive_copy() {
         .unwrap();
     runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
 
-    let first = runtime.save_vault(&vault_id).unwrap();
-    let second = runtime.save_vault(&vault_id).unwrap();
-    let conflict_path = |response: RuntimeResponse| match response {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+    let first = retry_publication(&mut runtime, &vault_id).unwrap();
+    let conflict_path = match first {
+        RuntimeResponse::PublicationResult(result) => {
+            assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
             result.conflict_copy_path.unwrap()
         }
         other => panic!("expected conflict copy, got {other:?}"),
     };
-    assert_eq!(conflict_path(first), conflict_path(second));
+    assert!(conflict_path.starts_with("onedrive:"));
+    runtime
+        .unlock_with_password(&vault_id, "demo-password")
+        .expect("unlock the adopted Remote Head");
+    assert!(matches!(
+        retry_publication(&mut runtime, &vault_id).unwrap(),
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Published
+    ));
 
     let RuntimeResponse::OneDriveItemList(list) = runtime
         .handle(RuntimeCommand::ListOneDriveChildren {

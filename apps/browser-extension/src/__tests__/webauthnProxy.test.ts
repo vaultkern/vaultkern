@@ -5808,7 +5808,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -5992,7 +5992,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -6124,7 +6124,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -6281,7 +6281,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -6417,7 +6417,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -6665,7 +6665,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -11670,7 +11670,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
@@ -11809,7 +11809,7 @@ describe("webAuthenticationProxy wrapper", () => {
     });
   });
 
-  it.each(["merged", "saved_to_cache"] as const)(
+  it.each(["reconciled", "pending"] as const)(
     "treats %s passkey registration saves as durable before completing create",
     async (saveStatus) => {
       let createListener: ((request: unknown) => void) | undefined;
@@ -11831,7 +11831,7 @@ describe("webAuthenticationProxy wrapper", () => {
           publicKeyAlgorithm: -7,
           userHandleBase64url: "dXNlci0x"
         })
-        .mockResolvedValueOnce({ type: "save_vault_result", status: saveStatus })
+        .mockResolvedValueOnce({ type: "publication_result", status: saveStatus })
         .mockResolvedValueOnce({ type: "saved" });
       const chromeApi = {
         runtime: {},
@@ -11924,7 +11924,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -12001,7 +12001,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyBase64url: "public-key",
         publicKeyAlgorithm: -7
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
@@ -12148,7 +12148,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -12232,7 +12232,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
@@ -12355,7 +12355,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
@@ -12500,7 +12500,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       storage: {
@@ -12617,7 +12617,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       tabs: {
@@ -12702,7 +12702,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -12803,7 +12803,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyBase64url: "public-key",
         publicKeyAlgorithm: -7
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
@@ -12869,7 +12869,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyBase64url: "public-key",
         publicKeyAlgorithm: -7
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" });
     const chromeApi = {
       runtime: {},
@@ -13070,7 +13070,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -13172,7 +13172,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -13261,7 +13261,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       tabs: {
@@ -13334,7 +13334,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       tabs: {
@@ -14032,7 +14032,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       webAuthenticationProxy: {
@@ -14308,7 +14308,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -14590,7 +14590,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -14719,7 +14719,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         return { type: "saved" };
@@ -15361,7 +15361,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({
         type: "error",
         code: "invalid_request",
@@ -15460,7 +15460,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "unexpected_success" });
     const chromeApi = {
       runtime: {},
@@ -15644,9 +15644,9 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       tabs: {
@@ -15725,9 +15725,9 @@ describe("webAuthenticationProxy wrapper", () => {
         userHandleBase64url: "dXNlci0x",
         created: false
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" })
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" })
       .mockResolvedValueOnce({ type: "saved" })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {},
       tabs: {
@@ -15904,9 +15904,9 @@ describe("webAuthenticationProxy wrapper", () => {
       }
       if (command.type === "save_passkey_registration") {
         cancelListener?.(241);
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
-      if (command.type === "save_vault" || command.type === "commit_passkey_registration") {
+      if (command.type === "retry_vault_publication" || command.type === "commit_passkey_registration") {
         return { type: "saved" };
       }
       if (command.type === "bind_passkey_ceremony_vault") {
@@ -15968,7 +15968,7 @@ describe("webAuthenticationProxy wrapper", () => {
       });
     });
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
-      expect.objectContaining({ type: "save_vault" })
+      expect.objectContaining({ type: "retry_vault_publication" })
     );
     expect(sendRuntimeCommand).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: "commit_passkey_registration" })
@@ -16002,7 +16002,7 @@ describe("webAuthenticationProxy wrapper", () => {
         };
       }
       if (command.type === "save_passkey_registration") {
-        return { type: "save_vault_result", status: "saved" };
+        return { type: "publication_result", status: "published" };
       }
       if (command.type === "commit_passkey_registration") {
         cancelListener?.(25);
@@ -17697,7 +17697,7 @@ describe("webAuthenticationProxy wrapper", () => {
         publicKeyAlgorithm: -7,
         userHandleBase64url: "dXNlci0x"
       })
-      .mockResolvedValueOnce({ type: "save_vault_result", status: "saved" });
+      .mockResolvedValueOnce({ type: "publication_result", status: "published" });
     const chromeApi = {
       runtime: {
         getURL: vi.fn((path: string) => `chrome-extension://id/${path}`),
