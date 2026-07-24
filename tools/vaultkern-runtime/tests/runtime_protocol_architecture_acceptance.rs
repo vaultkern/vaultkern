@@ -3119,3 +3119,119 @@ fn browser_noop_update_preserves_entry_history_and_modified_time() {
     assert_eq!(unchanged.history.len(), history_len);
     assert_eq!(harness.provider_snapshot().revision, provider_revision);
 }
+
+#[test]
+fn browser_noop_update_does_not_retry_pending_publication() {
+    let mut harness =
+        RuntimeProtocolHarness::browser_with_unlocked_in_memory_vault(empty_vault_bytes());
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "browser-extension".into(),
+            "browser-autofill".into(),
+        ],
+    });
+    let vault_id = match harness.command(RuntimeCommand::GetSessionState) {
+        RuntimeResponse::SessionState(state) => state.active_vault_id.expect("active vault"),
+        other => panic!("expected browser session, got {other:?}"),
+    };
+    let root_id = match harness.command(RuntimeCommand::GetAutofillCreateContext {
+        vault_id: vault_id.clone(),
+    }) {
+        RuntimeResponse::AutofillCreateContext(context) => context.root_group_id,
+        other => panic!("expected create context, got {other:?}"),
+    };
+    let created = harness.command(RuntimeCommand::CreateAutofillEntry {
+        vault_id: vault_id.clone(),
+        parent_group_id: root_id,
+        expected_matching_entry_ids: vec![],
+        title: "Example".into(),
+        username: "alice".into(),
+        password: "first-secret".into(),
+        url: "https://example.com/login".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    });
+    assert!(matches!(created, RuntimeResponse::EntryMutationResult(_)));
+    let entry_id = match harness.command(RuntimeCommand::FindFillCandidates {
+        vault_id: vault_id.clone(),
+        url: "https://example.com/login".into(),
+    }) {
+        RuntimeResponse::FillCandidates(candidates) => candidates.entries[0].id.clone(),
+        other => panic!("expected browser candidate, got {other:?}"),
+    };
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    let pending = harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+        vault_id: vault_id.clone(),
+        entry_id: entry_id.clone(),
+        expected_fields: browser_update_fields("first-secret"),
+        desired_fields: browser_update_fields("second-secret"),
+    });
+    assert!(matches!(
+        pending,
+        RuntimeResponse::EntryMutationResult(result)
+            if result.publication.status == PublicationStatusDto::Pending
+    ));
+
+    let provider_writes = harness.provider_write_count();
+    let no_op = harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+        vault_id,
+        entry_id,
+        expected_fields: browser_update_fields("second-secret"),
+        desired_fields: browser_update_fields("second-secret"),
+    });
+
+    assert!(matches!(
+        no_op,
+        RuntimeResponse::EntryMutationResult(result)
+            if result.publication.status == PublicationStatusDto::Pending
+    ));
+    assert_eq!(harness.provider_write_count(), provider_writes);
+}
+
+#[test]
+fn browser_noop_update_does_not_reencode_a_local_source() {
+    let (bytes, entry_id) = vault_with_entry_bytes();
+    let (mut harness, source_path) =
+        RuntimeProtocolHarness::browser_with_unlocked_local_vault(bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "browser-extension".into(),
+            "browser-autofill".into(),
+        ],
+    });
+    let vault_id = match harness.command(RuntimeCommand::GetSessionState) {
+        RuntimeResponse::SessionState(state) => state.active_vault_id.expect("active vault"),
+        other => panic!("expected browser session, got {other:?}"),
+    };
+    let before = std::fs::read(&source_path).expect("read local source before no-op");
+
+    let no_op = harness.command(RuntimeCommand::UpdateAutofillEntryFields {
+        vault_id,
+        entry_id,
+        expected_fields: AutofillUpdateFieldsDto {
+            username: "base-user".into(),
+            password: "base-password".into(),
+            url: "https://base.example".into(),
+        },
+        desired_fields: AutofillUpdateFieldsDto {
+            username: "base-user".into(),
+            password: "base-password".into(),
+            url: "https://base.example".into(),
+        },
+    });
+
+    assert!(matches!(
+        no_op,
+        RuntimeResponse::EntryMutationResult(result)
+            if result.publication.status == PublicationStatusDto::Published
+    ));
+    assert_eq!(
+        std::fs::read(source_path).expect("read local source after no-op"),
+        before
+    );
+}

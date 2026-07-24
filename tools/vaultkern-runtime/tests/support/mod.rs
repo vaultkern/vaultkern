@@ -13,6 +13,7 @@ pub struct RuntimeProtocolHarness {
     runtime: Runtime,
     protocol_session: RuntimeProtocolSession,
     remote_cache_dir: Option<tempfile::TempDir>,
+    _local_source_dir: Option<tempfile::TempDir>,
 }
 
 impl RuntimeProtocolHarness {
@@ -21,6 +22,7 @@ impl RuntimeProtocolHarness {
             runtime: Runtime::for_tests(),
             protocol_session: RuntimeProtocolSession::resident_app(),
             remote_cache_dir: None,
+            _local_source_dir: None,
         }
     }
 
@@ -51,6 +53,29 @@ impl RuntimeProtocolHarness {
         harness
     }
 
+    pub fn browser_with_unlocked_local_vault(bytes: Vec<u8>) -> (Self, std::path::PathBuf) {
+        let local_source_dir =
+            tempfile::tempdir().expect("create architecture local source directory");
+        let source_path = local_source_dir.path().join("Architecture Acceptance.kdbx");
+        std::fs::write(&source_path, bytes).expect("write architecture local source");
+        let mut runtime = Runtime::for_tests();
+        let opened = runtime
+            .open_local_vault(source_path.to_str().expect("UTF-8 local source path"))
+            .expect("open architecture local source");
+        runtime
+            .unlock_with_password(&opened.vault_id, "demo-password")
+            .expect("unlock architecture local source");
+        (
+            Self {
+                runtime,
+                protocol_session: RuntimeProtocolSession::browser_extension(),
+                remote_cache_dir: None,
+                _local_source_dir: Some(local_source_dir),
+            },
+            source_path,
+        )
+    }
+
     fn with_protocol_session(bytes: Vec<u8>, protocol_session: RuntimeProtocolSession) -> Self {
         let remote_cache_dir = tempfile::tempdir().expect("create architecture cache directory");
         Self {
@@ -65,6 +90,7 @@ impl RuntimeProtocolHarness {
             ),
             protocol_session,
             remote_cache_dir: Some(remote_cache_dir),
+            _local_source_dir: None,
         }
     }
 

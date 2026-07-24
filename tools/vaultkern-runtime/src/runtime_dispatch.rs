@@ -7,7 +7,9 @@ use anyhow::{Context, Result};
 use vaultkern_runtime_protocol::*;
 
 use crate::match_fill::score_origin_scoped_entry_match;
-use crate::vault_core::{PasskeyCeremonyIdentity, VaultCore, query_error_response};
+use crate::vault_core::{
+    ExactEntryFields, PasskeyCeremonyIdentity, VaultCore, query_error_response,
+};
 
 pub(crate) fn dispatch(core: &mut VaultCore, command: RuntimeCommand) -> Result<RuntimeResponse> {
     match command {
@@ -255,14 +257,17 @@ pub(crate) fn dispatch(core: &mut VaultCore, command: RuntimeCommand) -> Result<
                 }));
             }
             expected_matching_entry_ids.sort();
-            let current_matching_entry_ids = core.exact_matching_autofill_entry_ids(
+            let current_matching_entry_ids = core.exact_matching_entry_ids_for(
                 &vault_id,
-                title.as_str(),
-                username.as_str(),
-                password.as_str(),
-                url.as_str(),
-                notes.as_str(),
-                totp_uri.as_deref(),
+                ExactEntryFields {
+                    title: title.as_str(),
+                    username: username.as_str(),
+                    password: password.as_str(),
+                    url: url.as_str(),
+                    notes: notes.as_str(),
+                    totp_uri: totp_uri.as_deref(),
+                    custom_fields: &[],
+                },
             )?;
             if current_matching_entry_ids != expected_matching_entry_ids {
                 return Ok(RuntimeResponse::Error(ErrorDto {
@@ -310,7 +315,7 @@ pub(crate) fn dispatch(core: &mut VaultCore, command: RuntimeCommand) -> Result<
             }
             if current.fields == desired_fields {
                 return core
-                    .commit_entry_mutation(&vault_id, |_| Ok(None))
+                    .unchanged_entry_mutation_result(&vault_id)
                     .map(RuntimeResponse::EntryMutationResult);
             }
             core.commit_entry_mutation(&vault_id, |runtime| {

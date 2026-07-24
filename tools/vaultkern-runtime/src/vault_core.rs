@@ -191,43 +191,59 @@ fn totp_fields_semantically_equal(
     }
 }
 
-fn entry_detail_matches_fields(detail: &EntryDetailDto, fields: &EntryFieldsDto) -> bool {
-    entry_detail_matches_field_values(
-        detail,
-        fields.title.as_str(),
-        fields.username.as_str(),
-        fields.password.as_str(),
-        fields.url.as_str(),
-        fields.notes.as_str(),
-        fields.totp_uri.as_deref(),
-        &fields.custom_fields,
-    )
+#[derive(Clone, Copy)]
+pub(crate) struct ExactEntryFields<'a> {
+    pub(crate) title: &'a str,
+    pub(crate) username: &'a str,
+    pub(crate) password: &'a str,
+    pub(crate) url: &'a str,
+    pub(crate) notes: &'a str,
+    pub(crate) totp_uri: Option<&'a str>,
+    pub(crate) custom_fields: &'a [EntryCustomFieldDto],
 }
 
-fn entry_detail_matches_field_values(
-    detail: &EntryDetailDto,
-    title: &str,
-    username: &str,
-    password: &str,
-    url: &str,
-    notes: &str,
-    totp_uri: Option<&str>,
-    custom_fields: &[EntryCustomFieldDto],
-) -> bool {
-    detail.title == title
-        && detail.username == username
-        && detail.password == password
-        && detail.url == url
-        && detail.notes == notes
+impl<'a> From<&'a EntryFieldsDto> for ExactEntryFields<'a> {
+    fn from(fields: &'a EntryFieldsDto) -> Self {
+        Self {
+            title: fields.title.as_str(),
+            username: fields.username.as_str(),
+            password: fields.password.as_str(),
+            url: fields.url.as_str(),
+            notes: fields.notes.as_str(),
+            totp_uri: fields.totp_uri.as_deref(),
+            custom_fields: &fields.custom_fields,
+        }
+    }
+}
+
+fn entry_detail_matches_fields(detail: &EntryDetailDto, fields: ExactEntryFields<'_>) -> bool {
+    detail.title == fields.title
+        && detail.username == fields.username
+        && detail.password == fields.password
+        && detail.url == fields.url
+        && detail.notes == fields.notes
         && totp_fields_semantically_equal(
             &detail.title,
             &detail.username,
             detail.totp_uri.as_deref(),
-            title,
-            username,
-            totp_uri,
+            fields.title,
+            fields.username,
+            fields.totp_uri,
         )
-        && custom_fields_semantically_equal(&detail.custom_fields, custom_fields)
+        && custom_fields_semantically_equal(&detail.custom_fields, fields.custom_fields)
+}
+
+fn pending_publication_result(pending_kind: GenericPendingKind) -> PublicationResultDto {
+    let conflict_split = pending_kind == GenericPendingKind::ConflictCopy;
+    PublicationResultDto {
+        status: if conflict_split {
+            PublicationStatusDto::ConflictSplit
+        } else {
+            PublicationStatusDto::Pending
+        },
+        reconciliation_summary: None,
+        conflict_copy_path: conflict_split.then(|| "onedrive:pending-conflict-copy".into()),
+    }
 }
 
 struct LoadedSourceSnapshot {
@@ -2855,6 +2871,44 @@ impl VaultCore {
         result
     }
 
+    pub(crate) fn unchanged_entry_mutation_result(
+        &self,
+        vault_id: &str,
+    ) -> Result<EntryMutationResultDto> {
+        let loaded = self
+            .vault_session
+            .find_loaded(vault_id)
+            .with_context(|| format!("vault not opened: {vault_id}"))?;
+        let pending_sync = loaded
+            .source_status
+            .as_ref()
+            .is_some_and(|status| status.remote_state == "pending_sync");
+        let pending_kind = if pending_sync {
+            remote_cache_key_for_source(&loaded.source)
+                .map(|cache_key| {
+                    self.remote_cache
+                        .generic_pending_kind(&cache_key, &loaded.baseline_fingerprint)
+                })
+                .transpose()?
+        } else {
+            None
+        };
+        let publication = match pending_kind {
+            Some(pending_kind) => pending_publication_result(pending_kind),
+            None if pending_sync => pending_publication_result(GenericPendingKind::SourceWrite),
+            None => PublicationResultDto {
+                status: PublicationStatusDto::Published,
+                reconciliation_summary: None,
+                conflict_copy_path: None,
+            },
+        };
+        Ok(EntryMutationResultDto {
+            commit: CommitStatusDto::Committed,
+            publication,
+            entry: None,
+        })
+    }
+
     fn restore_loaded_after_failed_commit(&mut self, vault_id: &str, previous: LoadedVault) {
         let pending_conflict_state = self.vault_session.find_loaded(vault_id).and_then(|loaded| {
             let cache_key = remote_cache_key_for_source(&loaded.source)?;
@@ -3199,48 +3253,22 @@ impl VaultCore {
         vault_id: &str,
         fields: &EntryFieldsDto,
     ) -> Result<Vec<String>> {
-        anyhow::ensure!(
-            self.vault_session.active_vault_id() == Some(vault_id),
-            "vault is not active: {vault_id}"
-        );
-        let mut matching_ids = Vec::new();
-        for summary in self.find_fill_candidates(vault_id, &fields.url)?.entries {
-            let detail = self.get_entry_detail(vault_id, &summary.id)?;
-            if entry_detail_matches_fields(&detail, fields) {
-                matching_ids.push(summary.id);
-            }
-        }
-        matching_ids.sort();
-        Ok(matching_ids)
+        self.exact_matching_entry_ids_for(vault_id, ExactEntryFields::from(fields))
     }
 
-    pub(crate) fn exact_matching_autofill_entry_ids(
+    pub(crate) fn exact_matching_entry_ids_for(
         &self,
         vault_id: &str,
-        title: &str,
-        username: &str,
-        password: &str,
-        url: &str,
-        notes: &str,
-        totp_uri: Option<&str>,
+        fields: ExactEntryFields<'_>,
     ) -> Result<Vec<String>> {
         anyhow::ensure!(
             self.vault_session.active_vault_id() == Some(vault_id),
             "vault is not active: {vault_id}"
         );
         let mut matching_ids = Vec::new();
-        for summary in self.find_fill_candidates(vault_id, url)?.entries {
+        for summary in self.find_fill_candidates(vault_id, fields.url)?.entries {
             let detail = self.get_entry_detail(vault_id, &summary.id)?;
-            if entry_detail_matches_field_values(
-                &detail,
-                title,
-                username,
-                password,
-                url,
-                notes,
-                totp_uri,
-                &[],
-            ) {
+            if entry_detail_matches_fields(&detail, fields) {
                 matching_ids.push(summary.id);
             }
         }
@@ -6976,15 +7004,9 @@ impl VaultCore {
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile = save_profile;
         loaded.source_status = Some(status);
-        Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
-            status: match pending_kind {
-                GenericPendingKind::SourceWrite => PublicationStatusDto::Pending,
-                GenericPendingKind::ConflictCopy => PublicationStatusDto::ConflictSplit,
-            },
-            reconciliation_summary: None,
-            conflict_copy_path: (pending_kind == GenericPendingKind::ConflictCopy)
-                .then(|| "onedrive:pending-conflict-copy".into()),
-        }))
+        Ok(RuntimeResponse::PublicationResult(
+            pending_publication_result(pending_kind),
+        ))
     }
 
     pub fn retry_vault_source_sync(&mut self, vault_id: &str) -> Result<VaultSourceStatusDto> {

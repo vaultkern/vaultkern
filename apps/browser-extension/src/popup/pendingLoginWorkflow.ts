@@ -236,6 +236,54 @@ export function createPendingLoginWorkflow(
     }
   }
 
+  async function loadCreatePrompt(
+    vaultId: string,
+    transaction: PendingAutofillTransaction,
+    ambiguous = false
+  ): Promise<PendingLoginPromptLoad> {
+    let expectedMatchingEntryIds: string[];
+    try {
+      expectedMatchingEntryIds =
+        await dependencies.findExactMatchingEntryIds(
+          vaultId,
+          desiredCreateFields(transaction)
+        );
+    } catch (lookupFailure) {
+      return {
+        prompt: bindPrompt(
+          { mode: "retry", vaultId, siteLabel: siteLabel(transaction) },
+          transaction
+        ),
+        errorMessage: popupErrorMessage(
+          lookupFailure,
+          "Failed to check the pending login"
+        )
+      };
+    }
+    if (expectedMatchingEntryIds.length > 0) {
+      return {
+        prompt: bindPrompt(
+          { mode: "cleanup", vaultId, siteLabel: siteLabel(transaction) },
+          transaction
+        ),
+        errorMessage:
+          "This login is already present in the active vault. Clear the pending prompt instead of saving it again."
+      };
+    }
+    return {
+      prompt: bindPrompt(
+        {
+          mode: "save",
+          vaultId,
+          siteLabel: siteLabel(transaction),
+          ...(ambiguous ? { ambiguous: true as const } : {})
+        },
+        transaction,
+        { expectedMatchingEntryIds }
+      )
+    };
+  }
+
   return {
     async loadPrompt(vaultId) {
       const transaction = await dependencies.load();
@@ -244,42 +292,7 @@ export function createPendingLoginWorkflow(
       }
       const submission = transaction.submission;
       if (submission.saveOnly) {
-        let expectedMatchingEntryIds: string[];
-        try {
-          expectedMatchingEntryIds =
-            await dependencies.findExactMatchingEntryIds(
-              vaultId,
-              desiredCreateFields(transaction)
-            );
-        } catch (lookupFailure) {
-          return {
-            prompt: bindPrompt(
-              { mode: "retry", vaultId, siteLabel: siteLabel(transaction) },
-              transaction
-            ),
-            errorMessage: popupErrorMessage(
-              lookupFailure,
-              "Failed to check the pending login"
-            )
-          };
-        }
-        if (expectedMatchingEntryIds.length > 0) {
-          return {
-            prompt: bindPrompt(
-              { mode: "cleanup", vaultId, siteLabel: siteLabel(transaction) },
-              transaction
-            ),
-            errorMessage:
-              "This login is already present in the active vault. Clear the pending prompt instead of saving it again."
-          };
-        }
-        return {
-          prompt: bindPrompt(
-            { mode: "save", vaultId, siteLabel: siteLabel(transaction) },
-            transaction,
-            { expectedMatchingEntryIds }
-          )
-        };
+        return loadCreatePrompt(vaultId, transaction);
       }
 
       let candidates: EntrySummary[];
@@ -317,49 +330,11 @@ export function createPendingLoginWorkflow(
           )
         };
       }
-      let expectedMatchingEntryIds: string[];
-      try {
-        expectedMatchingEntryIds =
-          await dependencies.findExactMatchingEntryIds(
-            vaultId,
-            desiredCreateFields(transaction)
-          );
-      } catch (lookupFailure) {
-        return {
-          prompt: bindPrompt(
-            { mode: "retry", vaultId, siteLabel: siteLabel(transaction) },
-            transaction
-          ),
-          errorMessage: popupErrorMessage(
-            lookupFailure,
-            "Failed to check the pending login"
-          )
-        };
-      }
-      if (expectedMatchingEntryIds.length > 0) {
-        return {
-          prompt: bindPrompt(
-            { mode: "cleanup", vaultId, siteLabel: siteLabel(transaction) },
-            transaction
-          ),
-          errorMessage:
-            "This login is already present in the active vault. Clear the pending prompt instead of saving it again."
-        };
-      }
-      return {
-        prompt: bindPrompt(
-          {
-            mode: "save",
-            vaultId,
-            siteLabel: siteLabel(transaction),
-            ...(matchingEntries.length > 1
-              ? { ambiguous: true as const }
-              : {})
-          },
-          transaction,
-          { expectedMatchingEntryIds }
-        )
-      };
+      return loadCreatePrompt(
+        vaultId,
+        transaction,
+        matchingEntries.length > 1
+      );
     },
 
     async save(prompt) {
