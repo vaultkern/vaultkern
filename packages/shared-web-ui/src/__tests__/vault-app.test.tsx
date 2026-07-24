@@ -4529,6 +4529,98 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
   ).not.toBeInTheDocument();
 });
 
+it("reloads the active Remote entry after an edit completes through Conflict Split", async () => {
+  const updateEntryFields = vi.fn(async () =>
+    committedMutation(
+      {
+        type: "entry_detail" as const,
+        id: "entry-1",
+        title: "Remote Winner from response",
+        username: "remote-user",
+        password: "remote-secret",
+        url: "https://remote.example",
+        notes: "",
+        totp: null,
+        totpUri: null,
+        customFields: []
+      },
+      "conflict_split"
+    )
+  );
+  const getEntryDetail = vi
+    .fn()
+    .mockResolvedValueOnce({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Original Local",
+      username: "alice",
+      password: "local-secret",
+      url: "https://local.example",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    })
+    .mockResolvedValueOnce({
+      type: "entry_detail" as const,
+      id: "entry-1",
+      title: "Authoritative Remote Winner",
+      username: "remote-user",
+      password: "remote-secret",
+      url: "https://remote.example",
+      notes: "",
+      totp: null,
+      totpUri: null,
+      customFields: []
+    });
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 1,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries: vi.fn().mockResolvedValue([
+      {
+        id: "entry-1",
+        title: "Original Local",
+        username: "alice",
+        url: "https://local.example",
+        groupId: "group-root"
+      }
+    ]),
+    getEntryDetail,
+    updateEntryFields
+  };
+
+  render(<App client={client as any} />);
+
+  fireEvent.click(await screen.findByRole("button", { name: "Original Local" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Edit" }));
+  fireEvent.change(screen.getByLabelText("Title"), {
+    target: { value: "Local conflict edit" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(
+    await screen.findByText(
+      "Vault changed on disk. Local edits were saved as a conflict copy."
+    )
+  ).toBeInTheDocument();
+  expect(await screen.findByText("Authoritative Remote Winner")).toBeInTheDocument();
+  expect(getEntryDetail).toHaveBeenCalledTimes(2);
+});
+
 it("shows a pending sync banner when save falls back to local cache", async () => {
   const updateEntryFields = vi.fn(async () => committedMutation({
     type: "entry_detail" as const,
@@ -5204,6 +5296,55 @@ it("creates and deletes an entry through single mutation calls", async () => {
   await waitFor(() => {
     expect(deleteEntry).toHaveBeenCalledWith("vault-1", "entry-new");
   });
+});
+
+it("clears a newly created Local entry when Conflict Split adopts a Remote without it", async () => {
+  const listEntries = vi.fn(async () => []);
+  const createEntry = vi.fn(async () =>
+    committedMutation(null, "conflict_split")
+  );
+  const client = {
+    ...createVaultSelectionMethods(),
+    getSessionState: async () => ({
+      unlocked: true,
+      activeVaultId: "vault-1",
+      currentVaultRefId: "vault-ref-1"
+    }),
+    listGroups: vi.fn().mockResolvedValue({
+      type: "group_tree" as const,
+      root: {
+        id: "group-root",
+        title: "Archive",
+        entryCount: 0,
+        childCount: 0,
+        children: []
+      }
+    }),
+    listEntries,
+    getEntryDetail: vi.fn(),
+    createEntry
+  };
+
+  render(<App client={client as any} />);
+
+  await screen.findByText("No entries available.");
+  fireEvent.click(screen.getByRole("button", { name: "New Entry" }));
+  fireEvent.change(await screen.findByLabelText("Title"), {
+    target: { value: "Local-only create" }
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save changes" }));
+
+  expect(
+    await screen.findByText(
+      "Vault changed on disk. Local edits were saved as a conflict copy."
+    )
+  ).toBeInTheDocument();
+  await waitFor(() =>
+    expect(screen.queryByLabelText("Title")).not.toBeInTheDocument()
+  );
+  expect(screen.getByText("No entries available.")).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Local-only create" })).not.toBeInTheDocument();
+  expect(listEntries).toHaveBeenCalledTimes(2);
 });
 
 it("reports a failed create commit without chaining a follow-up save", async () => {

@@ -577,6 +577,10 @@ fn successful_conflict_split_preserves_local_then_adopts_remote_head() {
                 result.publication.status,
                 PublicationStatusDto::ConflictSplit
             );
+            assert!(
+                result.entry.is_none(),
+                "Conflict Split must not return the Local entry preserved in the Conflict Copy"
+            );
             result
                 .publication
                 .conflict_copy_path
@@ -756,6 +760,459 @@ fn failed_conflict_copy_preservation_keeps_local_until_retry_completes_split() {
     assert_eq!(
         local_copy.notes,
         "committed while Conflict Copy was pending"
+    );
+}
+
+#[test]
+fn conflict_split_from_a_later_pending_commit_survives_restart_without_replaying_stale_local() {
+    let core = KeepassCore::new();
+    let (base_bytes, local_entry_id) = vault_with_entry_bytes();
+    let (remote_bytes, remote_entry_id) = foreign_remote_head_bytes(&base_bytes);
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+            title: "First pending local edit".into(),
+            username: "base-user".into(),
+            password: "first-local-password".into(),
+            url: "https://base.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == PublicationStatusDto::Pending
+    ));
+
+    harness.reject_next_publication_as_stale(remote_bytes);
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+            title: "Latest pending local edit".into(),
+            username: "base-user".into(),
+            password: "latest-local-password".into(),
+            url: "https://base.example".into(),
+            notes: "must remain in the only Conflict Copy".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == PublicationStatusDto::ConflictSplit
+    ));
+
+    harness.command(RuntimeCommand::LockSession);
+    harness.restart_resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted session, got {other:?}"),
+    };
+    let active_entries = match harness.command(RuntimeCommand::ListEntries {
+        vault_id: restarted_vault_id,
+    }) {
+        RuntimeResponse::EntryList(entries) => entries.entries,
+        other => panic!("expected active Remote entry list, got {other:?}"),
+    };
+    assert_eq!(active_entries.len(), 1);
+    assert_eq!(active_entries[0].id, remote_entry_id);
+
+    let conflict_items = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items
+            .items
+            .into_iter()
+            .filter(|item| item.name.contains("VaultKern conflict"))
+            .collect::<Vec<_>>(),
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    assert_eq!(
+        conflict_items.len(),
+        1,
+        "restart must not replay the superseded first Local generation"
+    );
+    let conflict_vault = core
+        .load_database(
+            &harness.provider_item_bytes(&conflict_items[0].item_id),
+            &key(),
+        )
+        .expect("decode the durable Conflict Copy")
+        .vault;
+    let local_copy = core
+        .project_entry_detail(&conflict_vault, &local_entry_id)
+        .expect("latest Local entry in the Conflict Copy");
+    assert_eq!(local_copy.title, "Latest pending local edit");
+    assert_eq!(local_copy.password, "latest-local-password");
+    assert_eq!(local_copy.notes, "must remain in the only Conflict Copy");
+}
+
+#[test]
+fn failed_conflict_copy_from_a_later_pending_commit_recovers_the_latest_local_after_restart() {
+    let core = KeepassCore::new();
+    let (base_bytes, local_entry_id) = vault_with_entry_bytes();
+    let (remote_bytes, remote_entry_id) = foreign_remote_head_bytes(&base_bytes);
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    harness.make_next_publication_outcome_unknown_and_readback_unavailable();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+            title: "First pending local edit".into(),
+            username: "base-user".into(),
+            password: "first-local-password".into(),
+            url: "https://base.example".into(),
+            notes: String::new().into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == PublicationStatusDto::Pending
+    ));
+
+    harness.reject_next_publication_as_stale(remote_bytes);
+    harness.fail_next_conflict_copy_preservation();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id: vault_id.clone(),
+            entry_id: local_entry_id.clone(),
+            title: "Latest recoverable local edit".into(),
+            username: "base-user".into(),
+            password: "latest-recoverable-password".into(),
+            url: "https://base.example".into(),
+            notes: "durable despite failed Conflict Copy publication".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::EntryMutationResult(result)
+            if result.commit == CommitStatusDto::Committed
+                && result.publication.status == PublicationStatusDto::ConflictSplit
+                && result.publication.conflict_copy_path.as_deref()
+                    == Some("onedrive:pending-conflict-copy")
+    ));
+
+    harness.command(RuntimeCommand::LockSession);
+    harness.restart_resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted session, got {other:?}"),
+    };
+    let active_entries = match harness.command(RuntimeCommand::ListEntries {
+        vault_id: restarted_vault_id,
+    }) {
+        RuntimeResponse::EntryList(entries) => entries.entries,
+        other => panic!("expected active Remote entry list, got {other:?}"),
+    };
+    assert_eq!(active_entries.len(), 1);
+    assert_eq!(active_entries[0].id, remote_entry_id);
+
+    let conflict_items = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items
+            .items
+            .into_iter()
+            .filter(|item| item.name.contains("VaultKern conflict"))
+            .collect::<Vec<_>>(),
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    assert_eq!(conflict_items.len(), 1);
+    let conflict_vault = core
+        .load_database(
+            &harness.provider_item_bytes(&conflict_items[0].item_id),
+            &key(),
+        )
+        .expect("decode retried durable Conflict Copy")
+        .vault;
+    let local_copy = core
+        .project_entry_detail(&conflict_vault, &local_entry_id)
+        .expect("latest Local entry in the retried Conflict Copy");
+    assert_eq!(local_copy.title, "Latest recoverable local edit");
+    assert_eq!(local_copy.password, "latest-recoverable-password");
+    assert_eq!(
+        local_copy.notes,
+        "durable despite failed Conflict Copy publication"
+    );
+}
+
+#[test]
+fn restart_recovers_a_conflict_receipt_interrupted_before_provider_preservation() {
+    let core = KeepassCore::new();
+    let (base_bytes, local_entry_id) = vault_with_entry_bytes();
+    let (remote_bytes, remote_entry_id) = foreign_remote_head_bytes(&base_bytes);
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    harness.reject_next_publication_as_stale(remote_bytes);
+    harness.interrupt_next_conflict_split_after_receipt_intent();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id,
+            entry_id: local_entry_id.clone(),
+            title: "Receipt-only Local".into(),
+            username: "base-user".into(),
+            password: "receipt-only-password".into(),
+            url: "https://base.example".into(),
+            notes: "recover after receipt intent".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::Error(_)
+    ));
+    let items_before_restart = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items.items,
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    assert_eq!(
+        items_before_restart
+            .iter()
+            .filter(|item| item.name.contains("VaultKern conflict"))
+            .count(),
+        0
+    );
+
+    harness.restart_resident();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted session, got {other:?}"),
+    };
+    let active_entries = match harness.command(RuntimeCommand::ListEntries {
+        vault_id: restarted_vault_id,
+    }) {
+        RuntimeResponse::EntryList(entries) => entries.entries,
+        other => panic!("expected active Remote entry list, got {other:?}"),
+    };
+    assert_eq!(active_entries.len(), 1);
+    assert_eq!(active_entries[0].id, remote_entry_id);
+
+    let conflict_items = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items
+            .items
+            .into_iter()
+            .filter(|item| item.name.contains("VaultKern conflict"))
+            .collect::<Vec<_>>(),
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    assert_eq!(conflict_items.len(), 1);
+    let conflict_vault = core
+        .load_database(
+            &harness.provider_item_bytes(&conflict_items[0].item_id),
+            &key(),
+        )
+        .expect("decode recovered Conflict Copy")
+        .vault;
+    let local_copy = core
+        .project_entry_detail(&conflict_vault, &local_entry_id)
+        .expect("receipt Local entry in the Conflict Copy");
+    assert_eq!(local_copy.title, "Receipt-only Local");
+    assert_eq!(local_copy.password, "receipt-only-password");
+}
+
+#[test]
+fn restart_finishes_a_completed_conflict_copy_when_remote_is_temporarily_unavailable() {
+    let (base_bytes, local_entry_id) = vault_with_entry_bytes();
+    let (remote_bytes, remote_entry_id) = foreign_remote_head_bytes(&base_bytes);
+    let mut harness = RuntimeProtocolHarness::resident_with_in_memory_vault(base_bytes);
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after unlock")
+        }
+        other => panic!("expected unlocked session, got {other:?}"),
+    };
+
+    harness.reject_next_publication_as_stale(remote_bytes);
+    harness.interrupt_next_conflict_split_after_conflict_copy();
+    assert!(matches!(
+        harness.command(RuntimeCommand::UpdateEntryFields {
+            vault_id,
+            entry_id: local_entry_id,
+            title: "Completed Conflict Copy Local".into(),
+            username: "base-user".into(),
+            password: "completed-copy-password".into(),
+            url: "https://base.example".into(),
+            notes: "adoption still pending".into(),
+            totp_uri: None,
+            custom_fields: vec![],
+        }),
+        RuntimeResponse::Error(_)
+    ));
+
+    harness.restart_resident();
+    harness.fail_next_remote_state_read();
+    harness.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec![
+            "runtime-core".into(),
+            "resident-app".into(),
+            "one-drive".into(),
+        ],
+    });
+    harness.command(RuntimeCommand::AddOneDriveVaultReference {
+        drive_id: harness.drive_id().into(),
+        item_id: harness.item_id().into(),
+    });
+    let restarted_vault_id = match harness.command(RuntimeCommand::UnlockCurrentVaultWithPassword {
+        password: "demo-password".into(),
+    }) {
+        RuntimeResponse::SessionState(state) => {
+            state.active_vault_id.expect("active vault after restart")
+        }
+        other => panic!("expected restarted session, got {other:?}"),
+    };
+    let active_entries = match harness.command(RuntimeCommand::ListEntries {
+        vault_id: restarted_vault_id,
+    }) {
+        RuntimeResponse::EntryList(entries) => entries.entries,
+        other => panic!("expected active Remote entry list, got {other:?}"),
+    };
+    assert_eq!(active_entries.len(), 1);
+    assert_eq!(active_entries[0].id, remote_entry_id);
+
+    let conflict_items = match harness.command(RuntimeCommand::ListOneDriveChildren {
+        parent_item_id: None,
+    }) {
+        RuntimeResponse::OneDriveItemList(items) => items
+            .items
+            .into_iter()
+            .filter(|item| item.name.contains("VaultKern conflict"))
+            .collect::<Vec<_>>(),
+        other => panic!("expected Provider item list, got {other:?}"),
+    };
+    assert_eq!(
+        conflict_items.len(),
+        1,
+        "recovery must reuse the completed Conflict Copy"
     );
 }
 

@@ -297,6 +297,10 @@ impl ProviderCatalog {
         self.one_drive.fail_next_memory_conflict_copy();
     }
 
+    pub(crate) fn fail_next_memory_remote_state(&self) {
+        self.one_drive.fail_next_memory_remote_state();
+    }
+
     #[cfg(test)]
     pub(crate) fn replace_local_file_with_write_faults(
         &mut self,

@@ -109,6 +109,20 @@ impl Runtime {
         self.vault_core.fail_next_test_onedrive_conflict_copy();
     }
 
+    pub fn fail_next_test_onedrive_remote_state(&self) {
+        self.vault_core.fail_next_test_onedrive_remote_state();
+    }
+
+    pub fn interrupt_next_test_conflict_split_after_receipt_intent(&mut self) {
+        self.vault_core
+            .interrupt_next_test_conflict_split_after_receipt_intent();
+    }
+
+    pub fn interrupt_next_test_conflict_split_after_conflict_copy(&mut self) {
+        self.vault_core
+            .interrupt_next_test_conflict_split_after_conflict_copy();
+    }
+
     pub fn open_local_vault(&mut self, path: &str) -> Result<VaultHandleDto> {
         self.vault_core.open_local_vault(path)
     }

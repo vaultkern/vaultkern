@@ -1207,6 +1207,52 @@ describe("RuntimeClient", () => {
     expect(messages).toHaveLength(1);
   });
 
+  it("accepts a missing active entry only when Conflict Split removed it from the active vault", async () => {
+    const transport = {
+      send: vi
+        .fn()
+        .mockResolvedValue(committedEntryMutation(undefined, "conflict_split"))
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.updateEntryFields("vault-1", "entry-1", {
+        title: "Local conflict edit",
+        username: "alice",
+        password: "local-secret",
+        url: "https://example.com",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      })
+    ).resolves.toMatchObject({
+      value: null,
+      publication: {
+        type: "publication_result",
+        status: "conflict_split"
+      }
+    });
+  });
+
+  it("rejects a committed entry mutation that omits the active entry without Conflict Split", async () => {
+    const transport = {
+      send: vi.fn().mockResolvedValue(committedEntryMutation(undefined, "published"))
+    };
+    const client = new RuntimeClient(transport);
+
+    await expect(
+      client.updateEntryFields("vault-1", "entry-1", {
+        title: "Published edit",
+        username: "alice",
+        password: "secret",
+        url: "https://example.com",
+        notes: "",
+        totpUri: null,
+        customFields: []
+      })
+    ).rejects.toThrow("runtime returned an invalid committed entry mutation");
+  });
+
   it("retries remote vault source sync through the command envelope", async () => {
     const transport = {
       send: vi.fn().mockResolvedValue({

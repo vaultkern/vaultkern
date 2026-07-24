@@ -109,6 +109,31 @@ impl RuntimeProtocolHarness {
 
     pub fn restart_resident(&mut self) {
         let snapshot = self.provider_snapshot();
+        let provider_items = match self
+            .runtime
+            .handle(RuntimeCommand::ListOneDriveChildren {
+                parent_item_id: None,
+            })
+            .expect("list in-memory Provider items before restart")
+        {
+            RuntimeResponse::OneDriveItemList(list) => list
+                .items
+                .into_iter()
+                .filter(|item| !item.folder)
+                .map(|item| {
+                    let bytes = self
+                        .runtime
+                        .read_test_onedrive_item_bytes(&item.drive_id, &item.item_id)
+                        .expect("read in-memory Provider item before restart");
+                    let revision = self
+                        .runtime
+                        .test_onedrive_item_revision(&item.drive_id, &item.item_id)
+                        .expect("read in-memory Provider item revision before restart");
+                    (item, bytes, revision)
+                })
+                .collect::<Vec<_>>(),
+            other => panic!("expected in-memory Provider item list, got {other:?}"),
+        };
         let remote_cache_dir = self
             .remote_cache_dir
             .as_ref()
@@ -125,6 +150,21 @@ impl RuntimeProtocolHarness {
         runtime
             .set_test_onedrive_item_revision(DRIVE_ID, ITEM_ID, snapshot.revision)
             .expect("restore in-memory Provider revision");
+        for (item, bytes, revision) in provider_items {
+            if item.item_id == ITEM_ID {
+                continue;
+            }
+            runtime.insert_test_onedrive_item(
+                &item.drive_id,
+                &item.item_id,
+                &item.name,
+                "acceptance@example.com",
+                bytes,
+            );
+            runtime
+                .set_test_onedrive_item_revision(&item.drive_id, &item.item_id, revision)
+                .expect("restore in-memory Provider item revision");
+        }
         self.runtime = runtime;
         self.protocol_session = RuntimeProtocolSession::resident_app();
     }
@@ -136,6 +176,20 @@ impl RuntimeProtocolHarness {
 
     pub fn fail_next_conflict_copy_preservation(&self) {
         self.runtime.fail_next_test_onedrive_conflict_copy();
+    }
+
+    pub fn fail_next_remote_state_read(&self) {
+        self.runtime.fail_next_test_onedrive_remote_state();
+    }
+
+    pub fn interrupt_next_conflict_split_after_receipt_intent(&mut self) {
+        self.runtime
+            .interrupt_next_test_conflict_split_after_receipt_intent();
+    }
+
+    pub fn interrupt_next_conflict_split_after_conflict_copy(&mut self) {
+        self.runtime
+            .interrupt_next_test_conflict_split_after_conflict_copy();
     }
 
     pub fn provider_item_bytes(&self, item_id: &str) -> Vec<u8> {

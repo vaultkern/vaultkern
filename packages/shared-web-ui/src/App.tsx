@@ -2,6 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { ReactNode } from "react";
 
 import type {
+  CommittedEntryMutation,
   CommittedMutation,
   DatabaseSettings,
   DatabaseSettingsCommitResult,
@@ -92,21 +93,21 @@ export interface RuntimeClientLike {
   createEntry(
     vaultId: string,
     input: EntryDraft & { parentGroupId: string }
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   updateEntryFields(
     vaultId: string,
     entryId: string,
     input: EntryDraft
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   setEntryPasskey(
     vaultId: string,
     entryId: string,
     passkey: EntryPasskeyUpdate
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   clearEntryPasskey(
     vaultId: string,
     entryId: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   deleteEntry(
     vaultId: string,
     entryId: string
@@ -125,22 +126,22 @@ export interface RuntimeClientLike {
     vaultId: string,
     entryId: string,
     input: EntryAttachmentInput
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   updateEntryAttachmentMetadata(
     vaultId: string,
     entryId: string,
     input: EntryAttachmentMetadataUpdate
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   replaceEntryAttachmentContent(
     vaultId: string,
     entryId: string,
     input: EntryAttachmentContentUpdate
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   deleteEntryAttachment(
     vaultId: string,
     entryId: string,
     name: string
-  ): Promise<EntryDetail | CommittedMutation<EntryDetail>>;
+  ): Promise<EntryDetail | CommittedEntryMutation>;
   listEntryHistory(vaultId: string, entryId: string): Promise<EntryHistoryItem[]>;
   getEntryHistoryDetail(
     vaultId: string,
@@ -858,6 +859,22 @@ export function App({
     resetEditorState();
   }
 
+  function applyEntryMutationDetail(
+    detail: EntryDetail | null,
+    selectCreatedEntry = false
+  ) {
+    if (detail === null) {
+      clearDetailSelection();
+      return;
+    }
+
+    setEntryDetail(detail);
+    if (selectCreatedEntry) {
+      setSelectedEntryId(detail.id);
+      setShowEntryListWithDetail(true);
+    }
+  }
+
   function handlePublicationResult(
     vaultId: string,
     result: PublicationResult | void
@@ -901,6 +918,7 @@ export function App({
               "Vault changed on disk. Local edits were saved as a conflict copy."
             )
       );
+      setSourceDetailReloadKey((current) => current + 1);
     }
   }
 
@@ -1327,11 +1345,8 @@ export function App({
       }
       setEntryDraftOutcomeUnknown(false);
       handlePublicationResult(vaultId, publication);
-      setEntryDetail(detail);
-      if (wasCreating) {
-        setSelectedEntryId(detail.id);
-        setShowEntryListWithDetail(true);
-      } else {
+      applyEntryMutationDetail(detail, wasCreating);
+      if (!wasCreating && detail !== null) {
         setShowEntryListWithDetail(false);
       }
 
@@ -1486,7 +1501,7 @@ export function App({
 
   async function runEntryDetailMutation(
     owner: EntryRequestOwner,
-    operation: () => Promise<EntryDetail | CommittedMutation<EntryDetail>>,
+    operation: () => Promise<EntryDetail | CommittedEntryMutation>,
     fallbackMessage: string
   ) {
     if (!ownsEntryProjection(owner)) {
@@ -1500,7 +1515,7 @@ export function App({
       const mutation = await operation();
       const { value: detail, publication } = settleMutationResult(mutation);
       if (ownsEntryProjection(owner)) {
-        setEntryDetail(detail);
+        applyEntryMutationDetail(detail);
       }
       if (!ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
         return;
@@ -1581,7 +1596,7 @@ export function App({
     operation: (
       vaultId: string,
       entryId: string
-    ) => Promise<EntryDetail | CommittedMutation<EntryDetail>>,
+    ) => Promise<EntryDetail | CommittedEntryMutation>,
     fallbackMessage: string
   ) {
     await runEntryDetailMutation(

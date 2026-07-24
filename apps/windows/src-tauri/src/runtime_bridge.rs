@@ -1066,6 +1066,7 @@ fn response_commits_active_vault(value: &RuntimeResponse) -> bool {
     let status = match value {
         RuntimeResponse::PublicationResult(result) => Some(&result.status),
         RuntimeResponse::DatabaseSettingsCommitResult(result) => Some(&result.publication.status),
+        RuntimeResponse::EntryMutationResult(result) => Some(&result.publication.status),
         RuntimeResponse::VaultMutationResult(result) => Some(&result.publication.status),
         _ => None,
     };
@@ -1113,9 +1114,9 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use vaultkern_runtime_protocol::{
-        CommitStatusDto, ProtocolEnvelope, PublicationResultDto, PublicationStatusDto,
-        ResidentAppRouteDto, RuntimeCommand, RuntimeResponse, VaultMutationResultDto,
-        VaultSourceStatusDto,
+        CommitStatusDto, EntryMutationResultDto, ProtocolEnvelope, PublicationResultDto,
+        PublicationStatusDto, ResidentAppRouteDto, RuntimeCommand, RuntimeResponse,
+        VaultMutationResultDto, VaultSourceStatusDto,
     };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
@@ -1545,6 +1546,32 @@ mod tests {
         });
 
         assert!(super::response_commits_active_vault(&response));
+    }
+
+    #[test]
+    fn entry_mutation_commit_updates_resident_credential_metadata() {
+        for (status, expected) in [
+            (PublicationStatusDto::Published, true),
+            (PublicationStatusDto::Reconciled, true),
+            (PublicationStatusDto::Pending, true),
+            (PublicationStatusDto::ConflictSplit, false),
+        ] {
+            let response = RuntimeResponse::EntryMutationResult(EntryMutationResultDto {
+                commit: CommitStatusDto::Committed,
+                publication: PublicationResultDto {
+                    status: status.clone(),
+                    reconciliation_summary: None,
+                    conflict_copy_path: None,
+                },
+                entry: None,
+            });
+
+            assert_eq!(
+                super::response_commits_active_vault(&response),
+                expected,
+                "unexpected reconciliation decision for {status:?}"
+            );
+        }
     }
 
     #[test]

@@ -245,7 +245,8 @@ enum GenericPendingWriteMode {
 struct GenericPendingWriteProof<'a> {
     mode: GenericPendingWriteMode,
     expected_fingerprint: &'a ContentIdentity,
-    kind: Option<GenericPendingKind>,
+    expected_kind: Option<GenericPendingKind>,
+    next_kind: Option<GenericPendingKind>,
 }
 
 #[derive(Debug)]
@@ -427,12 +428,40 @@ impl RemoteVaultCache {
         )
     }
 
+    pub(crate) fn transition_source_write_to_conflict_copy(
+        &self,
+        key: &RemoteCacheKey,
+        entry: RemoteVaultCacheEntry,
+        expected_current: &ContentIdentity,
+    ) -> Result<()> {
+        self.write_resident_pending_transition(
+            key,
+            entry,
+            expected_current,
+            GenericPendingKind::SourceWrite,
+            GenericPendingKind::ConflictCopy,
+            None,
+        )
+    }
+
     fn write_resident_pending(
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
         expected_current: &ContentIdentity,
         kind: GenericPendingKind,
+        base: Option<RemoteVaultCacheEntry>,
+    ) -> Result<()> {
+        self.write_resident_pending_transition(key, entry, expected_current, kind, kind, base)
+    }
+
+    fn write_resident_pending_transition(
+        &self,
+        key: &RemoteCacheKey,
+        entry: RemoteVaultCacheEntry,
+        expected_current: &ContentIdentity,
+        expected_kind: GenericPendingKind,
+        next_kind: GenericPendingKind,
         base: Option<RemoteVaultCacheEntry>,
     ) -> Result<()> {
         if !entry.pending_sync {
@@ -447,7 +476,8 @@ impl RemoteVaultCache {
             Some(GenericPendingWriteProof {
                 mode: GenericPendingWriteMode::Update,
                 expected_fingerprint: expected_current,
-                kind: Some(kind),
+                expected_kind: Some(expected_kind),
+                next_kind: Some(next_kind),
             }),
         )?)
     }
@@ -471,7 +501,8 @@ impl RemoteVaultCache {
                 Some(GenericPendingWriteProof {
                     mode: GenericPendingWriteMode::Complete,
                     expected_fingerprint: expected_pending,
-                    kind: None,
+                    expected_kind: None,
+                    next_kind: None,
                 }),
             )? {
                 CacheManifestPublishOutcome::Durable => PendingRemoteCacheCompletion::Durable,
@@ -516,7 +547,8 @@ impl RemoteVaultCache {
             Some(GenericPendingWriteProof {
                 mode: GenericPendingWriteMode::Complete,
                 expected_fingerprint: expected_pending,
-                kind: None,
+                expected_kind: None,
+                next_kind: None,
             }),
         )?;
         let completion = match outcome {
@@ -762,7 +794,7 @@ impl RemoteVaultCache {
                                 generation.pending_sync
                                     && resident_pending_kind_matches(
                                         generation.pending_kind,
-                                        proof.kind,
+                                        proof.expected_kind,
                                     )
                                     && generation.content_sha256
                                         == proof.expected_fingerprint.content_sha256
@@ -784,9 +816,9 @@ impl RemoteVaultCache {
                     let pending_is_generic = previous.entry.pending_sync
                         && (resident_pending_kind_matches(
                             previous.generation.pending_kind,
-                            proof.kind,
+                            proof.expected_kind,
                         ) || (previous.legacy
-                            && proof.kind != Some(GenericPendingKind::ConflictCopy)
+                            && proof.expected_kind != Some(GenericPendingKind::ConflictCopy)
                             && previous.observed.is_none()));
                     let authorized = match proof.mode {
                         GenericPendingWriteMode::Update => {
@@ -926,7 +958,7 @@ impl RemoteVaultCache {
             pending_sync: entry.pending_sync,
             pending_kind: Some(if entry.pending_sync {
                 generic_proof
-                    .and_then(|proof| proof.kind)
+                    .and_then(|proof| proof.next_kind)
                     .unwrap_or(GenericPendingKind::SourceWrite)
                     .manifest_kind()
             } else {

@@ -560,6 +560,10 @@ impl OneDriveVaultSourceProvider {
         self.memory_fail_next_conflict_copy.set(true);
     }
 
+    pub fn fail_next_memory_remote_state(&self) {
+        self.memory_fail_next_remote_state.set(true);
+    }
+
     pub fn remove_memory_item(&mut self, drive_id: &str, item_id: &str) {
         self.memory_items
             .remove(&(drive_id.to_owned(), item_id.to_owned()));

@@ -248,6 +248,8 @@ export interface CommittedMutation<T> {
   publication: PublicationResult;
 }
 
+export type CommittedEntryMutation = CommittedMutation<EntryDetail | null>;
+
 export interface CommittedVaultMutation {
   publication: PublicationResult;
   createdGroupId?: string;
@@ -262,7 +264,7 @@ interface EntryMutationResponse<T> {
   type: "entry_mutation_result";
   commit: "committed";
   publication: Omit<PublicationResult, "type">;
-  entry?: T;
+  entry?: T | null;
 }
 
 interface VaultMutationResponse {
@@ -722,8 +724,8 @@ export class RuntimeClient {
   async createEntry(
     vaultId: string,
     input: EntryCreateInput
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "create_entry",
         vault_id: vaultId,
@@ -743,8 +745,8 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string,
     input: EntryDraft
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "update_entry_fields",
         vault_id: vaultId,
@@ -764,8 +766,8 @@ export class RuntimeClient {
   async clearEntryTotp(
     vaultId: string,
     entryId: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "clear_entry_totp",
         vault_id: vaultId,
@@ -779,8 +781,8 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string,
     passkey: EntryPasskeyUpdate
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "set_entry_passkey",
         vault_id: vaultId,
@@ -794,8 +796,8 @@ export class RuntimeClient {
   async clearEntryPasskey(
     vaultId: string,
     entryId: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "clear_entry_passkey",
         vault_id: vaultId,
@@ -855,8 +857,8 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string,
     input: EntryAttachmentInput
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "add_entry_attachment",
         vault_id: vaultId,
@@ -873,8 +875,8 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string,
     input: EntryAttachmentMetadataUpdate
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "update_entry_attachment_metadata",
         vault_id: vaultId,
@@ -891,8 +893,8 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string,
     input: EntryAttachmentContentUpdate
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "replace_entry_attachment_content",
         vault_id: vaultId,
@@ -908,8 +910,8 @@ export class RuntimeClient {
     vaultId: string,
     entryId: string,
     name: string
-  ): Promise<CommittedMutation<EntryDetail>> {
-    return this.sendEntryMutationCommand<EntryDetail>(
+  ): Promise<CommittedEntryMutation> {
+    return this.sendEntryMutationCommand<EntryDetail | null>(
       {
         type: "delete_entry_attachment",
         vault_id: vaultId,
@@ -1029,15 +1031,19 @@ export class RuntimeClient {
     if (
       response.type !== "entry_mutation_result" ||
       response.commit !== "committed" ||
-      (requiresEntry && response.entry === undefined)
+      (requiresEntry &&
+        response.entry == null &&
+        response.publication.status !== "conflict_split")
     ) {
       throw new TypeError("runtime returned an invalid committed entry mutation");
     }
     const value = requiresEntry
-      ? ({
-          type: "entry_detail",
-          ...(response.entry as Record<string, unknown>)
-        } as T)
+      ? response.entry == null
+        ? (null as T)
+        : ({
+            type: "entry_detail",
+            ...(response.entry as Record<string, unknown>)
+          } as T)
       : (undefined as T);
     return {
       value,

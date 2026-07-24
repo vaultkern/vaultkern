@@ -314,6 +314,29 @@ struct OneDriveConflictHead {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConflictSplitInterruptionPoint {
+    AfterReceiptIntent,
+    AfterConflictCopy,
+}
+
+#[derive(Debug)]
+struct ConflictSplitInterrupted {
+    point: ConflictSplitInterruptionPoint,
+}
+
+impl std::fmt::Display for ConflictSplitInterrupted {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "injected Conflict Split interruption at {:?}",
+            self.point
+        )
+    }
+}
+
+impl std::error::Error for ConflictSplitInterrupted {}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResidentKdfPolicy {
     Desktop,
     Mobile,
@@ -442,6 +465,7 @@ pub struct VaultCore {
     passkey_credential_id_generator: Box<dyn FnMut() -> String + Send>,
     fixed_unix_time: Option<u64>,
     fixed_unix_time_ms: Option<u64>,
+    conflict_split_interruption: Option<ConflictSplitInterruptionPoint>,
     #[cfg(test)]
     local_save_warnings: Vec<String>,
 }
@@ -678,6 +702,7 @@ impl VaultCore {
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
+            conflict_split_interruption: None,
             #[cfg(test)]
             local_save_warnings: Vec::new(),
         };
@@ -718,6 +743,7 @@ impl VaultCore {
             passkey_credential_id_generator: Box::new(generate_passkey_credential_id),
             fixed_unix_time: None,
             fixed_unix_time_ms: None,
+            conflict_split_interruption: None,
             #[cfg(test)]
             local_save_warnings: Vec::new(),
         }
@@ -923,6 +949,26 @@ impl VaultCore {
         self.providers.fail_next_memory_conflict_copy();
     }
 
+    pub fn fail_next_test_onedrive_remote_state(&self) {
+        self.providers.fail_next_memory_remote_state();
+    }
+
+    pub fn interrupt_next_test_conflict_split_after_receipt_intent(&mut self) {
+        self.conflict_split_interruption = Some(ConflictSplitInterruptionPoint::AfterReceiptIntent);
+    }
+
+    pub fn interrupt_next_test_conflict_split_after_conflict_copy(&mut self) {
+        self.conflict_split_interruption = Some(ConflictSplitInterruptionPoint::AfterConflictCopy);
+    }
+
+    fn interrupt_conflict_split_at(&mut self, point: ConflictSplitInterruptionPoint) -> Result<()> {
+        if self.conflict_split_interruption == Some(point) {
+            self.conflict_split_interruption = None;
+            return Err(ConflictSplitInterrupted { point }.into());
+        }
+        Ok(())
+    }
+
     pub fn open_local_vault(&mut self, path: &str) -> Result<VaultHandleDto> {
         let path = normalize_local_path(path)?;
         self.load_local_vault_snapshot(&path)
@@ -983,6 +1029,41 @@ impl VaultCore {
         })
     }
 
+    fn interrupted_onedrive_conflict_receipt(
+        &self,
+        drive_id: &str,
+        item_id: &str,
+        cached_main: Option<&RemoteVaultCacheEntry>,
+    ) -> Result<Option<RemoteVaultCacheEntry>> {
+        if let Some(main) = cached_main.filter(|main| main.pending_sync)
+            && self
+                .remote_cache
+                .generic_pending_kind(
+                    &RemoteCacheKey::new("onedrive", &onedrive_remote_id(drive_id, item_id)),
+                    &main.fingerprint,
+                )
+                .is_ok_and(|kind| kind == GenericPendingKind::ConflictCopy)
+        {
+            return Ok(None);
+        }
+        let receipt_key = onedrive_conflict_receipt_cache_key(drive_id, item_id);
+        let Some(receipt) = self.remote_cache.read(&receipt_key)? else {
+            return Ok(None);
+        };
+        if receipt.pending_sync {
+            return Ok(Some(receipt));
+        }
+        let main_is_confirmed_remote =
+            cached_main
+                .filter(|main| !main.pending_sync)
+                .is_some_and(|main| {
+                    self.providers
+                        .remote_state(drive_id, item_id)
+                        .is_ok_and(|state| state.matches_identity(&main.fingerprint))
+                });
+        Ok((!main_is_confirmed_remote).then_some(receipt))
+    }
+
     fn load_source_snapshot(&mut self, source: StoredVaultSource) -> Result<VaultHandleDto> {
         match source {
             StoredVaultSource::LocalPath { path } => self.load_local_vault_snapshot(&path),
@@ -1009,6 +1090,12 @@ impl VaultCore {
                     }
                 }
                 let vault_id = vault_source.vault_id();
+                let cached_main = self.remote_cache.read(&cache_key)?;
+                let interrupted_receipt = self.interrupted_onedrive_conflict_receipt(
+                    &drive_id,
+                    &item_id,
+                    cached_main.as_ref(),
+                )?;
                 let (
                     name,
                     path_name,
@@ -1017,7 +1104,35 @@ impl VaultCore {
                     provider_revision,
                     source_status,
                     source_account_label,
-                ) = if let Some(cached) = self.remote_cache.read(&cache_key)? {
+                    recovering_conflict_receipt,
+                ) = if let Some(receipt) = interrupted_receipt {
+                    let display_name = cached_main
+                        .as_ref()
+                        .map(|main| main.display_name.clone())
+                        .unwrap_or_else(|| receipt.display_name.clone());
+                    let account_label = cached_main
+                        .as_ref()
+                        .map(|main| main.account_label.clone())
+                        .unwrap_or_else(|| receipt.account_label.clone());
+                    (
+                        display_name.clone(),
+                        display_name,
+                        receipt.bytes,
+                        receipt.fingerprint,
+                        None,
+                        Some(VaultSourceStatusDto {
+                            source_kind: cache_key.provider_kind.clone(),
+                            remote_state: "pending_sync".into(),
+                            last_sync_at: None,
+                            cached_at: Some(receipt.cached_at),
+                            last_error: Some(
+                                "interrupted Conflict Split remains pending recovery".into(),
+                            ),
+                        }),
+                        Some(account_label),
+                        true,
+                    )
+                } else if let Some(cached) = cached_main {
                     if cached.pending_sync {
                         let display_name = cached.display_name;
                         let account_label = cached.account_label;
@@ -1035,6 +1150,7 @@ impl VaultCore {
                                 last_error: None,
                             }),
                             Some(account_label),
+                            false,
                         )
                     } else {
                         match self.providers.remote_state(&drive_id, &item_id) {
@@ -1056,6 +1172,7 @@ impl VaultCore {
                                         last_error: None,
                                     }),
                                     Some(account_label),
+                                    false,
                                 )
                             }
                             Ok(state) => {
@@ -1093,6 +1210,7 @@ impl VaultCore {
                                         last_error: None,
                                     }),
                                     Some(account_label),
+                                    false,
                                 )
                             }
                             Err(error) => {
@@ -1113,6 +1231,7 @@ impl VaultCore {
                                         last_error: Some(remote_error),
                                     }),
                                     Some(account_label),
+                                    false,
                                 )
                             }
                         }
@@ -1159,6 +1278,7 @@ impl VaultCore {
                                     last_error: None,
                                 }),
                                 Some(account_label),
+                                false,
                             )
                         }
                         Err(error) => {
@@ -1183,6 +1303,7 @@ impl VaultCore {
                                     last_error: Some(remote_error),
                                 }),
                                 Some(account_label),
+                                false,
                             )
                         }
                     }
@@ -1191,7 +1312,9 @@ impl VaultCore {
                 let pending_sync = source_status
                     .as_ref()
                     .is_some_and(|status| status.remote_state == "pending_sync");
-                let session_base_bytes = if pending_sync {
+                let session_base_bytes = if recovering_conflict_receipt {
+                    bytes.clone()
+                } else if pending_sync {
                     let pending_cache_key =
                         RemoteCacheKey::new("onedrive", &onedrive_remote_id(&drive_id, &item_id));
                     match self
@@ -1587,18 +1710,33 @@ impl VaultCore {
                 .is_some_and(|status| status.remote_state == "pending_sync")
                 .then(|| {
                     (
+                        loaded.source.clone(),
                         remote_cache_key_for_source(&loaded.source),
                         loaded.baseline_fingerprint.clone(),
                     )
                 })
         });
-        let Some((Some(cache_key), pending_fingerprint)) = pending else {
+        let Some((source, Some(cache_key), pending_fingerprint)) = pending else {
             return;
         };
-        if self
-            .remote_cache
-            .generic_pending_kind(&cache_key, &pending_fingerprint)
-            .is_err()
+        let recovering_conflict_receipt = match source {
+            VaultSource::OneDriveItem { drive_id, item_id } => self
+                .remote_cache
+                .read(&cache_key)
+                .ok()
+                .and_then(|cached| {
+                    self.interrupted_onedrive_conflict_receipt(&drive_id, &item_id, cached.as_ref())
+                        .ok()
+                        .flatten()
+                })
+                .is_some(),
+            VaultSource::LocalPath(_) => false,
+        };
+        if !recovering_conflict_receipt
+            && self
+                .remote_cache
+                .generic_pending_kind(&cache_key, &pending_fingerprint)
+                .is_err()
         {
             return;
         }
@@ -2640,12 +2778,17 @@ impl VaultCore {
             .clone();
 
         let result = (|| {
-            let entry = mutation(self)?;
+            let mut entry = mutation(self)?;
             let RuntimeResponse::PublicationResult(publication) =
                 self.commit_working_copy(vault_id)?
             else {
                 anyhow::bail!("entry mutation save returned an unexpected response");
             };
+            if publication.status == PublicationStatusDto::ConflictSplit
+                && let Some(mutated_entry) = entry.as_ref()
+            {
+                entry = self.get_entry_detail(vault_id, &mutated_entry.id).ok();
+            }
             Ok(EntryMutationResultDto {
                 commit: CommitStatusDto::Committed,
                 publication,
@@ -6282,6 +6425,7 @@ impl VaultCore {
                 &expected,
             )?;
         }
+        self.interrupt_conflict_split_at(ConflictSplitInterruptionPoint::AfterReceiptIntent)?;
 
         let completion_time = self.current_unix_time() as i64;
         let one_drive = &mut self.providers;
@@ -6326,11 +6470,15 @@ impl VaultCore {
             bytes,
         ) {
             Ok(conflict_copy) => {
+                self.interrupt_conflict_split_at(
+                    ConflictSplitInterruptionPoint::AfterConflictCopy,
+                )?;
                 if let Some(remote_head) = remote_head {
                     self.adopt_onedrive_conflict_head(
                         vault_id,
                         drive_id,
                         item_id,
+                        baseline_fingerprint,
                         remote_head,
                         &conflict_copy,
                         reason,
@@ -6343,6 +6491,13 @@ impl VaultCore {
                     reconciliation_summary: None,
                     conflict_copy_path: Some(format!("onedrive:{}", conflict_copy.display_name)),
                 }))
+            }
+            Err(upload_error)
+                if upload_error
+                    .downcast_ref::<ConflictSplitInterrupted>()
+                    .is_some() =>
+            {
+                Err(upload_error)
             }
             Err(upload_error) => {
                 let response = self.save_conflict_copy_to_pending_cache(
@@ -6373,6 +6528,7 @@ impl VaultCore {
         vault_id: &str,
         drive_id: &str,
         item_id: &str,
+        expected_cache_fingerprint: &ContentIdentity,
         remote_head: OneDriveConflictHead,
         conflict_copy: &ProviderConflictCopy,
         reason: &str,
@@ -6394,20 +6550,45 @@ impl VaultCore {
         };
         let cache_key = remote_cache_key_for_source(&source).expect("OneDrive source");
         let cached_at = self.current_unix_time() as i64;
-        let cache_result = self.remote_cache.write_with_validation_token(
-            &cache_key,
-            RemoteVaultCacheEntry {
-                bytes: bytes.clone(),
-                fingerprint: fingerprint.clone(),
-                display_name: display_name.clone(),
-                account_label: account_label.clone(),
-                cached_at,
-                pending_sync: false,
-            },
-            cache_validation_token.as_deref(),
-        );
+        let cache_entry = RemoteVaultCacheEntry {
+            bytes: bytes.clone(),
+            fingerprint: fingerprint.clone(),
+            display_name: display_name.clone(),
+            account_label: account_label.clone(),
+            cached_at,
+            pending_sync: false,
+        };
+        let cache_result = match self.remote_cache.read(&cache_key) {
+            Ok(Some(current))
+                if current.pending_sync
+                    && same_content_fingerprint(
+                        &current.fingerprint,
+                        expected_cache_fingerprint,
+                    ) =>
+            {
+                self.remote_cache
+                    .complete_generic_pending(&cache_key, expected_cache_fingerprint, cache_entry)
+                    .map(Some)
+            }
+            Ok(_) => self
+                .remote_cache
+                .write_with_validation_token(
+                    &cache_key,
+                    cache_entry,
+                    cache_validation_token.as_deref(),
+                )
+                .map(|_| None),
+            Err(error) => Err(error),
+        };
         let mut status =
             remote_source_status_after_commit(&cache_key, cached_at, cache_result.as_ref().err());
+        if matches!(
+            cache_result,
+            Ok(Some(PendingRemoteCacheCompletion::DurabilityUnknown))
+        ) {
+            status.last_error =
+                Some("remote cache completion is visible but durability is unknown".into());
+        }
         let mut split_warning = format!(
             "{reason}; local changes were saved to onedrive:{}",
             conflict_copy.display_name
@@ -6638,11 +6819,37 @@ impl VaultCore {
                 expected_cache_fingerprint,
                 pending_base,
             )?,
-            GenericPendingKind::ConflictCopy => self.remote_cache.write_conflict_copy_pending(
-                &cache_key,
-                entry,
-                expected_cache_fingerprint,
-            )?,
+            GenericPendingKind::ConflictCopy => {
+                let expected_kind = self
+                    .remote_cache
+                    .read(&cache_key)?
+                    .filter(|current| {
+                        current.pending_sync
+                            && same_content_fingerprint(
+                                &current.fingerprint,
+                                expected_cache_fingerprint,
+                            )
+                    })
+                    .map(|_| {
+                        self.remote_cache
+                            .generic_pending_kind(&cache_key, expected_cache_fingerprint)
+                    })
+                    .transpose()?;
+                match expected_kind {
+                    Some(GenericPendingKind::SourceWrite) => {
+                        self.remote_cache.transition_source_write_to_conflict_copy(
+                            &cache_key,
+                            entry,
+                            expected_cache_fingerprint,
+                        )?
+                    }
+                    _ => self.remote_cache.write_conflict_copy_pending(
+                        &cache_key,
+                        entry,
+                        expected_cache_fingerprint,
+                    )?,
+                }
+            }
         }
         let status = VaultSourceStatusDto {
             source_kind: cache_key.provider_kind,
@@ -6698,6 +6905,35 @@ impl VaultCore {
         };
 
         let cache_key = remote_cache_key_for_source(&source).expect("remote source");
+        let cached_main = self.remote_cache.read(&cache_key)?;
+        if let Some(receipt) =
+            self.interrupted_onedrive_conflict_receipt(&drive_id, &item_id, cached_main.as_ref())?
+        {
+            let cached_at = receipt.cached_at;
+            let recovery = key
+                .context("interrupted Conflict Split requires an unlocked vault")
+                .and_then(|key| {
+                    self.finish_interrupted_onedrive_conflict_split(
+                        vault_id, &drive_id, &item_id, &cache_key, &receipt, key,
+                    )
+                });
+            let status = match recovery {
+                Ok(status) => status,
+                Err(error) => VaultSourceStatusDto {
+                    source_kind: cache_key.provider_kind.clone(),
+                    remote_state: "pending_sync".into(),
+                    last_sync_at: None,
+                    cached_at: Some(cached_at),
+                    last_error: Some(format!(
+                        "interrupted Conflict Split remains pending: {error:#}"
+                    )),
+                },
+            };
+            if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
+                loaded.source_status = Some(status.clone());
+            }
+            return Ok(status);
+        }
         let shared_pending = self
             .remote_cache
             .read(&cache_key)?
@@ -6712,44 +6948,6 @@ impl VaultCore {
                 key,
             );
         }
-        let receipt_key = onedrive_conflict_receipt_cache_key(&drive_id, &item_id);
-        if let Some(receipt) = self.remote_cache.read(&receipt_key)?
-            && receipt.pending_sync
-        {
-            let cached_at = receipt.cached_at;
-            let status = match self.publish_onedrive_conflict_copy_receipt(
-                vault_id,
-                &drive_id,
-                &item_id,
-                &receipt.display_name,
-                &receipt.bytes,
-            ) {
-                Ok(conflict_copy) => VaultSourceStatusDto {
-                    source_kind: cache_key.provider_kind.clone(),
-                    remote_state: "online".into(),
-                    last_sync_at: Some(self.current_unix_time() as i64),
-                    cached_at: Some(cached_at),
-                    last_error: Some(format!(
-                        "interrupted conflict-copy publication completed at onedrive:{}",
-                        conflict_copy.display_name
-                    )),
-                },
-                Err(error) => VaultSourceStatusDto {
-                    source_kind: cache_key.provider_kind.clone(),
-                    remote_state: "pending_sync".into(),
-                    last_sync_at: None,
-                    cached_at: Some(cached_at),
-                    last_error: Some(format!(
-                        "conflict-copy publication remains pending: {error:#}"
-                    )),
-                },
-            };
-            if let Some(loaded) = self.vault_session.find_loaded_mut(vault_id) {
-                loaded.source_status = Some(status.clone());
-            }
-            return Ok(status);
-        }
-
         match self.providers.remote_state(&drive_id, &item_id) {
             Ok(state) if state.matches_identity(&baseline_fingerprint) => {
                 self.session_base_for_fingerprint(vault_id, &baseline_fingerprint)?;
@@ -7218,26 +7416,13 @@ impl VaultCore {
         unreachable!("bounded pending OneDrive attempts must return")
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn upload_pending_onedrive_conflict_copy(
+    fn read_onedrive_conflict_head_for_adoption(
         &mut self,
         vault_id: &str,
         drive_id: &str,
         item_id: &str,
-        cache_key: &RemoteCacheKey,
-        pending: &RemoteVaultCacheEntry,
-        bytes: &[u8],
-        key: Arc<VaultKey>,
-        reason: &str,
-    ) -> Result<VaultSourceStatusDto> {
-        let mut key = key;
-        let conflict_copy = self.publish_onedrive_conflict_copy_receipt(
-            vault_id,
-            drive_id,
-            item_id,
-            &pending.display_name,
-            bytes,
-        )?;
+        mut key: Arc<VaultKey>,
+    ) -> Result<(OneDriveConflictHead, Option<String>)> {
         let remote_state = self.providers.remote_state(drive_id, item_id)?;
         let remote = read_onedrive_provider(&mut self.providers, drive_id, item_id, &remote_state)?;
         let remote_save_profile = self
@@ -7279,27 +7464,6 @@ impl VaultCore {
                 )),
             ),
         };
-        let cached_at = self.current_unix_time() as i64;
-        let completion = self.remote_cache.complete_generic_pending(
-            cache_key,
-            &pending.fingerprint,
-            RemoteVaultCacheEntry {
-                bytes: remote.bytes.clone(),
-                fingerprint: remote.fingerprint.clone(),
-                display_name: remote.name.clone(),
-                account_label: remote.account_label.clone(),
-                cached_at,
-                pending_sync: false,
-            },
-        )?;
-        let mut adoption_reason = reason.to_owned();
-        if let Some(locked_reason) = locked_reason {
-            adoption_reason.push_str(&format!("; {locked_reason}"));
-        }
-        if matches!(completion, PendingRemoteCacheCompletion::DurabilityUnknown) {
-            adoption_reason
-                .push_str("; remote cache completion is visible but durability is unknown");
-        }
         let remote_head = OneDriveConflictHead {
             vault: remote_vault,
             bytes: remote.bytes,
@@ -7311,10 +7475,81 @@ impl VaultCore {
             save_profile: remote_save_profile,
             key: remote_key,
         };
+        Ok((remote_head, locked_reason))
+    }
+
+    fn finish_interrupted_onedrive_conflict_split(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        cache_key: &RemoteCacheKey,
+        receipt: &RemoteVaultCacheEntry,
+        key: Arc<VaultKey>,
+    ) -> Result<VaultSourceStatusDto> {
+        let expected_cache_fingerprint = self
+            .remote_cache
+            .read(cache_key)?
+            .map(|main| main.fingerprint)
+            .unwrap_or_else(|| receipt.fingerprint.clone());
+        let conflict_copy = self.publish_onedrive_conflict_copy_receipt(
+            vault_id,
+            drive_id,
+            item_id,
+            &receipt.display_name,
+            &receipt.bytes,
+        )?;
+        let (remote_head, locked_reason) =
+            self.read_onedrive_conflict_head_for_adoption(vault_id, drive_id, item_id, key)?;
+        let mut reason = "resuming an interrupted Conflict Split".to_owned();
+        if let Some(locked_reason) = locked_reason {
+            reason.push_str(&format!("; {locked_reason}"));
+        }
         self.adopt_onedrive_conflict_head(
             vault_id,
             drive_id,
             item_id,
+            &expected_cache_fingerprint,
+            remote_head,
+            &conflict_copy,
+            &reason,
+        )?;
+        self.vault_session
+            .find_loaded(vault_id)
+            .and_then(|loaded| loaded.source_status.clone())
+            .context("Conflict Split did not install a OneDrive source status")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upload_pending_onedrive_conflict_copy(
+        &mut self,
+        vault_id: &str,
+        drive_id: &str,
+        item_id: &str,
+        _cache_key: &RemoteCacheKey,
+        pending: &RemoteVaultCacheEntry,
+        bytes: &[u8],
+        key: Arc<VaultKey>,
+        reason: &str,
+    ) -> Result<VaultSourceStatusDto> {
+        let conflict_copy = self.publish_onedrive_conflict_copy_receipt(
+            vault_id,
+            drive_id,
+            item_id,
+            &pending.display_name,
+            bytes,
+        )?;
+        let (remote_head, locked_reason) =
+            self.read_onedrive_conflict_head_for_adoption(vault_id, drive_id, item_id, key)?;
+        let mut adoption_reason = reason.to_owned();
+        if let Some(locked_reason) = locked_reason {
+            adoption_reason.push_str(&format!("; {locked_reason}"));
+        }
+        self.adopt_onedrive_conflict_head(
+            vault_id,
+            drive_id,
+            item_id,
+            &pending.fingerprint,
             remote_head,
             &conflict_copy,
             &adoption_reason,
