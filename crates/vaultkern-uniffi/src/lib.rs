@@ -1255,29 +1255,48 @@ impl VaultSession {
         entry_id: String,
         fields: EntryFieldsDto,
     ) -> Result<EntryDetailDto, VaultKernError> {
-        let fields: protocol::EntryFieldsDto = fields.into();
-        self.shared
-            .lock_for_session_mutation()?
-            .update_entry_fields(
-                &vault_id,
-                &entry_id,
-                fields.title,
-                fields.username,
-                fields.password,
-                fields.url,
-                fields.notes,
-                fields.totp_uri,
-                fields.custom_fields,
-            )
-            .map(Into::into)
-            .map_err(Into::into)
+        let protocol::EntryFieldsDto {
+            title,
+            username,
+            password,
+            url,
+            notes,
+            totp_uri,
+            custom_fields,
+        } = fields.into();
+        match self.shared.lock_for_session_mutation()?.handle(
+            protocol::RuntimeCommand::UpdateEntryFields {
+                vault_id,
+                entry_id,
+                title,
+                username,
+                password,
+                url,
+                notes,
+                totp_uri,
+                custom_fields,
+            },
+        )? {
+            protocol::RuntimeResponse::EntryMutationResult(result) => result
+                .entry
+                .map(Into::into)
+                .ok_or_else(|| VaultKernError::Core {
+                    details: "entry Commit returned no updated Entry".into(),
+                }),
+            protocol::RuntimeResponse::Error(error) => Err(VaultKernError::Core {
+                details: error.message,
+            }),
+            _ => Err(VaultKernError::Core {
+                details: "entry Commit returned an unexpected runtime response".into(),
+            }),
+        }
     }
 
     pub fn save(&self, vault_id: String) -> Result<SaveVaultResultDto, VaultKernError> {
         match self
             .shared
             .lock_for_session_mutation()?
-            .save_vault(&vault_id)?
+            .handle(protocol::RuntimeCommand::SaveVault { vault_id })?
         {
             protocol::RuntimeResponse::SaveVaultResult(result) => Ok(result.into()),
             _ => Err(VaultKernError::Core {

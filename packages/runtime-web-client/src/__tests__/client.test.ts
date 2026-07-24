@@ -1167,38 +1167,7 @@ describe("RuntimeClient", () => {
     expect(transport.send).toHaveBeenCalledTimes(1);
   });
 
-  it("saves a vault and returns the save status", async () => {
-    const transport = {
-      send: vi.fn().mockResolvedValue({
-        type: "save_vault_result",
-        status: "merged",
-        mergeSummary: {
-          mergedEntries: 1,
-          historySnapshotsAdded: 1
-        }
-      })
-    };
-
-    const client = new RuntimeClient(transport);
-    await expect(client.saveVault("vault-1")).resolves.toEqual({
-      type: "save_vault_result",
-      status: "merged",
-      mergeSummary: {
-        mergedEntries: 1,
-        historySnapshotsAdded: 1
-      }
-    });
-
-    expect(transport.send).toHaveBeenCalledWith({
-      version: 2,
-      command: {
-        type: "save_vault",
-        vault_id: "vault-1"
-      }
-    });
-  });
-
-  it("uses the publication bundled with a committed entry mutation", async () => {
+  it("uses only the publication bundled with a committed entry mutation", async () => {
     const messages: Array<Record<string, unknown>> = [];
     const transport = {
       send: vi.fn(async (message: unknown) => {
@@ -1233,27 +1202,9 @@ describe("RuntimeClient", () => {
       totpUri: null,
       customFields: []
     });
-    await client.saveVault("vault-1");
 
     expect(Object.keys(messages[0] ?? {}).sort()).toEqual(["command", "version"]);
-    expect(Object.keys(messages[1] ?? {}).sort()).toEqual(["command", "version"]);
-  });
-
-  it("returns local cache save status", async () => {
-    const transport = {
-      send: vi.fn().mockResolvedValue({
-        type: "save_vault_result",
-        status: "saved_to_cache",
-        mergeSummary: null
-      })
-    };
-
-    const client = new RuntimeClient(transport);
-    await expect(client.saveVault("vault-1")).resolves.toEqual({
-      type: "save_vault_result",
-      status: "saved_to_cache",
-      mergeSummary: null
-    });
+    expect(messages).toHaveLength(1);
   });
 
   it("retries remote vault source sync through the command envelope", async () => {
@@ -1505,7 +1456,6 @@ describe("RuntimeClient", () => {
     await expect(client.deleteEntry("vault-1", "entry-1")).rejects.toThrow(
       "vault is locked"
     );
-    await expect(client.saveVault("vault-1")).rejects.toThrow("vault is locked");
     await expect(
       client.getEntryAttachmentContent("vault-1", "entry-1", "backup.txt")
     ).rejects.toThrow("vault is locked");

@@ -264,7 +264,7 @@ fn opened_session() -> (
 }
 
 #[test]
-fn ffi_session_opens_lists_reads_edits_and_saves_using_protocol_vocabulary() {
+fn ffi_session_edits_with_one_commit_and_can_retry_publication() {
     let (_dir, session, _adapter, vault_id) = opened_session();
 
     let entries = session.list_entries(vault_id.clone()).unwrap();
@@ -292,6 +292,16 @@ fn ffi_session_opens_lists_reads_edits_and_saves_using_protocol_vocabulary() {
         .unwrap();
     assert_eq!(edited.id.as_str(), entry_id);
     assert_eq!(edited.title.as_str(), edited_title);
+
+    session.lock_session().unwrap();
+    session
+        .unlock()
+        .unlock_vault(vault_id.clone(), Some(FIXTURE_PASSWORD.into()), None, false)
+        .unwrap();
+    let committed = session
+        .read_entry(vault_id.clone(), entry_id)
+        .expect("Entry Commit must survive lock without a follow-up save");
+    assert_eq!(committed.title.as_str(), edited_title);
 
     let saved = session.save(vault_id).unwrap();
     assert!(matches!(

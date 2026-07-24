@@ -173,10 +173,6 @@ impl OneDriveRemoteState {
             .map(stable_u64_for_text)
             .is_some_and(|etag| fingerprint.modified_at == Some(etag))
     }
-
-    pub(crate) fn memory_revision(&self) -> Option<u64> {
-        self.memory_revision
-    }
 }
 
 #[derive(Debug, Clone)]

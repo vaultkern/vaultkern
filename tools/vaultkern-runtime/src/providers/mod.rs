@@ -1,4 +1,5 @@
 pub mod biometric;
+pub(crate) mod catalog;
 pub mod durable_file;
 pub mod local_file;
 pub mod memory;

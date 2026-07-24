@@ -20,6 +20,12 @@ fn saved_response() -> RuntimeResponse {
     })
 }
 
+fn retry_publication(runtime: &mut Runtime, vault_id: &str) -> anyhow::Result<RuntimeResponse> {
+    runtime.handle(RuntimeCommand::SaveVault {
+        vault_id: vault_id.to_owned(),
+    })
+}
+
 fn create_entry_in_root(
     core: &KeepassCore,
     vault: &mut Vault,
@@ -113,7 +119,7 @@ fn runtime_opens_legacy_kdbx2_and_kdbx3_and_migrates_them_on_save() {
         runtime
             .unlock_with_password(&opened.vault_id, "a")
             .unwrap_or_else(|error| panic!("{fixture} must stay on the password path: {error:#}"));
-        runtime.save_vault(&opened.vault_id).unwrap();
+        retry_publication(&mut runtime, &opened.vault_id).unwrap();
 
         let migrated = std::fs::read(&path).unwrap();
         let inspection = KeepassCore::new().inspect_database(&migrated).unwrap();
@@ -151,7 +157,7 @@ fn runtime_migrates_unchanged_legacy_onedrive_vault_on_save() {
         .active_vault_id
         .expect("active OneDrive vault");
 
-    runtime.save_vault(&vault_id).unwrap();
+    retry_publication(&mut runtime, &vault_id).unwrap();
 
     let migrated = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
@@ -181,7 +187,7 @@ fn runtime_requires_legacy_migration_save_before_quick_unlock_enrollment() {
         "{error:#}"
     );
 
-    runtime.save_vault(&opened.vault_id).unwrap();
+    retry_publication(&mut runtime, &opened.vault_id).unwrap();
     runtime
         .enable_quick_unlock_for_current_vault(Some("a"), None)
         .expect("saved migration can enroll quick unlock");
@@ -555,9 +561,7 @@ fn runtime_updates_database_settings_without_retaining_master_credentials() {
     assert_eq!(updated.encryption.kdf, retained_kdf);
     assert_eq!(updated.autosave_delay_seconds, Some(45));
 
-    runtime
-        .save_vault(&handle.vault_id)
-        .expect("save with new settings");
+    retry_publication(&mut runtime, &handle.vault_id).expect("save with new settings");
 
     let saved = std::fs::read(&path).expect("read saved vault");
     let reloaded = core
@@ -623,7 +627,7 @@ fn runtime_clears_loaded_optional_database_metadata() {
             },
         )
         .expect("clear optional metadata");
-    runtime.save_vault(&handle.vault_id).expect("save vault");
+    retry_publication(&mut runtime, &handle.vault_id).expect("save vault");
 
     let saved = std::fs::read(path).expect("read saved vault");
     let reloaded = core
@@ -677,8 +681,7 @@ fn runtime_rejects_invalid_database_name_without_partial_metadata_update() {
     assert_eq!(settings.metadata.name, "settings-valid");
     assert_eq!(settings.metadata.description, None);
     assert_eq!(settings.metadata.default_username, None);
-    runtime
-        .save_vault(&handle.vault_id)
+    retry_publication(&mut runtime, &handle.vault_id)
         .expect("rejected settings must not poison later saves");
 }
 
@@ -723,9 +726,7 @@ fn runtime_rejects_password_removal_without_a_fresh_authenticated_flow() {
             .to_string()
             .contains("fresh authenticated credential-update flow")
     );
-    runtime
-        .save_vault(&handle.vault_id)
-        .expect("save unchanged master credential");
+    retry_publication(&mut runtime, &handle.vault_id).expect("save unchanged master credential");
 
     let empty_key = CompositeKey::default();
     let saved = std::fs::read(&path).unwrap();

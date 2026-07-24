@@ -11,6 +11,8 @@ mod session;
 mod state_paths;
 mod sync;
 mod unlock;
+mod vault_core;
+mod vault_format;
 mod vault_reference_store;
 
 pub use command_loop::{

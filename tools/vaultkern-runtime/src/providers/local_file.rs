@@ -395,6 +395,7 @@ fn classify_begin_write_error(source: io::Error) -> LocalFileCommitError {
 }
 
 impl LocalFileWriteTxn {
+    #[cfg(test)]
     pub fn commit(
         self,
         expected: &VaultSourceFingerprint,

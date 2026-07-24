@@ -820,13 +820,6 @@ export class RuntimeClient {
     return { ...result, value: undefined };
   }
 
-  async saveVault(vaultId: string): Promise<SaveVaultResult> {
-    return this.sendCommand<SaveVaultResult>({
-      type: "save_vault",
-      vault_id: vaultId
-    });
-  }
-
   async getDatabaseSettings(vaultId: string): Promise<DatabaseSettings> {
     return this.sendCommand<DatabaseSettings>({
       type: "get_database_settings",

@@ -7,6 +7,12 @@ use vaultkern_runtime_protocol::{
     DatabaseSettingsUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
 };
 
+fn retry_publication(runtime: &mut Runtime, vault_id: &str) -> anyhow::Result<RuntimeResponse> {
+    runtime.handle(RuntimeCommand::SaveVault {
+        vault_id: vault_id.to_owned(),
+    })
+}
+
 fn key() -> CompositeKey {
     let mut key = CompositeKey::default();
     key.add_password("demo-password");
@@ -154,7 +160,7 @@ fn runtime_persists_a_local_onedrive_encryption_profile_change() {
         )
         .unwrap();
 
-    runtime.save_vault(&vault_id).unwrap();
+    retry_publication(&mut runtime, &vault_id).unwrap();
 
     let saved = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
@@ -596,7 +602,7 @@ fn runtime_retry_sync_refreshes_quick_unlock_after_remote_kdf_rotation() {
             .notes,
         "remote-retry-after-kdf-rotation"
     );
-    runtime.save_vault(&vault_id).unwrap();
+    retry_publication(&mut runtime, &vault_id).unwrap();
     let saved = runtime
         .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
@@ -2423,7 +2429,7 @@ fn repeated_generic_pending_saves_keep_the_fixed_base() {
         .unwrap();
     runtime.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
-        runtime.save_vault(&vault_id).unwrap(),
+        retry_publication(&mut runtime, &vault_id).unwrap(),
         RuntimeResponse::SaveVaultResult(result)
             if result.status == SaveVaultStatusDto::SavedToCache
     ));
@@ -2441,7 +2447,7 @@ fn repeated_generic_pending_saves_keep_the_fixed_base() {
         .unwrap();
     runtime.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
-        runtime.save_vault(&vault_id).unwrap(),
+        retry_publication(&mut runtime, &vault_id).unwrap(),
         RuntimeResponse::SaveVaultResult(result)
             if result.status == SaveVaultStatusDto::SavedToCache
     ));
@@ -2502,7 +2508,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
         },
     )
     .unwrap();
-    seed.save_vault(&seed_vault_id).unwrap();
+    retry_publication(&mut seed, &seed_vault_id).unwrap();
     let initial_bytes = seed
         .read_test_onedrive_item_bytes("drive-1", "item-1")
         .unwrap();
@@ -2548,7 +2554,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
         .unwrap();
     first.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
-        first.save_vault(&vault_id).unwrap(),
+        retry_publication(&mut first, &vault_id).unwrap(),
         RuntimeResponse::SaveVaultResult(result)
             if result.status == SaveVaultStatusDto::SavedToCache
     ));
@@ -2564,7 +2570,7 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
             },
         )
         .unwrap();
-    second.save_vault(&vault_id).unwrap();
+    retry_publication(&mut second, &vault_id).unwrap();
     first.replace_test_onedrive_item(
         "drive-1",
         "item-1",
@@ -2666,7 +2672,7 @@ fn logical_conflict_splits_once_and_next_save_uses_the_adopted_remote() {
         .unwrap();
     runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
 
-    let first = runtime.save_vault(&vault_id).unwrap();
+    let first = retry_publication(&mut runtime, &vault_id).unwrap();
     let conflict_path = match first {
         RuntimeResponse::SaveVaultResult(result) => {
             assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
@@ -2679,7 +2685,7 @@ fn logical_conflict_splits_once_and_next_save_uses_the_adopted_remote() {
         .unlock_with_password(&vault_id, "demo-password")
         .expect("unlock the adopted Remote Head");
     assert!(matches!(
-        runtime.save_vault(&vault_id).unwrap(),
+        retry_publication(&mut runtime, &vault_id).unwrap(),
         RuntimeResponse::SaveVaultResult(result)
             if result.status == SaveVaultStatusDto::Saved
     ));
