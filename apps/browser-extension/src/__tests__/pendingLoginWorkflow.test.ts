@@ -45,7 +45,7 @@ function dependencies(
     dismiss: vi.fn(async () => true),
     commit: vi.fn(async () => ({
       commit: "committed",
-      saveResult: { type: "save_vault_result", status: "saved" }
+      publication: { type: "publication_result", status: "published" }
     }))
   };
 }

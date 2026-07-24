@@ -40,9 +40,9 @@ describe("popup resident login save", () => {
       .mockRejectedValueOnce(disconnected)
       .mockResolvedValueOnce({
         commit: "committed",
-        saveResult: {
-          type: "save_vault_result",
-          status: "saved"
+        publication: {
+          type: "publication_result",
+          status: "published"
         }
       });
     const workflow = createPendingLoginWorkflow({

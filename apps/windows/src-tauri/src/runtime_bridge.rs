@@ -577,7 +577,6 @@ impl RuntimeBridge {
         let ProtocolEnvelope {
             version,
             request_id,
-            operation_id: _,
             command,
         } = envelope;
         let dispatch = match self.desktop_protocol_session.lock() {
@@ -597,7 +596,6 @@ impl RuntimeBridge {
             ProtocolEnvelope {
                 version,
                 request_id,
-                operation_id: None,
                 command,
             },
             Arc::new(AtomicBool::new(false)),
@@ -1066,17 +1064,17 @@ fn command_unlocks_vault(command: &RuntimeCommand) -> bool {
 
 fn response_commits_active_vault(value: &RuntimeResponse) -> bool {
     let status = match value {
-        RuntimeResponse::SaveVaultResult(result) => Some(&result.status),
-        RuntimeResponse::DatabaseSettingsCommitResult(result) => Some(&result.save_result.status),
+        RuntimeResponse::PublicationResult(result) => Some(&result.status),
+        RuntimeResponse::DatabaseSettingsCommitResult(result) => Some(&result.publication.status),
         RuntimeResponse::VaultMutationResult(result) => Some(&result.publication.status),
         _ => None,
     };
     matches!(
         status,
         Some(
-            vaultkern_runtime_protocol::SaveVaultStatusDto::Saved
-                | vaultkern_runtime_protocol::SaveVaultStatusDto::Merged
-                | vaultkern_runtime_protocol::SaveVaultStatusDto::SavedToCache
+            vaultkern_runtime_protocol::PublicationStatusDto::Published
+                | vaultkern_runtime_protocol::PublicationStatusDto::Reconciled
+                | vaultkern_runtime_protocol::PublicationStatusDto::Pending
         )
     )
 }
@@ -1115,8 +1113,9 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
     use vaultkern_runtime_protocol::{
-        CommitStatusDto, ProtocolEnvelope, ResidentAppRouteDto, RuntimeCommand, RuntimeResponse,
-        SaveVaultResultDto, SaveVaultStatusDto, VaultMutationResultDto, VaultSourceStatusDto,
+        CommitStatusDto, ProtocolEnvelope, PublicationResultDto, PublicationStatusDto,
+        ResidentAppRouteDto, RuntimeCommand, RuntimeResponse, VaultMutationResultDto,
+        VaultSourceStatusDto,
     };
 
     fn response(value: serde_json::Value) -> RuntimeResponse {
@@ -1150,29 +1149,6 @@ mod tests {
         assert!(!handshake.capabilities.contains(&"browser-extension".into()));
         assert!(matches!(
             bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::GetSessionState)),
-            RuntimeResponse::SessionState(_)
-        ));
-    }
-
-    #[test]
-    fn deprecated_logical_operation_id_is_inert_after_handshake() {
-        let bridge = RuntimeBridge::new_for_tests();
-        assert!(matches!(
-            bridge.request_envelope(ProtocolEnvelope::new(RuntimeCommand::Handshake {
-                protocol_version: vaultkern_runtime_protocol::PROTOCOL_VERSION,
-                capabilities: vec![
-                    "runtime-core".into(),
-                    "resident-app".into(),
-                    "quick-unlock".into(),
-                ],
-            })),
-            RuntimeResponse::Handshake(_)
-        ));
-        let mut envelope = ProtocolEnvelope::new(RuntimeCommand::GetSessionState);
-        envelope.operation_id = Some("\nretired logical identity".into());
-
-        assert!(matches!(
-            bridge.request_envelope(envelope),
             RuntimeResponse::SessionState(_)
         ));
     }
@@ -1213,7 +1189,7 @@ mod tests {
 
         for _ in 0..2 {
             let response = bridge.request(json!({
-                "version": 2,
+                "version": 3,
                 "command": { "type": "get_session_state" }
             }));
             assert_eq!(response["type"], "error");
@@ -1228,7 +1204,7 @@ mod tests {
 
         let response = bridge.request_cancellable(
             json!({
-                "version": 2,
+                "version": 3,
                 "command": { "type": "get_session_state" }
             }),
             cancelled,
@@ -1534,7 +1510,7 @@ mod tests {
             .expect("install session-state notifier");
 
         let response = bridge.request(json!({
-            "version": 2,
+            "version": 3,
             "command": { "type": "lock_session" }
         }));
 
@@ -1547,9 +1523,9 @@ mod tests {
 
     #[test]
     fn conflict_copy_recovers_edits_without_reconciling_live_vault_metadata() {
-        let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-            status: SaveVaultStatusDto::ConflictCopy,
-            merge_summary: None,
+        let response = RuntimeResponse::PublicationResult(PublicationResultDto {
+            status: PublicationStatusDto::ConflictSplit,
+            reconciliation_summary: None,
             conflict_copy_path: Some("vault-1.conflict.kdbx".into()),
         });
 
@@ -1560,9 +1536,9 @@ mod tests {
     fn vault_mutation_commit_updates_resident_persistence_state() {
         let response = RuntimeResponse::VaultMutationResult(VaultMutationResultDto {
             commit: CommitStatusDto::Committed,
-            publication: SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
-                merge_summary: None,
+            publication: PublicationResultDto {
+                status: PublicationStatusDto::Pending,
+                reconciliation_summary: None,
                 conflict_copy_path: None,
             },
             created_group_id: Some("group-created".into()),

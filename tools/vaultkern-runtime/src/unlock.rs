@@ -1,13 +1,11 @@
 use anyhow::{Context, Result};
-use vaultkern_core::{
-    CompositeKey, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxError, KdbxVaultCodec,
-    TransformedKey, Vault, VaultCodec,
-};
+use vaultkern_core::{CompositeKey, ExternalKdfConfirmation, ExternalKdfPolicy, Vault, VaultCodec};
 use zeroize::Zeroizing;
 
 use crate::providers::secure_storage::{
     SecureStorageProvider, is_secure_storage_cancelled, is_secure_storage_invalidated,
 };
+use crate::vault_format::{ResidentVaultCodec, VaultCodecError, VaultKey};
 
 const UNLOCK_BLOB_MAGIC: &[u8; 8] = b"VKUBLOB1";
 const PASSWORD_PRESENT: u8 = 1;
@@ -76,13 +74,13 @@ impl MasterCredential {
 
 pub(crate) struct UnlockBlob {
     master_credential: MasterCredential,
-    cached_transformed_key: TransformedKey,
+    cached_transformed_key: VaultKey,
 }
 
 impl UnlockBlob {
     pub(crate) fn new(
         master_credential: MasterCredential,
-        cached_transformed_key: TransformedKey,
+        cached_transformed_key: VaultKey,
     ) -> Self {
         Self {
             master_credential,
@@ -94,11 +92,11 @@ impl UnlockBlob {
         &self.master_credential
     }
 
-    pub(crate) fn cached_transformed_key(&self) -> &TransformedKey {
+    pub(crate) fn cached_transformed_key(&self) -> &VaultKey {
         &self.cached_transformed_key
     }
 
-    fn into_parts(self) -> (MasterCredential, TransformedKey) {
+    fn into_parts(self) -> (MasterCredential, VaultKey) {
         (self.master_credential, self.cached_transformed_key)
     }
 
@@ -108,7 +106,7 @@ impl UnlockBlob {
 
     fn encode_parts(
         master_credential: &MasterCredential,
-        cached_transformed_key: &TransformedKey,
+        cached_transformed_key: &VaultKey,
     ) -> Result<Zeroizing<Vec<u8>>> {
         let mut flags = 0;
         if master_credential.password.is_some() {
@@ -178,14 +176,14 @@ impl UnlockBlob {
         let password = (flags & PASSWORD_PRESENT != 0).then(|| Zeroizing::new(password.to_vec()));
         Ok(Self::new(
             MasterCredential::from_zeroizing_parts(password, key_file_contribution)?,
-            TransformedKey::from_zeroizing(transformed),
+            VaultKey::from_zeroizing(transformed),
         ))
     }
 }
 
 pub(crate) struct UnlockedVault {
     pub(crate) vault: Vault,
-    pub(crate) transformed_key: TransformedKey,
+    pub(crate) transformed_key: VaultKey,
     pub(crate) credential_shape: MasterCredentialShape,
     #[cfg(test)]
     pub(crate) cache_refreshed: bool,
@@ -203,7 +201,7 @@ pub(crate) fn enroll_unlock_blob(
     storage: &dyn SecureStorageProvider,
     storage_key: &str,
     master_credential: &MasterCredential,
-    transformed_key: &TransformedKey,
+    transformed_key: &VaultKey,
 ) -> Result<()> {
     let encoded = UnlockBlob::encode_parts(master_credential, transformed_key)?;
     storage
@@ -318,7 +316,7 @@ fn unlock_from_blob_with_cache_policy(
         }
     };
 
-    match KdbxVaultCodec.decode(file_bytes, blob.cached_transformed_key()) {
+    match ResidentVaultCodec.decode(file_bytes, blob.cached_transformed_key()) {
         Ok(vault) => {
             let credential_shape = blob.master_credential().shape();
             let (_, transformed_key) = blob.into_parts();
@@ -330,7 +328,7 @@ fn unlock_from_blob_with_cache_policy(
                 cache_refreshed: false,
             }));
         }
-        Err(KdbxError::HeaderHmacMismatch) => {}
+        Err(VaultCodecError::KeyMismatch) => {}
         Err(error) => return Err(error.into()),
     }
 
@@ -338,15 +336,15 @@ fn unlock_from_blob_with_cache_policy(
         return Ok(UnlockAttempt::OpenAppRequired);
     }
 
-    let refreshed = KdbxVaultCodec.derive_key_with_policy(
+    let refreshed = ResidentVaultCodec.derive_key_with_policy(
         file_bytes,
         &blob.master_credential().to_composite_key(),
         policy,
         confirmation,
     )?;
-    let vault = match KdbxVaultCodec.decode(file_bytes, &refreshed) {
+    let vault = match ResidentVaultCodec.decode(file_bytes, &refreshed) {
         Ok(vault) => vault,
-        Err(KdbxError::HeaderHmacMismatch) => {
+        Err(VaultCodecError::KeyMismatch) => {
             if refresh_cached_transformed_key {
                 storage
                     .delete(storage_key)
@@ -409,10 +407,11 @@ mod tests {
         unlock_historical_snapshot_from_blob, zeroizing_array,
     };
     use crate::providers::secure_storage::{SecureStorageError, SecureStorageProvider};
+    use crate::vault_format::{ResidentVaultCodec, VaultKey};
     use std::cell::{Cell, RefCell};
     use vaultkern_core::{
-        CompositeKey, Compression, KdbxCipher, KdbxVersion, SaveKdf, SaveProfile, TransformedKey,
-        Vault, derive_transformed_key, save_kdbx_bytes,
+        CompositeKey, Compression, ExternalKdfConfirmation, ExternalKdfPolicy, KdbxCipher,
+        KdbxVersion, SaveKdf, SaveProfile, Vault, save_kdbx_bytes,
     };
     use zeroize::Zeroizing;
 
@@ -528,6 +527,17 @@ mod tests {
         save_kdbx_bytes(&Vault::empty(name), &key, &fast_profile()).unwrap()
     }
 
+    fn vault_key(bytes: &[u8], master: &MasterCredential) -> VaultKey {
+        ResidentVaultCodec
+            .derive_key_with_policy(
+                bytes,
+                &master.to_composite_key(),
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Unconfirmed,
+            )
+            .unwrap()
+    }
+
     #[test]
     fn one_blob_roundtrips_master_credential_and_cached_transformed_key() {
         let key_file_contribution = [0x5a; 32];
@@ -536,7 +546,7 @@ mod tests {
             Some(Zeroizing::new(key_file_contribution)),
         )
         .unwrap();
-        let transformed = TransformedKey::from_zeroizing(Zeroizing::new([0xa5; 32]));
+        let transformed = VaultKey::from_zeroizing(Zeroizing::new([0xa5; 32]));
         let encoded = UnlockBlob::new(master, transformed).encode().unwrap();
 
         let decoded = UnlockBlob::decode(&encoded).unwrap();
@@ -561,7 +571,7 @@ mod tests {
         let first = file("first", password);
         let second = file("second", password);
         let master = MasterCredential::new(Some(password), None).unwrap();
-        let transformed = derive_transformed_key(&first, &master.to_composite_key()).unwrap();
+        let transformed = vault_key(&first, &master);
         let store = CountingStore::default();
 
         enroll_unlock_blob(&store, "vault-a", &master, &transformed).unwrap();
@@ -600,7 +610,7 @@ mod tests {
         let first = file("first", password);
         let second = file("second", password);
         let master = MasterCredential::new(Some(password), None).unwrap();
-        let transformed = derive_transformed_key(&first, &master.to_composite_key()).unwrap();
+        let transformed = vault_key(&first, &master);
         let store = CountingStore::default();
 
         enroll_unlock_blob(&store, "vault-a", &master, &transformed).unwrap();
@@ -627,7 +637,7 @@ mod tests {
         let historical = file("historical", password);
         let current = file("current", password);
         let master = MasterCredential::new(Some(password), None).unwrap();
-        let current_key = derive_transformed_key(&current, &master.to_composite_key()).unwrap();
+        let current_key = vault_key(&current, &master);
         let store = CountingStore::default();
         enroll_unlock_blob(&store, "vault-a", &master, &current_key).unwrap();
 
@@ -656,7 +666,7 @@ mod tests {
         let current = file("current", current_password);
         let unrelated = file("unrelated", b"different password");
         let master = MasterCredential::new(Some(current_password), None).unwrap();
-        let current_key = derive_transformed_key(&current, &master.to_composite_key()).unwrap();
+        let current_key = vault_key(&current, &master);
         let store = CountingStore::default();
         enroll_unlock_blob(&store, "vault-a", &master, &current_key).unwrap();
 
@@ -680,7 +690,7 @@ mod tests {
         let first = file("first", password);
         let second = file("second", password);
         let master = MasterCredential::new(Some(password), None).unwrap();
-        let transformed = derive_transformed_key(&first, &master.to_composite_key()).unwrap();
+        let transformed = vault_key(&first, &master);
         let store = CountingStore::default();
         enroll_unlock_blob(&store, "vault-a", &master, &transformed).unwrap();
 
@@ -703,7 +713,7 @@ mod tests {
         let original = file("original", original_password);
         let replacement = file("replacement", b"replacement password");
         let master = MasterCredential::new(Some(original_password), None).unwrap();
-        let transformed = derive_transformed_key(&original, &master.to_composite_key()).unwrap();
+        let transformed = vault_key(&original, &master);
         let store = CountingStore::default();
         enroll_unlock_blob(&store, "vault-a", &master, &transformed).unwrap();
 
@@ -719,7 +729,7 @@ mod tests {
         let password = b"state password";
         let bytes = file("state", password);
         let master = MasterCredential::new(Some(password), None).unwrap();
-        let transformed = derive_transformed_key(&bytes, &master.to_composite_key()).unwrap();
+        let transformed = vault_key(&bytes, &master);
         let encoded = UnlockBlob::new(master, transformed).encode().unwrap();
         let store = FailingLoadStore::with_blob(encoded.to_vec());
 
@@ -745,7 +755,7 @@ mod tests {
         let password = b"transient state password";
         let bytes = file("transient state", password);
         let master = MasterCredential::new(Some(password), None).unwrap();
-        let transformed = derive_transformed_key(&bytes, &master.to_composite_key()).unwrap();
+        let transformed = vault_key(&bytes, &master);
         let encoded = UnlockBlob::new(master, transformed).encode().unwrap();
         let store = FailingLoadStore::with_blob(encoded.to_vec());
         store.failure.set(LoadFailure::Transient);

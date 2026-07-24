@@ -9,17 +9,14 @@ use vaultkern_runtime_protocol::{
     OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemListDto,
 };
 
-use super::local_file::{
-    LocalFileCommitError, LocalFileProvider, LocalFileVaultSourceProvider, VaultSourceFingerprint,
-};
+use super::local_file::{LocalFileCommitError, LocalFileProvider, LocalFileVaultSourceProvider};
 use super::onedrive::{
     OneDriveMemoryAccessCounts, OneDriveMemoryWriteBehavior, OneDriveMetadata, OneDriveProvider,
-    OneDriveRemoteState, OneDriveSnapshot, OneDriveVaultSourceProvider, is_onedrive_item_not_found,
+    OneDriveVaultSourceProvider, is_onedrive_item_not_found,
 };
 use super::onedrive_token_store::OneDriveRefreshTokenStore;
-use super::provider::{Provider, ProviderCommit, ProviderError, ProviderRevision};
+use super::provider::{ContentIdentity, Provider, ProviderCommit, ProviderError, ProviderRevision};
 
-pub(crate) type ContentFingerprint = VaultSourceFingerprint;
 pub(crate) type LocalPublicationError = LocalFileCommitError;
 
 pub(crate) struct ProviderCatalog {
@@ -28,26 +25,43 @@ pub(crate) struct ProviderCatalog {
 }
 
 pub(crate) struct RemoteObservation {
-    state: OneDriveRemoteState,
+    revision: ProviderRevision,
+    display_name: String,
+    size_bytes: Option<u64>,
+    content_revision_marker: Option<u64>,
+    cache_validation_token: Option<String>,
 }
 
 impl RemoteObservation {
-    pub(crate) fn matches_fingerprint(&self, fingerprint: &VaultSourceFingerprint) -> bool {
-        self.state.matches_fingerprint(fingerprint)
+    pub(crate) fn matches_identity(&self, identity: &ContentIdentity) -> bool {
+        self.size_bytes == Some(identity.size_bytes)
+            && self
+                .content_revision_marker
+                .is_some_and(|marker| identity.observation_marker == Some(marker))
     }
 
     pub(crate) fn display_name(&self) -> &str {
-        &self.state.name
+        &self.display_name
     }
 
-    pub(crate) fn source_etag(&self) -> Option<&str> {
-        self.state.e_tag.as_deref()
+    pub(crate) fn revision(&self) -> &ProviderRevision {
+        &self.revision
+    }
+
+    pub(crate) fn identity_for_bytes(&self, bytes: &[u8]) -> ContentIdentity {
+        ContentIdentity::for_bytes(bytes, self.content_revision_marker)
+    }
+
+    pub(crate) fn cache_validation_token(&self) -> Option<&str> {
+        self.cache_validation_token.as_deref()
     }
 }
 
 pub(crate) struct RemoteSnapshot {
     pub(crate) bytes: Vec<u8>,
-    pub(crate) fingerprint: VaultSourceFingerprint,
+    pub(crate) fingerprint: ContentIdentity,
+    pub(crate) revision: ProviderRevision,
+    pub(crate) cache_validation_token: Option<String>,
     pub(crate) name: String,
     pub(crate) account_label: String,
 }
@@ -61,7 +75,7 @@ pub struct ProviderAccessCounts {
 }
 
 pub(crate) enum ConditionalPublication {
-    Committed { fingerprint: VaultSourceFingerprint },
+    Committed { fingerprint: ContentIdentity },
     StaleRevision,
     OutcomeUnknown { message: String },
 }
@@ -135,15 +149,14 @@ impl ProviderCatalog {
     }
 
     pub(crate) fn remote_state(&self, drive_id: &str, item_id: &str) -> Result<RemoteObservation> {
+        let state = self.one_drive.remote_state(drive_id, item_id)?;
         Ok(RemoteObservation {
-            state: self.one_drive.remote_state(drive_id, item_id)?,
+            revision: OneDriveProvider::revision_for_state(&state)?,
+            display_name: state.name.clone(),
+            size_bytes: state.size,
+            content_revision_marker: state.content_revision_marker(),
+            cache_validation_token: state.cache_validation_token().map(str::to_owned),
         })
-    }
-
-    pub(crate) fn revision_for_observation(
-        observation: &RemoteObservation,
-    ) -> Result<ProviderRevision, ProviderError> {
-        OneDriveProvider::revision_for_state(&observation.state)
     }
 
     pub(crate) fn read_onedrive_observation(
@@ -152,12 +165,22 @@ impl ProviderCatalog {
         item_id: &str,
         observation: &RemoteObservation,
     ) -> Result<RemoteSnapshot> {
+        let mut state = OneDriveProvider::observed_state(observation.revision())?;
+        state.name = observation.display_name.clone();
+        state.size = observation.size_bytes;
         let snapshot = self
             .one_drive
             .bind(drive_id, item_id)
-            .read_runtime_snapshot_from_state(&observation.state)
+            .read_runtime_snapshot_from_state(&state)
             .map_err(anyhow::Error::from)?;
-        Ok(Self::remote_snapshot(snapshot))
+        Ok(RemoteSnapshot {
+            bytes: snapshot.bytes,
+            fingerprint: snapshot.fingerprint,
+            revision: observation.revision.clone(),
+            cache_validation_token: observation.cache_validation_token.clone(),
+            name: snapshot.name,
+            account_label: snapshot.account_label,
+        })
     }
 
     pub(crate) fn publish_onedrive_observation(
@@ -167,13 +190,12 @@ impl ProviderCatalog {
         bytes: &[u8],
         observation: &RemoteObservation,
     ) -> Result<ConditionalPublication, ProviderError> {
-        let revision = Self::revision_for_observation(observation)?;
         match self
             .one_drive
             .bind(drive_id, item_id)
-            .publish(&revision, bytes)
+            .publish(observation.revision(), bytes)
         {
-            Ok(commit) => Self::committed_publication(bytes, commit),
+            Ok(commit) => Self::committed_publication(commit),
             Err(ProviderError::StaleRevision { .. }) => Ok(ConditionalPublication::StaleRevision),
             Err(ProviderError::OutcomeUnknown { message }) => {
                 Ok(ConditionalPublication::OutcomeUnknown { message })
@@ -182,39 +204,16 @@ impl ProviderCatalog {
         }
     }
 
-    pub(crate) fn fingerprint_for_revision(
-        bytes: &[u8],
-        revision: &ProviderRevision,
-    ) -> Result<VaultSourceFingerprint, ProviderError> {
-        OneDriveProvider::legacy_fingerprint(bytes, revision)
-    }
-
-    pub(crate) fn source_etag(
-        revision: &ProviderRevision,
-    ) -> Result<Option<String>, ProviderError> {
-        OneDriveProvider::source_etag(revision)
-    }
-
     pub(crate) fn is_onedrive_not_found(error: &anyhow::Error) -> bool {
         is_onedrive_item_not_found(error)
     }
 
     fn committed_publication(
-        bytes: &[u8],
         commit: ProviderCommit,
     ) -> Result<ConditionalPublication, ProviderError> {
         Ok(ConditionalPublication::Committed {
-            fingerprint: Self::fingerprint_for_revision(bytes, &commit.revision)?,
+            fingerprint: commit.identity,
         })
-    }
-
-    fn remote_snapshot(snapshot: OneDriveSnapshot) -> RemoteSnapshot {
-        RemoteSnapshot {
-            bytes: snapshot.bytes,
-            fingerprint: snapshot.fingerprint,
-            name: snapshot.name,
-            account_label: snapshot.account_label,
-        }
     }
 
     pub(crate) fn insert_memory_item(

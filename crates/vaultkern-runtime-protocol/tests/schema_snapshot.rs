@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use schemars::{JsonSchema, schema_for};
-use vaultkern_runtime_protocol::MergeSummaryDto;
+use vaultkern_runtime_protocol::ReconciliationSummaryDto;
 
 fn schema_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,9 +43,9 @@ fn assert_schema_matches<T: JsonSchema>(name: &str) {
 }
 
 #[test]
-fn merge_summary_dto_schema_is_frozen() {
-    // M2: MergeSummaryDto joins the freeze — it is a protocol DTO, but its
+fn reconciliation_summary_dto_schema_is_frozen() {
+    // M2: ReconciliationSummaryDto joins the freeze — it is a protocol DTO, but its
     // two conflict counters are pinned by 001/004 alongside the storage
     // contracts.
-    assert_schema_matches::<MergeSummaryDto>("merge_summary_dto.schema.json");
+    assert_schema_matches::<ReconciliationSummaryDto>("reconciliation_summary_dto.schema.json");
 }

@@ -7,6 +7,8 @@ mod providers;
 #[cfg(any(windows, test))]
 pub mod resident_ipc;
 mod runtime;
+mod runtime_api;
+mod runtime_dispatch;
 mod session;
 mod state_paths;
 mod sync;
@@ -32,8 +34,8 @@ pub use providers::onedrive::{
 };
 pub use providers::onedrive_token_store::OneDriveRefreshTokenStore;
 pub use providers::provider::{
-    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
-    ProviderSnapshot,
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
 };
 pub use providers::secure_storage::{SecureStorageError, SecureStorageProvider};
 pub use runtime::{

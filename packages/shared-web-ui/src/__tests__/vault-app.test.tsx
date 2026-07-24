@@ -127,27 +127,27 @@ it("clears quick-unlock credentials when the resident session changes", async ()
 
 function committedDatabaseSettings(
   settings: DatabaseSettings,
-  saveResult: DatabaseSettingsCommitResult["saveResult"] = {
-    type: "save_vault_result",
-    status: "saved"
+  publication: DatabaseSettingsCommitResult["publication"] = {
+    type: "publication_result",
+    status: "published"
   }
 ): DatabaseSettingsCommitResult {
   return {
     type: "database_settings_commit_result",
     commit: "committed",
     settings,
-    saveResult
+    publication
   };
 }
 
 function committedMutation<T>(
   value: T,
-  status: "saved" | "merged" | "saved_to_cache" | "conflict_copy" = "saved"
+  status: "published" | "reconciled" | "pending" | "conflict_split" = "published"
 ) {
   return {
     value,
-    saveResult: {
-      type: "save_vault_result" as const,
+    publication: {
+      type: "publication_result" as const,
       status
     }
   };
@@ -2454,8 +2454,8 @@ it("loads database settings and preserves a conflict-copy warning after saving",
           hasPassword: true
         },
         {
-          type: "save_vault_result",
-          status: "conflict_copy",
+          type: "publication_result",
+          status: "conflict_split",
           conflictCopyPath: "C:\\Vaults\\Archive.conflict.kdbx"
         }
       )
@@ -4441,7 +4441,7 @@ it("shows an auto-dismiss tip when save merges a changed source", async () => {
     totp: null,
     totpUri: null,
     customFields: []
-  }, "merged"));
+  }, "reconciled"));
 
   const client = {
     ...createVaultSelectionMethods(),
@@ -4541,7 +4541,7 @@ it("shows a pending sync banner when save falls back to local cache", async () =
     totp: null,
     totpUri: null,
     customFields: []
-  }, "saved_to_cache"));
+  }, "pending"));
 
   const client = {
     ...createVaultSelectionMethods(),

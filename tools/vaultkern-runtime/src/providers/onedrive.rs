@@ -15,14 +15,13 @@ use vaultkern_runtime_protocol::{
     OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto, OneDriveItemListDto,
 };
 
-use crate::providers::local_file::VaultSourceFingerprint;
 use crate::providers::onedrive_token_store::{
     EphemeralOneDriveRefreshTokenStore, OneDriveRefreshTokenStore, is_unavailable_error,
     production_default, production_for_extension_id,
 };
 use crate::providers::provider::{
-    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
-    ProviderSnapshot,
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
 };
 use zeroize::Zeroizing;
 
@@ -43,7 +42,7 @@ const ONEDRIVE_PROVIDER_REVISION_PREFIX: &[u8] = b"onedrive:v1:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OneDriveSnapshot {
     pub bytes: Vec<u8>,
-    pub fingerprint: VaultSourceFingerprint,
+    pub fingerprint: ContentIdentity,
     pub name: String,
     pub account_label: String,
 }
@@ -84,7 +83,7 @@ pub struct OneDriveMemoryAccessCounts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OneDriveConditionalWriteOutcome {
     Committed {
-        fingerprint: VaultSourceFingerprint,
+        fingerprint: ContentIdentity,
         e_tag: Option<String>,
     },
     PreconditionFailed,
@@ -161,17 +160,21 @@ impl fmt::Display for OneDriveConditionalWriteError {
 impl std::error::Error for OneDriveConditionalWriteError {}
 
 impl OneDriveRemoteState {
-    pub fn matches_fingerprint(&self, fingerprint: &VaultSourceFingerprint) -> bool {
+    pub(crate) fn content_revision_marker(&self) -> Option<u64> {
+        self.memory_revision
+            .or_else(|| self.e_tag.as_deref().map(stable_u64_for_text))
+    }
+
+    pub(crate) fn cache_validation_token(&self) -> Option<&str> {
+        self.e_tag.as_deref()
+    }
+
+    pub fn matches_fingerprint(&self, fingerprint: &ContentIdentity) -> bool {
         if self.size != Some(fingerprint.size_bytes) {
             return false;
         }
-        if let Some(revision) = self.memory_revision {
-            return fingerprint.modified_at == Some(revision);
-        }
-        self.e_tag
-            .as_deref()
-            .map(stable_u64_for_text)
-            .is_some_and(|etag| fingerprint.modified_at == Some(etag))
+        self.content_revision_marker()
+            .is_some_and(|revision| fingerprint.observation_marker == Some(revision))
     }
 }
 
@@ -1308,6 +1311,8 @@ impl OneDriveProvider<'_> {
             .read_snapshot_from_state(&self.drive_id, &self.item_id, state)
             .map_err(Self::read_error)?;
         Ok(ProviderSnapshot {
+            identity: snapshot.fingerprint,
+            cache_validation_token: state.e_tag.clone(),
             bytes: snapshot.bytes,
             revision,
         })
@@ -1317,8 +1322,11 @@ impl OneDriveProvider<'_> {
         &mut self,
         state: &OneDriveRemoteState,
     ) -> Result<OneDriveSnapshot, ProviderError> {
-        let ProviderSnapshot { bytes, revision } = self.read_from_state(state)?;
-        let fingerprint = Self::legacy_fingerprint(&bytes, &revision)?;
+        let ProviderSnapshot {
+            bytes,
+            identity: fingerprint,
+            ..
+        } = self.read_from_state(state)?;
         let account_label = if self.source.memory_mode {
             self.source
                 .item(&self.drive_id, &self.item_id)
@@ -1334,25 +1342,6 @@ impl OneDriveProvider<'_> {
             name: state.name.clone(),
             account_label,
         })
-    }
-
-    pub(crate) fn legacy_fingerprint(
-        bytes: &[u8],
-        revision: &ProviderRevision,
-    ) -> Result<VaultSourceFingerprint, ProviderError> {
-        let revision = Self::decode_revision(revision)?;
-        if let Some(memory_revision) = revision.memory_revision {
-            let mut fingerprint = fingerprint_for_graph_item(bytes, None);
-            fingerprint.modified_at = Some(memory_revision);
-            return Ok(fingerprint);
-        }
-        Ok(fingerprint_for_graph_item(bytes, revision.e_tag.as_deref()))
-    }
-
-    pub(crate) fn source_etag(
-        revision: &ProviderRevision,
-    ) -> Result<Option<String>, ProviderError> {
-        Ok(Self::decode_revision(revision)?.e_tag)
     }
 
     fn encode_revision(
@@ -1382,7 +1371,9 @@ impl OneDriveProvider<'_> {
         })
     }
 
-    fn observed_state(revision: &ProviderRevision) -> Result<OneDriveRemoteState, ProviderError> {
+    pub(crate) fn observed_state(
+        revision: &ProviderRevision,
+    ) -> Result<OneDriveRemoteState, ProviderError> {
         let revision = Self::decode_revision(revision)?;
         Ok(OneDriveRemoteState {
             name: String::new(),
@@ -1429,10 +1420,11 @@ impl Provider for OneDriveProvider<'_> {
             })?;
         match outcome {
             OneDriveConditionalWriteOutcome::Committed { fingerprint, e_tag } => {
+                let cache_validation_token = e_tag.clone();
                 let revision = if self.source.memory_mode {
                     Self::encode_revision(OneDriveProviderRevision {
                         e_tag: None,
-                        memory_revision: fingerprint.modified_at,
+                        memory_revision: fingerprint.observation_marker,
                     })?
                 } else if e_tag.is_some() {
                     Self::encode_revision(OneDriveProviderRevision {
@@ -1452,6 +1444,8 @@ impl Provider for OneDriveProvider<'_> {
                 };
                 Ok(ProviderCommit {
                     revision,
+                    identity: fingerprint,
+                    cache_validation_token,
                     warnings: Vec::new(),
                 })
             }
@@ -1531,7 +1525,7 @@ fn load_refresh_token_state(
     }
 }
 
-fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> VaultSourceFingerprint {
+fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> ContentIdentity {
     let mut hasher = Sha256::new();
     hasher.update(&item.bytes);
     let content_sha256 = hasher
@@ -1539,10 +1533,10 @@ fn fingerprint_for_memory_item(item: &MemoryOneDriveItem) -> VaultSourceFingerpr
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    VaultSourceFingerprint {
+    ContentIdentity {
         content_sha256,
         size_bytes: item.bytes.len() as u64,
-        modified_at: Some(item.revision),
+        observation_marker: Some(item.revision),
     }
 }
 
@@ -1678,7 +1672,7 @@ fn callback_response(status: &str, body: &str) -> String {
     )
 }
 
-fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> VaultSourceFingerprint {
+fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> ContentIdentity {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let content_sha256 = hasher
@@ -1686,10 +1680,10 @@ fn fingerprint_for_graph_item(bytes: &[u8], etag: Option<&str>) -> VaultSourceFi
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    VaultSourceFingerprint {
+    ContentIdentity {
         content_sha256,
         size_bytes: bytes.len() as u64,
-        modified_at: etag.map(stable_u64_for_text),
+        observation_marker: etag.map(stable_u64_for_text),
     }
 }
 

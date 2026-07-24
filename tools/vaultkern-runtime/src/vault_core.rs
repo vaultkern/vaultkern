@@ -18,15 +18,16 @@ use sha2::{Digest, Sha256};
 use url::form_urlencoded::byte_serialize;
 use uuid::Uuid;
 use vaultkern_core::{
-    AttachmentContentUpdate, AttachmentMetadataUpdate, Compression, Entry, EntryAttachmentInput,
-    EntryCreate, EntryCustomDataInput, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
-    ExternalKdfConfirmation, ExternalKdfPolicy, GroupMetadataUpdate, KdbxCipher, KdbxVersion,
-    KeepassCore, PasskeyRecord, SaveKdf, SaveProfile, ThreeWayPatchRecoverySnapshot,
-    ThreeWayPatchReport, TotpSpec, TransformedKey, Vault, VaultBinTemplateMetadataUpdate,
-    VaultCodec, VaultIdentityMetadataUpdate, VaultLifecycleMetadataUpdate, VaultMetadataUpdate,
-    enforce_history_limits, parse_key_file_bytes, retained_or_recommended_save_kdf,
-    strip_retired_runtime_metadata, three_way_field_patch,
+    AttachmentContentUpdate, AttachmentMetadataUpdate, Entry, EntryAttachmentInput, EntryCreate,
+    EntryCustomDataInput, EntryCustomFieldInput, EntryTimesUpdate, EntryUpdate,
+    ExternalKdfConfirmation, ExternalKdfPolicy, GroupMetadataUpdate, KeepassCore, PasskeyRecord,
+    ThreeWayPatchRecoverySnapshot, ThreeWayPatchReport, TotpSpec, Vault,
+    VaultBinTemplateMetadataUpdate, VaultCodec, VaultIdentityMetadataUpdate,
+    VaultLifecycleMetadataUpdate, VaultMetadataUpdate, enforce_history_limits,
+    parse_key_file_bytes, strip_retired_runtime_metadata, three_way_field_patch,
 };
+#[cfg(test)]
+use vaultkern_runtime_protocol::RuntimeCommand;
 use vaultkern_runtime_protocol::{
     AutofillCreateContextDto, AutofillCredentialDto, AutofillEntryFieldsDto,
     AutofillUpdateFieldsDto, CommitStatusDto, DatabaseEncryptionSettingsDto,
@@ -35,18 +36,19 @@ use vaultkern_runtime_protocol::{
     DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
     EntryAttachmentContentDto, EntryAttachmentDto, EntryCustomFieldDto, EntryDetailDto,
     EntryFieldProtectionDto, EntryFieldsDto, EntryHistoryDetailDto, EntryHistoryItemDto,
-    EntryHistoryListDto, EntryIdListDto, EntryListDto, EntryMutationResultDto, EntryPasskeyDto,
+    EntryHistoryListDto, EntryListDto, EntryMutationResultDto, EntryPasskeyDto,
     EntryPasskeyUpdateDto, EntrySummaryDto, ErrorDto, FillCandidateListDto, GroupNodeDto,
-    GroupTreeDto, HandshakeDto, MergeSummaryDto, OptionalSettingUpdateDto, PasskeyAssertionDto,
-    PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
-    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto,
-    PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto,
-    PasskeyCeremonyVaultBoundDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
-    PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
-    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, RuntimeCommand, RuntimeResponse,
-    SaveVaultResultDto, SaveVaultStatusDto, SensitiveString, VaultHandleDto,
-    VaultMutationResultDto, VaultReferenceDto, VaultReferenceListDto, VaultSourceStatusDto,
+    GroupTreeDto, OptionalSettingUpdateDto, PasskeyAssertionDto, PasskeyCeremonyAdvancedDto,
+    PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
+    PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto,
+    PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto, PasskeyCeremonyVaultBoundDto,
+    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
+    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
+    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, PublicationResultDto,
+    PublicationStatusDto, ReconciliationSummaryDto, RuntimeResponse, SensitiveString,
+    VaultHandleDto, VaultMutationResultDto, VaultReferenceDto, VaultReferenceListDto,
+    VaultSourceStatusDto,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -65,13 +67,14 @@ use crate::providers::biometric::{
     default_biometric_provider,
 };
 use crate::providers::catalog::{
-    ConditionalPublication, ContentFingerprint, LocalPublicationError, ProviderAccessCounts,
-    ProviderCatalog, RemoteObservation, RemoteSnapshot,
+    ConditionalPublication, LocalPublicationError, ProviderAccessCounts, ProviderCatalog,
+    RemoteObservation, RemoteSnapshot,
 };
 use crate::providers::durable_file::create_dir_all_durable;
 use crate::providers::onedrive_token_store::OneDriveRefreshTokenStore;
 use crate::providers::provider::{
-    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision,
 };
 use crate::providers::remote_cache::{
     GenericPendingKind, PendingRemoteCacheCompletion, RemoteCacheKey, RemoteVaultCache,
@@ -92,7 +95,11 @@ use crate::unlock::{
     MasterCredential, MasterCredentialShape, UnlockAttempt, enroll_unlock_blob,
     unlock_from_blob_with_policy, unlock_historical_snapshot_from_blob_with_policy,
 };
-use crate::vault_format::{ResidentVaultCodec, VAULT_WRITER_ID, VaultCodecError};
+use crate::vault_format::{
+    ResidentVaultCodec, VAULT_WRITER_ID, VaultCipher, VaultCodecError, VaultCompression,
+    VaultEncodingProfile, VaultEncryptionSettings, VaultKdf, VaultKdfAlgorithm, VaultKdfDecision,
+    VaultKey, external_kdf_policy_details,
+};
 use crate::vault_reference_store::{PendingVaultCleanup, StoredVaultSource, VaultReferenceStore};
 
 const PLATFORM_PASSKEY_RP_NAME_KEY: &str = "VaultKern.PlatformPasskey.RelyingPartyName";
@@ -203,7 +210,7 @@ fn entry_detail_matches_fields(detail: &EntryDetailDto, fields: &EntryFieldsDto)
 
 struct LoadedSourceSnapshot {
     bytes: Option<Vec<u8>>,
-    fingerprint: ContentFingerprint,
+    fingerprint: ContentIdentity,
     provider_revision: Option<ProviderRevision>,
 }
 
@@ -219,22 +226,22 @@ impl std::fmt::Display for PendingGenericCasConflict {
 impl std::error::Error for PendingGenericCasConflict {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PasskeyCeremonyIdentity {
-    connection_id: String,
-    origin: String,
-    top_origin: Option<String>,
-    ancestor_origins: Vec<String>,
-    relying_party: String,
-    ceremony: PasskeyCeremonyKindDto,
-    discoverable: bool,
-    user_verification: PasskeyUserVerificationRequirementDto,
-    challenge_base64url: String,
-    request_id: i64,
-    tab_id: i64,
-    frame_id: i64,
-    frame_kind: PasskeyFrameKindDto,
-    registered_at_epoch_ms: u64,
-    expires_at_epoch_ms: u64,
+pub(crate) struct PasskeyCeremonyIdentity {
+    pub(crate) connection_id: String,
+    pub(crate) origin: String,
+    pub(crate) top_origin: Option<String>,
+    pub(crate) ancestor_origins: Vec<String>,
+    pub(crate) relying_party: String,
+    pub(crate) ceremony: PasskeyCeremonyKindDto,
+    pub(crate) discoverable: bool,
+    pub(crate) user_verification: PasskeyUserVerificationRequirementDto,
+    pub(crate) challenge_base64url: String,
+    pub(crate) request_id: i64,
+    pub(crate) tab_id: i64,
+    pub(crate) frame_id: i64,
+    pub(crate) frame_kind: PasskeyFrameKindDto,
+    pub(crate) registered_at_epoch_ms: u64,
+    pub(crate) expires_at_epoch_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,12 +304,13 @@ enum SourceRefreshConflictDisposition {
 struct OneDriveConflictHead {
     vault: Option<Vault>,
     bytes: Vec<u8>,
-    fingerprint: ContentFingerprint,
+    fingerprint: ContentIdentity,
     revision: ProviderRevision,
+    cache_validation_token: Option<String>,
     display_name: String,
     account_label: String,
-    save_profile: SaveProfile,
-    key: Option<Arc<TransformedKey>>,
+    save_profile: VaultEncodingProfile,
+    key: Option<Arc<VaultKey>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -338,37 +346,25 @@ pub struct ExternalKdfFailure {
 }
 
 pub fn classify_external_kdf_error(error: &anyhow::Error) -> Option<ExternalKdfFailure> {
-    let policy_error = error
-        .chain()
-        .find_map(|cause| cause.downcast_ref::<VaultCodecError>())?;
-    let VaultCodecError::ExternalKdfPolicy {
-        algorithm,
-        observed,
-        decision,
-    } = policy_error
-    else {
-        return None;
-    };
+    let (algorithm, observed, decision) = error.chain().find_map(external_kdf_policy_details)?;
     let (algorithm, resource) = match algorithm {
-        vaultkern_core::ExternalKdfAlgorithm::AesKdbx3 => ("aes_kdbx3", "rounds"),
-        vaultkern_core::ExternalKdfAlgorithm::AesKdbx4 => ("aes_kdbx4", "rounds"),
-        vaultkern_core::ExternalKdfAlgorithm::Argon2d => ("argon2d", "memory_bytes"),
-        vaultkern_core::ExternalKdfAlgorithm::Argon2id => ("argon2id", "memory_bytes"),
+        VaultKdfAlgorithm::AesLegacy => ("aes_kdbx3", "rounds"),
+        VaultKdfAlgorithm::Aes => ("aes_kdbx4", "rounds"),
+        VaultKdfAlgorithm::Argon2d => ("argon2d", "memory_bytes"),
+        VaultKdfAlgorithm::Argon2id => ("argon2id", "memory_bytes"),
     };
     let (limit, disposition) = match decision {
-        vaultkern_core::ExternalKdfDecision::Confirm(limit) => {
-            (Some(*limit), ExternalKdfDisposition::ConfirmationRequired)
+        VaultKdfDecision::Confirm(limit) => {
+            (Some(limit), ExternalKdfDisposition::ConfirmationRequired)
         }
-        vaultkern_core::ExternalKdfDecision::Refuse(limit) => {
-            (Some(*limit), ExternalKdfDisposition::Refused)
-        }
-        vaultkern_core::ExternalKdfDecision::Forbid => (None, ExternalKdfDisposition::Forbidden),
-        vaultkern_core::ExternalKdfDecision::Allow => return None,
+        VaultKdfDecision::Refuse(limit) => (Some(limit), ExternalKdfDisposition::Refused),
+        VaultKdfDecision::Forbid => (None, ExternalKdfDisposition::Forbidden),
+        VaultKdfDecision::Allow => return None,
     };
     Some(ExternalKdfFailure {
         algorithm,
         resource,
-        observed: *observed,
+        observed,
         limit,
         disposition,
     })
@@ -534,50 +530,33 @@ impl VaultCore {
 
     fn load_session_database(
         bytes: &[u8],
-        key: &TransformedKey,
+        key: &VaultKey,
     ) -> std::result::Result<SessionLoadedDatabase, VaultCodecError> {
         ResidentVaultCodec
             .decode(bytes, key)
             .map(|vault| SessionLoadedDatabase { vault })
     }
 
-    fn inspected_save_profile(&self, bytes: &[u8]) -> Result<SaveProfile> {
-        let inspection = self
-            .core
-            .inspect_database(bytes)
-            .context("failed to inspect KDBX save profile")?;
-        Ok(SaveProfile {
-            version: inspection.save_target_version,
-            cipher: inspection.header.cipher,
-            compression: inspection.header.compression,
-            kdf: None,
-        })
+    fn inspected_save_profile(&self, bytes: &[u8]) -> Result<VaultEncodingProfile> {
+        VaultEncodingProfile::inspect(bytes).context("failed to inspect vault encoding profile")
     }
 
     fn merge_save_profile(
-        base: &SaveProfile,
-        local: &SaveProfile,
-        remote: &SaveProfile,
-    ) -> Result<SaveProfile> {
-        let mut local = local.clone();
-        local.kdf = None;
-        if &local == base {
-            return Ok(remote.clone());
-        }
-        if remote == base || remote == &local {
-            return Ok(local);
-        }
-        anyhow::bail!("KDBX encryption profile changed concurrently")
+        base: &VaultEncodingProfile,
+        local: &VaultEncodingProfile,
+        remote: &VaultEncodingProfile,
+    ) -> Result<VaultEncodingProfile> {
+        VaultEncodingProfile::merge(base, local, remote).map_err(Into::into)
     }
 
     fn prepare_source_refresh_rebase(
         base_vault: &Vault,
         local_vault: &Vault,
         remote_vault: &Vault,
-        base_save_profile: &SaveProfile,
-        local_save_profile: &SaveProfile,
-        remote_save_profile: &SaveProfile,
-    ) -> Result<(Vault, SaveProfile)> {
+        base_save_profile: &VaultEncodingProfile,
+        local_save_profile: &VaultEncodingProfile,
+        remote_save_profile: &VaultEncodingProfile,
+    ) -> Result<(Vault, VaultEncodingProfile)> {
         if !has_vaultkern_sync_lineage(base_vault, remote_vault) {
             anyhow::bail!("current generation has foreign or unclear writer lineage");
         }
@@ -988,7 +967,7 @@ impl VaultCore {
                     has_password: false,
                     has_key_file: false,
                 },
-                save_profile: SaveProfile::recommended(),
+                save_profile: VaultEncodingProfile::recommended(),
                 requires_source_migration: false,
                 vault: None,
                 transformed_key: None,
@@ -1059,9 +1038,8 @@ impl VaultCore {
                         )
                     } else {
                         match self.providers.remote_state(&drive_id, &item_id) {
-                            Ok(state) if state.matches_fingerprint(&cached.fingerprint) => {
-                                let provider_revision =
-                                    ProviderCatalog::revision_for_observation(&state).ok();
+                            Ok(state) if state.matches_identity(&cached.fingerprint) => {
+                                let provider_revision = Some(state.revision().clone());
                                 let display_name = cached.display_name;
                                 let account_label = cached.account_label;
                                 (
@@ -1084,8 +1062,7 @@ impl VaultCore {
                                 let snapshot = self
                                     .providers
                                     .read_onedrive_observation(&drive_id, &item_id, &state)?;
-                                let provider_revision =
-                                    ProviderCatalog::revision_for_observation(&state)?;
+                                let provider_revision = snapshot.revision.clone();
                                 let fingerprint = snapshot.fingerprint;
                                 let name = display_name_for_cloud_name(state.display_name());
                                 let path_name = state.display_name().to_owned();
@@ -1152,10 +1129,7 @@ impl VaultCore {
                     };
                     match snapshot_result {
                         Ok((metadata, snapshot)) => {
-                            let fingerprint = ProviderCatalog::fingerprint_for_revision(
-                                &snapshot.bytes,
-                                &snapshot.revision,
-                            )?;
+                            let fingerprint = snapshot.identity;
                             let name = display_name_for_cloud_name(&metadata.name);
                             let path_name = metadata.name;
                             let account_label = metadata.account_label;
@@ -1258,7 +1232,7 @@ impl VaultCore {
                             has_password: false,
                             has_key_file: false,
                         },
-                        save_profile: SaveProfile::recommended(),
+                        save_profile: VaultEncodingProfile::recommended(),
                         requires_source_migration: false,
                         vault: None,
                         transformed_key: None,
@@ -1535,44 +1509,29 @@ impl VaultCore {
         let credential_shape = master_credential.shape();
         let key = master_credential.to_composite_key();
         let (vault, transformed_key, save_profile, name, migrated_base) = {
-            let inspection = self
-                .core
-                .inspect_database(&loaded.bytes)
-                .with_context(|| format!("failed to inspect vault: {vault_id}"))?;
-            if matches!(
-                inspection.header.version,
-                KdbxVersion::V2_0 | KdbxVersion::V3_0 | KdbxVersion::V3_1
-            ) {
-                let legacy = self
-                    .core
-                    .load_kdbx_with_policy(&loaded.bytes, &key, &policy, confirmation)
+            if let Some(migration_profile) =
+                ResidentVaultCodec::legacy_migration_profile(&loaded.bytes)
+                    .with_context(|| format!("failed to inspect vault: {vault_id}"))?
+            {
+                let legacy = ResidentVaultCodec
+                    .decode_with_policy(&loaded.bytes, &key, &policy, confirmation)
                     .with_context(|| format!("failed to unlock vault: {vault_id}"))?;
-                let migration_profile = SaveProfile {
-                    version: inspection.save_target_version,
-                    cipher: inspection.header.cipher,
-                    compression: inspection.header.compression,
-                    kdf: Some(SaveKdf::recommended()),
-                };
-                let migrated = self
-                    .core
-                    .save_kdbx(&legacy, &key, migration_profile.clone())
+                let migrated = ResidentVaultCodec
+                    .encode_with_composite_key(legacy, &key, migration_profile.clone())
                     .with_context(|| format!("failed to migrate legacy vault: {vault_id}"))?;
                 let transformed_key = ResidentVaultCodec
-                    .derive_key_with_policy(&migrated, &key, &policy, confirmation)
+                    .derive_key_with_policy(&migrated.bytes, &key, &policy, confirmation)
                     .with_context(|| format!("failed to derive migrated vault key: {vault_id}"))?;
                 let vault = ResidentVaultCodec
-                    .decode_diagnostic(&migrated, &transformed_key)
+                    .decode_diagnostic(&migrated.bytes, &transformed_key)
                     .with_context(|| format!("failed to load migrated vault: {vault_id}"))?;
                 let name = vault.name.clone();
                 (
                     vault,
                     transformed_key,
-                    SaveProfile {
-                        kdf: None,
-                        ..migration_profile
-                    },
+                    migration_profile.without_explicit_kdf(),
                     name,
-                    Some(migrated),
+                    Some(migrated.bytes),
                 )
             } else {
                 let transformed_key = ResidentVaultCodec
@@ -1585,12 +1544,8 @@ impl VaultCore {
                 (
                     vault,
                     transformed_key,
-                    SaveProfile {
-                        version: inspection.save_target_version,
-                        cipher: inspection.header.cipher,
-                        compression: inspection.header.compression,
-                        kdf: None,
-                    },
+                    VaultEncodingProfile::inspect(&loaded.bytes)
+                        .with_context(|| format!("failed to inspect vault: {vault_id}"))?,
                     name,
                     None,
                 )
@@ -1944,10 +1899,6 @@ impl VaultCore {
                 .vault_session
                 .find_loaded(&handle.vault_id)
                 .with_context(|| format!("vault not opened: {}", handle.vault_id))?;
-            let inspection = self
-                .core
-                .inspect_database(&loaded.bytes)
-                .with_context(|| format!("failed to inspect vault: {}", handle.vault_id))?;
             let (policy, _) = self.external_open_kdf_policy();
             let attempt = unlock_from_blob_with_policy(
                 self.secure_storage.as_ref(),
@@ -1958,12 +1909,8 @@ impl VaultCore {
             )?;
             (
                 attempt,
-                SaveProfile {
-                    version: inspection.save_target_version,
-                    cipher: inspection.header.cipher,
-                    compression: inspection.header.compression,
-                    kdf: None,
-                },
+                VaultEncodingProfile::inspect(&loaded.bytes)
+                    .with_context(|| format!("failed to inspect vault: {}", handle.vault_id))?,
             )
         };
         let unlocked = match attempt {
@@ -2049,7 +1996,7 @@ impl VaultCore {
         Ok(true)
     }
 
-    fn remember_quick_unlock_enrollment(
+    pub(crate) fn remember_quick_unlock_enrollment(
         &mut self,
         password: Option<SensitiveString>,
         key_file_path: Option<String>,
@@ -2156,7 +2103,7 @@ impl VaultCore {
         )
     }
 
-    fn verify_passkey_user_cancellable(
+    pub(crate) fn verify_passkey_user_cancellable(
         &mut self,
         ceremony_token: &str,
         expected_phase: PasskeyCeremonyPhaseDto,
@@ -2405,12 +2352,12 @@ impl VaultCore {
             .as_ref()
             .with_context(|| format!("vault is locked: {vault_id}"))?;
 
-        Ok(database_settings_dto(
+        database_settings_dto(
             vault,
             &loaded.save_profile,
             autosave_delay_seconds(vault),
             loaded.credential_shape.has_password,
-        ))
+        )
     }
 
     pub fn update_database_settings(
@@ -2438,11 +2385,7 @@ impl VaultCore {
 
             if let Some(encryption) = update.encryption.as_ref() {
                 let requested = save_profile_from_settings(encryption.clone())?;
-                let requested_kdf = requested
-                    .kdf
-                    .as_ref()
-                    .expect("settings always carry explicit KDF parameters");
-                if requested_kdf != &retained_or_recommended_save_kdf(vault)? {
+                if !requested.uses_retained_kdf(vault)? {
                     anyhow::bail!(
                         "KDF parameter changes require a fresh authenticated credential-update flow"
                     );
@@ -2569,15 +2512,12 @@ impl VaultCore {
             }
 
             if let Some(encryption) = update.encryption {
-                let mut requested = save_profile_from_settings(encryption)?;
-                let requested_kdf = requested
-                    .kdf
-                    .take()
-                    .expect("settings always carry explicit KDF parameters");
-                let preserves_retained_kdf = loaded.save_profile.kdf.is_none()
-                    && requested_kdf == retained_or_recommended_save_kdf(vault)?;
-                requested.kdf = (!preserves_retained_kdf).then_some(requested_kdf);
-                loaded.save_profile = requested;
+                let settings = vault_encryption_settings(encryption)?;
+                loaded.save_profile = VaultEncodingProfile::apply_encryption_settings(
+                    &loaded.save_profile,
+                    vault,
+                    settings,
+                )?;
             }
 
             database_settings_dto(
@@ -2585,13 +2525,13 @@ impl VaultCore {
                 &loaded.save_profile,
                 autosave_delay_seconds(vault),
                 loaded.credential_shape.has_password,
-            )
+            )?
         };
 
         Ok(settings)
     }
 
-    fn commit_database_settings(
+    pub(crate) fn commit_database_settings(
         &mut self,
         vault_id: &str,
         update: DatabaseSettingsUpdateDto,
@@ -2607,16 +2547,16 @@ impl VaultCore {
         let mut completed_conflict_split = false;
         let result = (|| {
             let updated_settings = self.update_database_settings(vault_id, update)?;
-            let RuntimeResponse::SaveVaultResult(save_result) =
+            let RuntimeResponse::PublicationResult(publication) =
                 self.commit_working_copy(vault_id)?
             else {
                 anyhow::bail!("database settings save returned an unexpected response");
             };
-            if save_result.status == SaveVaultStatusDto::ConflictCopy {
+            if publication.status == PublicationStatusDto::ConflictSplit {
                 completed_conflict_split = self.completed_conflict_split(vault_id, &previous);
                 anyhow::bail!(
                     "database settings were not committed to the active vault; conflict copy: {}",
-                    save_result
+                    publication
                         .conflict_copy_path
                         .as_deref()
                         .unwrap_or("unknown")
@@ -2628,7 +2568,7 @@ impl VaultCore {
             Ok(DatabaseSettingsCommitResultDto {
                 commit: CommitStatusDto::Committed,
                 settings,
-                save_result,
+                publication,
             })
         })();
 
@@ -2639,7 +2579,7 @@ impl VaultCore {
         result
     }
 
-    fn commit_vault_mutation(
+    pub(crate) fn commit_vault_mutation(
         &mut self,
         vault_id: &str,
         mutation: impl FnOnce(&mut Self) -> Result<Option<String>>,
@@ -2652,7 +2592,7 @@ impl VaultCore {
 
         let result = (|| {
             let created_group_id = mutation(self)?;
-            let RuntimeResponse::SaveVaultResult(publication) =
+            let RuntimeResponse::PublicationResult(publication) =
                 self.commit_working_copy(vault_id)?
             else {
                 anyhow::bail!("vault mutation save returned an unexpected response");
@@ -2688,7 +2628,7 @@ impl VaultCore {
         }
     }
 
-    fn commit_entry_mutation(
+    pub(crate) fn commit_entry_mutation(
         &mut self,
         vault_id: &str,
         mutation: impl FnOnce(&mut Self) -> Result<Option<EntryDetailDto>>,
@@ -2701,7 +2641,7 @@ impl VaultCore {
 
         let result = (|| {
             let entry = mutation(self)?;
-            let RuntimeResponse::SaveVaultResult(publication) =
+            let RuntimeResponse::PublicationResult(publication) =
                 self.commit_working_copy(vault_id)?
             else {
                 anyhow::bail!("entry mutation save returned an unexpected response");
@@ -3058,7 +2998,7 @@ impl VaultCore {
         self.get_entry_detail(vault_id, &entry_id)
     }
 
-    fn exact_matching_entry_ids(
+    pub(crate) fn exact_matching_entry_ids(
         &self,
         vault_id: &str,
         fields: &EntryFieldsDto,
@@ -3162,43 +3102,6 @@ impl VaultCore {
         }
 
         self.get_entry_detail(vault_id, entry_id)
-    }
-
-    pub fn compare_and_update_entry_fields(
-        &mut self,
-        vault_id: &str,
-        entry_id: &str,
-        expected_fields: EntryFieldsDto,
-        desired_fields: EntryFieldsDto,
-    ) -> Result<Option<EntryDetailDto>> {
-        if self.vault_session.active_vault_id() != Some(vault_id) {
-            return Ok(None);
-        }
-        if parse_totp_uri(desired_fields.totp_uri.as_deref()).is_err() {
-            return Ok(None);
-        }
-        let current = match self.get_entry_detail(vault_id, entry_id) {
-            Ok(current) => current,
-            Err(_) => return Ok(None),
-        };
-        if !entry_detail_matches_fields(&current, &expected_fields) {
-            return Ok(None);
-        }
-        if expected_fields == desired_fields {
-            return Ok(Some(current));
-        }
-        self.update_entry_fields(
-            vault_id,
-            entry_id,
-            desired_fields.title,
-            desired_fields.username,
-            desired_fields.password,
-            desired_fields.url,
-            desired_fields.notes,
-            desired_fields.totp_uri,
-            desired_fields.custom_fields,
-        )
-        .map(Some)
     }
 
     pub fn clear_entry_totp(&mut self, vault_id: &str, entry_id: &str) -> Result<EntryDetailDto> {
@@ -3649,12 +3552,12 @@ impl VaultCore {
     ) -> Result<()> {
         let vault_id = rollback.vault_id.clone();
         let mut save_error = match self.commit_working_copy(&vault_id) {
-            Ok(RuntimeResponse::SaveVaultResult(result))
-                if result.status != SaveVaultStatusDto::ConflictCopy =>
+            Ok(RuntimeResponse::PublicationResult(result))
+                if result.status != PublicationStatusDto::ConflictSplit =>
             {
                 None
             }
-            Ok(RuntimeResponse::SaveVaultResult(result)) => Some(anyhow::anyhow!(
+            Ok(RuntimeResponse::PublicationResult(result)) => Some(anyhow::anyhow!(
                 "platform passkey registration was saved only to conflict copy: {}",
                 result.conflict_copy_path.as_deref().unwrap_or("unknown")
             )),
@@ -4059,7 +3962,7 @@ impl VaultCore {
         Ok(())
     }
 
-    fn register_passkey_ceremony(
+    pub(crate) fn register_passkey_ceremony(
         &mut self,
         ceremony_token: &str,
         identity: PasskeyCeremonyIdentity,
@@ -4149,7 +4052,7 @@ impl VaultCore {
         Ok(PasskeyCeremonyRegisteredDto { registered: true })
     }
 
-    fn advance_passkey_ceremony_phase(
+    pub(crate) fn advance_passkey_ceremony_phase(
         &mut self,
         ceremony_token: &str,
         expected_phase: PasskeyCeremonyPhaseDto,
@@ -4197,7 +4100,7 @@ impl VaultCore {
         Ok(PasskeyCeremonyAdvancedDto { advanced: true })
     }
 
-    fn bind_passkey_ceremony_vault(
+    pub(crate) fn bind_passkey_ceremony_vault(
         &mut self,
         ceremony_token: &str,
         expected_phase: PasskeyCeremonyPhaseDto,
@@ -4239,7 +4142,10 @@ impl VaultCore {
         bind_passkey_ceremony_vault(entry, vault_id)
     }
 
-    fn query_passkey_ceremony_ledger(&self, ceremony_token: &str) -> PasskeyCeremonyLedgerDto {
+    pub(crate) fn query_passkey_ceremony_ledger(
+        &self,
+        ceremony_token: &str,
+    ) -> PasskeyCeremonyLedgerDto {
         match self.passkey_ceremonies.get(ceremony_token) {
             Some(entry) => PasskeyCeremonyLedgerDto {
                 known: true,
@@ -4256,7 +4162,7 @@ impl VaultCore {
         }
     }
 
-    fn reconcile_passkey_ceremony_ledger(
+    pub(crate) fn reconcile_passkey_ceremony_ledger(
         &mut self,
         active_connection_id: &str,
     ) -> Result<PasskeyCeremonyReconciliationDto> {
@@ -4326,7 +4232,7 @@ impl VaultCore {
         });
     }
 
-    fn mark_passkey_ceremony_unknown_delivery(
+    pub(crate) fn mark_passkey_ceremony_unknown_delivery(
         &mut self,
         ceremony_token: &str,
         expected_phase: PasskeyCeremonyPhaseDto,
@@ -4978,883 +4884,77 @@ impl VaultCore {
         self.get_entry_detail(vault_id, entry_id)
     }
 
-    pub fn handle_browser_command(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
-        let cancelled = std::sync::atomic::AtomicBool::new(false);
-        self.handle_browser_command_cancellable(command, &cancelled)
-    }
-
-    pub fn handle_browser_command_cancellable(
-        &mut self,
-        command: RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<RuntimeResponse> {
-        self.handle_browser_command_cancellable_with_quick_unlock_handoff(command, cancelled)
-            .map(|(response, _)| response)
-    }
-
-    pub fn handle_browser_command_cancellable_with_quick_unlock_handoff(
-        &mut self,
-        command: RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<(
-        RuntimeResponse,
-        Option<QuickUnlockReconciliationCredentials>,
-    )> {
-        self.authorize_browser_command(&command, cancelled)?;
-        self.handle_with_quick_unlock_handoff_cancellable(command, cancelled)
-    }
-
-    fn authorize_browser_command(
-        &mut self,
-        command: &RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<()> {
-        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-            anyhow::bail!("browser request was cancelled");
-        }
-        if !crate::protocol_session::browser_command_allowed(command) {
-            anyhow::bail!("browser command forbidden");
-        }
-        if cancelled.load(std::sync::atomic::Ordering::Acquire) {
-            anyhow::bail!("browser request was cancelled");
-        }
-        Ok(())
-    }
-
-    pub fn authorize_browser_command_only(
-        &mut self,
-        command: &RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<()> {
-        self.authorize_browser_command(command, cancelled)
-    }
-
-    pub fn handle(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
+    pub(crate) fn begin_protocol_command(&mut self) {
         self.pending_quick_unlock_enrollment = None;
-        let response = self.handle_inner(command);
+    }
+
+    pub(crate) fn pick_local_file(&self) -> Result<Option<String>> {
+        self.providers.pick_local_file()
+    }
+
+    pub(crate) fn begin_one_drive_login(
+        &mut self,
+    ) -> Result<vaultkern_runtime_protocol::OneDriveAuthSessionDto> {
+        self.providers.begin_login()
+    }
+
+    pub(crate) fn complete_pending_one_drive_login(
+        &mut self,
+    ) -> Result<vaultkern_runtime_protocol::OneDriveAuthStatusDto> {
+        self.providers.complete_pending_login()
+    }
+
+    pub(crate) fn list_one_drive_children(
+        &self,
+        parent_item_id: Option<&str>,
+    ) -> Result<vaultkern_runtime_protocol::OneDriveItemListDto> {
+        self.providers.list_children(parent_item_id)
+    }
+
+    pub(crate) fn clear_quick_unlock_handoff(&mut self) {
         self.pending_quick_unlock_enrollment = None;
+    }
+
+    pub(crate) fn finish_protocol_command(&mut self) {
+        self.pending_quick_unlock_enrollment = None;
+    }
+
+    pub(crate) fn take_quick_unlock_handoff(
+        &mut self,
+    ) -> Option<QuickUnlockReconciliationCredentials> {
+        self.pending_quick_unlock_enrollment
+            .take()
+            .map(|pending| pending.credentials)
+    }
+
+    #[cfg(test)]
+    fn handle(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
+        self.begin_protocol_command();
+        let response = crate::runtime_dispatch::dispatch(self, command);
+        self.finish_protocol_command();
         response
     }
 
-    pub fn handle_with_quick_unlock_handoff(
+    #[cfg(test)]
+    fn handle_with_quick_unlock_handoff(
         &mut self,
         command: RuntimeCommand,
     ) -> Result<(
         RuntimeResponse,
         Option<QuickUnlockReconciliationCredentials>,
     )> {
-        self.pending_quick_unlock_enrollment = None;
-        let response = self.handle_inner(command);
-        let credentials = self.pending_quick_unlock_enrollment.take();
-        response.map(|response| (response, credentials.map(|pending| pending.credentials)))
+        self.begin_protocol_command();
+        let response = crate::runtime_dispatch::dispatch(self, command);
+        let credentials = self.take_quick_unlock_handoff();
+        response.map(|response| (response, credentials))
     }
 
-    fn handle_with_quick_unlock_handoff_cancellable(
-        &mut self,
-        command: RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
-    ) -> Result<(
-        RuntimeResponse,
-        Option<QuickUnlockReconciliationCredentials>,
-    )> {
-        self.pending_quick_unlock_enrollment = None;
-        let response = match command {
-            RuntimeCommand::VerifyPasskeyUser {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                method,
-                password,
-            } => self
-                .verify_passkey_user_cancellable(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    method,
-                    password.as_deref(),
-                    cancelled,
-                )
-                .map(RuntimeResponse::PasskeyUserVerified),
-            command => self.handle_inner(command),
-        };
-        let credentials = self.pending_quick_unlock_enrollment.take();
-        response.map(|response| (response, credentials.map(|pending| pending.credentials)))
-    }
-
-    fn handle_inner(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
-        match command {
-            RuntimeCommand::Handshake {
-                protocol_version,
-                capabilities,
-            } => Ok(RuntimeResponse::Handshake(HandshakeDto {
-                protocol_version,
-                capabilities,
-            })),
-            RuntimeCommand::GetSessionState => {
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::ListRecentVaults => self
-                .list_recent_vaults()
-                .map(RuntimeResponse::VaultReferenceList),
-            RuntimeCommand::PreloadCurrentVault => self
-                .preload_current_vault_snapshot()
-                .map(|_| RuntimeResponse::SessionState(self.session_state())),
-            RuntimeCommand::AddLocalVaultReference { path } => {
-                let selected = match path {
-                    Some(path) => path,
-                    None => self
-                        .providers
-                        .pick_local_file()?
-                        .context("local vault selection canceled")?,
-                };
-
-                self.add_local_vault_reference(&selected)
-                    .map(RuntimeResponse::VaultReference)
-            }
-            RuntimeCommand::BeginOneDriveLogin => self
-                .providers
-                .begin_login()
-                .map(RuntimeResponse::OneDriveAuthSession),
-            RuntimeCommand::CompletePendingOneDriveLogin => self
-                .providers
-                .complete_pending_login()
-                .map(RuntimeResponse::OneDriveAuthStatus),
-            RuntimeCommand::ListOneDriveChildren { parent_item_id } => self
-                .providers
-                .list_children(parent_item_id.as_deref())
-                .map(RuntimeResponse::OneDriveItemList),
-            RuntimeCommand::AddOneDriveVaultReference { drive_id, item_id } => self
-                .add_onedrive_vault_reference(&drive_id, &item_id)
-                .map(RuntimeResponse::VaultReference),
-            RuntimeCommand::SetCurrentVault { vault_ref_id } => self
-                .set_current_vault(&vault_ref_id)
-                .map(|_| RuntimeResponse::SessionState(self.session_state())),
-            RuntimeCommand::RetryVaultSourceSync { vault_id } => self
-                .retry_vault_source_sync(&vault_id)
-                .map(RuntimeResponse::VaultSourceStatus),
-            RuntimeCommand::DeleteVaultReference { vault_ref_id } => self
-                .delete_vault_reference(&vault_ref_id)
-                .map(RuntimeResponse::VaultReferenceList),
-            RuntimeCommand::DeleteVaultReferenceIfNotCurrent { vault_ref_id } => self
-                .delete_vault_reference_if_not_current(&vault_ref_id)
-                .map(RuntimeResponse::VaultReferenceList),
-            RuntimeCommand::UnlockCurrentVaultWithPassword { password } => {
-                self.unlock_current_vault_with_password(&password)?;
-                self.remember_quick_unlock_enrollment(Some(password), None);
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::UnlockCurrentVault {
-                password,
-                key_file_path,
-            } => {
-                self.unlock_current_vault(password.as_deref(), key_file_path.as_deref())?;
-                self.remember_quick_unlock_enrollment(password, key_file_path);
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::EnableQuickUnlockForCurrentVault { .. }
-            | RuntimeCommand::DisableQuickUnlockForCurrentVault => {
-                anyhow::bail!("quick unlock is managed by resident-app settings reconciliation")
-            }
-            RuntimeCommand::UnlockCurrentVaultWithQuickUnlock => {
-                self.unlock_current_vault_with_quick_unlock()?;
-                self.pending_quick_unlock_enrollment = None;
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::OpenLocalVault { path } => self
-                .open_local_vault(&path)
-                .map(RuntimeResponse::VaultOpened),
-            RuntimeCommand::LockSession => {
-                self.lock_session();
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::RecordUserActivity => {
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::UnlockWithPassword { vault_id, password } => {
-                self.unlock_with_password(&vault_id, &password)?;
-                self.remember_quick_unlock_enrollment(Some(password), None);
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::UnlockVault {
-                vault_id,
-                password,
-                key_file_path,
-            } => {
-                self.unlock_vault(&vault_id, password.as_deref(), key_file_path.as_deref())?;
-                self.remember_quick_unlock_enrollment(password, key_file_path);
-                Ok(RuntimeResponse::SessionState(self.session_state()))
-            }
-            RuntimeCommand::CreateGroup {
-                vault_id,
-                parent_group_id,
-                title,
-            } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime
-                        .create_group(&vault_id, &parent_group_id, title)
-                        .map(Some)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::RenameGroup {
-                vault_id,
-                group_id,
-                title,
-            } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.rename_group(&vault_id, &group_id, title)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::MoveGroup {
-                vault_id,
-                group_id,
-                target_parent_group_id,
-            } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.move_group(&vault_id, &group_id, &target_parent_group_id)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::DeleteGroup { vault_id, group_id } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.delete_group(&vault_id, &group_id)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::MoveEntryToGroup {
-                vault_id,
-                entry_id,
-                target_group_id,
-            } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.move_entry_to_group(&vault_id, &entry_id, &target_group_id)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::RestoreEntryHistory {
-                vault_id,
-                entry_id,
-                history_index,
-            } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.restore_entry_history(&vault_id, &entry_id, history_index)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::ClearEntryHistory { vault_id, entry_id } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.clear_entry_history(&vault_id, &entry_id)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::RecycleEntry { vault_id, entry_id } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.recycle_entry(&vault_id, &entry_id)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::RestoreRecycledEntry {
-                vault_id,
-                entry_id,
-                target_group_id,
-            } => self
-                .commit_vault_mutation(&vault_id, |runtime| {
-                    runtime.restore_recycled_entry(
-                        &vault_id,
-                        &entry_id,
-                        target_group_id.as_deref(),
-                    )?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::VaultMutationResult),
-            RuntimeCommand::CreateEntry {
-                vault_id,
-                parent_group_id,
-                entry_id: _,
-                title,
-                username,
-                password,
-                url,
-                notes,
-                totp_uri,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .create_entry(
-                            &vault_id,
-                            &parent_group_id,
-                            title,
-                            username,
-                            password,
-                            url,
-                            notes,
-                            totp_uri,
-                        )
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::UpdateEntryFields {
-                vault_id,
-                entry_id,
-                title,
-                username,
-                password,
-                url,
-                notes,
-                totp_uri,
-                custom_fields,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .update_entry_fields(
-                            &vault_id,
-                            &entry_id,
-                            title,
-                            username,
-                            password,
-                            url,
-                            notes,
-                            totp_uri,
-                            custom_fields,
-                        )
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::CompareAndUpdateEntryFields {
-                vault_id,
-                entry_id,
-                expected_fields,
-                desired_fields,
-            } => Ok(
-                match self.compare_and_update_entry_fields(
-                    &vault_id,
-                    &entry_id,
-                    expected_fields,
-                    desired_fields,
-                )? {
-                    Some(detail) => RuntimeResponse::EntryDetail(detail),
-                    None => RuntimeResponse::Error(ErrorDto {
-                        code: "conflict".into(),
-                        message: "entry fields changed after planning".into(),
-                    }),
-                },
-            ),
-            RuntimeCommand::CreateAutofillEntry {
-                vault_id,
-                parent_group_id,
-                title,
-                username,
-                password,
-                url,
-                notes,
-                totp_uri,
-            } => {
-                if password.is_empty() || score_origin_scoped_entry_match(&url, &url).is_none() {
-                    return Ok(RuntimeResponse::Error(ErrorDto {
-                        code: "invalid_autofill_mutation".into(),
-                        message: "browser login create fields are invalid".into(),
-                    }));
-                }
-                self.commit_entry_mutation(&vault_id, |runtime| {
-                    runtime.create_entry(
-                        &vault_id,
-                        &parent_group_id,
-                        title,
-                        username,
-                        password,
-                        url,
-                        notes,
-                        totp_uri,
-                    )?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::EntryMutationResult)
-            }
-            RuntimeCommand::UpdateAutofillEntryFields {
-                vault_id,
-                entry_id,
-                expected_fields,
-                desired_fields,
-            } => {
-                if desired_fields.password.is_empty()
-                    || score_origin_scoped_entry_match(&expected_fields.url, &desired_fields.url)
-                        .is_none()
-                {
-                    return Ok(RuntimeResponse::Error(ErrorDto {
-                        code: "invalid_autofill_mutation".into(),
-                        message: "browser login update fields are invalid".into(),
-                    }));
-                }
-                let current =
-                    self.get_autofill_entry_fields(&vault_id, &entry_id, &expected_fields.url)?;
-                if current.fields != expected_fields {
-                    return Ok(RuntimeResponse::Error(ErrorDto {
-                        code: "conflict".into(),
-                        message: "entry fields changed after confirmation".into(),
-                    }));
-                }
-                self.commit_entry_mutation(&vault_id, |runtime| {
-                    let current = runtime.get_entry_detail(&vault_id, &entry_id)?;
-                    runtime.update_entry_fields(
-                        &vault_id,
-                        &entry_id,
-                        current.title,
-                        desired_fields.username,
-                        desired_fields.password,
-                        desired_fields.url,
-                        current.notes,
-                        current.totp_uri,
-                        current.custom_fields,
-                    )?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::EntryMutationResult)
-            }
-            RuntimeCommand::PersistAutofillMutation { .. } => {
-                Ok(RuntimeResponse::Error(ErrorDto {
-                    code: "unsupported".into(),
-                    message:
-                        "legacy browser atomic persistence is retired; use ordinary Entry Commit"
-                            .into(),
-                }))
-            }
-            RuntimeCommand::ClearEntryTotp { vault_id, entry_id } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime.clear_entry_totp(&vault_id, &entry_id).map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::SetEntryPasskey {
-                vault_id,
-                entry_id,
-                passkey,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .set_entry_passkey(&vault_id, &entry_id, passkey)
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::ClearEntryPasskey { vault_id, entry_id } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime.clear_entry_passkey(&vault_id, &entry_id).map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::GetPasskeyUserVerificationCapability => {
-                Ok(RuntimeResponse::PasskeyUserVerificationCapability(
-                    self.passkey_user_verification_capability(),
-                ))
-            }
-            RuntimeCommand::VerifyPasskeyUser {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                method,
-                password,
-            } => self
-                .verify_passkey_user(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    method,
-                    password.as_deref(),
-                )
-                .map(RuntimeResponse::PasskeyUserVerified),
-            RuntimeCommand::DeleteEntry { vault_id, entry_id } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime.delete_entry(&vault_id, &entry_id)?;
-                    Ok(None)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::GetEntryAttachmentContent {
-                vault_id,
-                entry_id,
-                name,
-            } => self
-                .get_entry_attachment_content(&vault_id, &entry_id, &name)
-                .map(RuntimeResponse::EntryAttachmentContent),
-            RuntimeCommand::AddEntryAttachment {
-                vault_id,
-                entry_id,
-                name,
-                data_base64,
-                protect_in_memory,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .add_entry_attachment(
-                            &vault_id,
-                            &entry_id,
-                            name,
-                            data_base64,
-                            protect_in_memory,
-                        )
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::UpdateEntryAttachmentMetadata {
-                vault_id,
-                entry_id,
-                old_name,
-                new_name,
-                protect_in_memory,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .update_entry_attachment_metadata(
-                            &vault_id,
-                            &entry_id,
-                            &old_name,
-                            new_name,
-                            protect_in_memory,
-                        )
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::ReplaceEntryAttachmentContent {
-                vault_id,
-                entry_id,
-                name,
-                data_base64,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .replace_entry_attachment_content(&vault_id, &entry_id, &name, data_base64)
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::DeleteEntryAttachment {
-                vault_id,
-                entry_id,
-                name,
-            } => self
-                .commit_entry_mutation(&vault_id, |runtime| {
-                    runtime
-                        .delete_entry_attachment(&vault_id, &entry_id, &name)
-                        .map(Some)
-                })
-                .map(RuntimeResponse::EntryMutationResult),
-            RuntimeCommand::SaveVault { vault_id } => self.retry_publication_command(&vault_id),
-            RuntimeCommand::GetDatabaseSettings { vault_id } => {
-                Ok(match self.get_database_settings(&vault_id) {
-                    Ok(settings) => RuntimeResponse::DatabaseSettings(settings),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::UpdateDatabaseSettings { vault_id, update } => {
-                Ok(match self.commit_database_settings(&vault_id, update) {
-                    Ok(result) => RuntimeResponse::DatabaseSettingsCommitResult(result),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::ListGroups { vault_id } => Ok(match self.list_groups(&vault_id) {
-                Ok(groups) => RuntimeResponse::GroupTree(groups),
-                Err(error) => query_error_response(error),
-            }),
-            RuntimeCommand::ListEntries { vault_id } => Ok(match self.list_entries(&vault_id) {
-                Ok(entries) => RuntimeResponse::EntryList(EntryListDto { entries }),
-                Err(error) => query_error_response(error),
-            }),
-            RuntimeCommand::GetEntryDetail { vault_id, entry_id } => {
-                Ok(match self.get_entry_detail(&vault_id, &entry_id) {
-                    Ok(detail) => RuntimeResponse::EntryDetail(detail),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::ListEntryHistory { vault_id, entry_id } => {
-                Ok(match self.list_entry_history(&vault_id, &entry_id) {
-                    Ok(history) => RuntimeResponse::EntryHistoryList(history),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::GetEntryHistoryDetail {
-                vault_id,
-                entry_id,
-                history_index,
-            } => Ok(
-                match self.get_entry_history_detail(&vault_id, &entry_id, history_index) {
-                    Ok(detail) => RuntimeResponse::EntryHistoryDetail(detail),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::FindFillCandidates { vault_id, url } => {
-                Ok(match self.find_fill_candidates(&vault_id, &url) {
-                    Ok(candidates) => RuntimeResponse::FillCandidates(candidates),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::GetAutofillCredential {
-                vault_id,
-                entry_id,
-                url,
-            } => Ok(
-                match self.get_autofill_credential(&vault_id, &entry_id, &url) {
-                    Ok(credential) => RuntimeResponse::AutofillCredential(credential),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::GetAutofillEntryFields {
-                vault_id,
-                entry_id,
-                url,
-            } => Ok(
-                match self.get_autofill_entry_fields(&vault_id, &entry_id, &url) {
-                    Ok(fields) => RuntimeResponse::AutofillEntryFields(fields),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::GetAutofillCreateContext { vault_id } => {
-                Ok(match self.get_autofill_create_context(&vault_id) {
-                    Ok(context) => RuntimeResponse::AutofillCreateContext(context),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::ActivateResidentApp { .. } => Ok(RuntimeResponse::Error(ErrorDto {
-                code: "resident_ui_unavailable".into(),
-                message: "resident app activation is only available through the desktop bridge"
-                    .into(),
-            })),
-            RuntimeCommand::GetBrowserIntegrationSettings => Ok(RuntimeResponse::Error(ErrorDto {
-                code: "desktop_settings_unavailable".into(),
-                message: "browser integration settings are owned by the resident shell".into(),
-            })),
-            RuntimeCommand::FindExactMatchingEntryIds { vault_id, fields } => {
-                Ok(match self.exact_matching_entry_ids(&vault_id, &fields) {
-                    Ok(entry_ids) => RuntimeResponse::EntryIdList(EntryIdListDto { entry_ids }),
-                    Err(error) => query_error_response(error),
-                })
-            }
-            RuntimeCommand::ListPasskeyCredentials {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                relying_party,
-            } => Ok(
-                match self.list_passkey_credentials(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    &relying_party,
-                ) {
-                    Ok(credentials) => RuntimeResponse::PasskeyCredentialList(credentials),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::RegisterPasskeyCeremony {
-                ceremony_token,
-                connection_id,
-                origin,
-                top_origin,
-                ancestor_origins,
-                relying_party,
-                ceremony,
-                discoverable,
-                user_verification,
-                challenge_base64url,
-                request_id,
-                tab_id,
-                frame_id,
-                frame_kind,
-                registered_at_epoch_ms,
-                expires_at_epoch_ms,
-            } => self
-                .register_passkey_ceremony(
-                    &ceremony_token,
-                    PasskeyCeremonyIdentity {
-                        connection_id,
-                        origin,
-                        top_origin,
-                        ancestor_origins,
-                        relying_party,
-                        ceremony,
-                        discoverable,
-                        user_verification,
-                        challenge_base64url,
-                        request_id,
-                        tab_id,
-                        frame_id,
-                        frame_kind,
-                        registered_at_epoch_ms,
-                        expires_at_epoch_ms,
-                    },
-                )
-                .map(RuntimeResponse::PasskeyCeremonyRegistered),
-            RuntimeCommand::AdvancePasskeyCeremonyPhase {
-                ceremony_token,
-                expected_phase,
-                next_phase,
-                related_origin_verified,
-            } => self
-                .advance_passkey_ceremony_phase(
-                    &ceremony_token,
-                    expected_phase,
-                    next_phase,
-                    related_origin_verified,
-                )
-                .map(RuntimeResponse::PasskeyCeremonyAdvanced),
-            RuntimeCommand::BindPasskeyCeremonyVault {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-            } => self
-                .bind_passkey_ceremony_vault(&ceremony_token, expected_phase, &vault_id)
-                .map(RuntimeResponse::PasskeyCeremonyVaultBound),
-            RuntimeCommand::QueryPasskeyCeremonyLedger { ceremony_token } => {
-                Ok(RuntimeResponse::PasskeyCeremonyLedger(
-                    self.query_passkey_ceremony_ledger(&ceremony_token),
-                ))
-            }
-            RuntimeCommand::ReconcilePasskeyCeremonyLedger {
-                active_connection_id,
-            } => self
-                .reconcile_passkey_ceremony_ledger(&active_connection_id)
-                .map(RuntimeResponse::PasskeyCeremonyReconciliation),
-            RuntimeCommand::MarkPasskeyCeremonyUnknownDelivery {
-                ceremony_token,
-                expected_phase,
-            } => Ok(
-                match self.mark_passkey_ceremony_unknown_delivery(&ceremony_token, expected_phase) {
-                    Ok(response) => RuntimeResponse::PasskeyCeremonyAdvanced(response),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::CreatePasskeyAssertion {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                relying_party,
-                origin,
-                credential_id,
-                discoverable,
-                user_presence_verified,
-                related_origin_verified,
-                client_data_json_base64url,
-            } => Ok(
-                match self.create_passkey_assertion(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    &relying_party,
-                    &origin,
-                    credential_id.as_deref(),
-                    discoverable,
-                    user_presence_verified,
-                    related_origin_verified,
-                    &client_data_json_base64url,
-                ) {
-                    Ok(assertion) => RuntimeResponse::PasskeyAssertion(assertion),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::CreatePasskeyRegistration {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                relying_party,
-                origin,
-                user_name,
-                user_display_name,
-                user_handle_base64url,
-                public_key_algorithm,
-                related_origin_verified,
-                client_data_json_base64url,
-            } => Ok(
-                match self.create_passkey_registration(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    &relying_party,
-                    &origin,
-                    &user_name,
-                    user_display_name.as_deref(),
-                    &user_handle_base64url,
-                    public_key_algorithm,
-                    related_origin_verified,
-                    &client_data_json_base64url,
-                ) {
-                    Ok(registration) => RuntimeResponse::PasskeyRegistration(registration),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::SavePasskeyRegistration {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-            } => Ok(
-                match self.save_passkey_registration(&ceremony_token, expected_phase, &vault_id) {
-                    Ok(response) => response,
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::AbortPasskeyRegistration {
-                ceremony_token,
-                expected_phase,
-                closed_phase,
-            } => Ok(
-                match self.abort_passkey_registration(&ceremony_token, expected_phase, closed_phase)
-                {
-                    Ok(()) => RuntimeResponse::Saved,
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::CommitPasskeyRegistration {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                entry_id,
-                credential_id,
-            } => Ok(
-                match self.commit_passkey_registration(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    &entry_id,
-                    &credential_id,
-                ) {
-                    Ok(()) => RuntimeResponse::Saved,
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::PasskeyCredentialStatus {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                credential_id,
-                relying_party,
-            } => Ok(
-                match self.passkey_credential_status(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    &credential_id,
-                    &relying_party,
-                ) {
-                    Ok(status) => RuntimeResponse::PasskeyCredentialStatus(status),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::PasskeyCredentialStatusBatch {
-                ceremony_token,
-                expected_phase,
-                vault_id,
-                credential_ids,
-                relying_party,
-            } => Ok(
-                match self.passkey_credential_status_batch(
-                    &ceremony_token,
-                    expected_phase,
-                    &vault_id,
-                    &credential_ids,
-                    &relying_party,
-                ) {
-                    Ok(status) => RuntimeResponse::PasskeyCredentialStatusBatch(status),
-                    Err(error) => query_error_response(error),
-                },
-            ),
-            RuntimeCommand::UpdateEntry { .. } => Ok(RuntimeResponse::Error(ErrorDto {
-                code: "unsupported".into(),
-                message: "command is not implemented yet".into(),
-            })),
+    #[cfg(test)]
+    fn handle_browser_command(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
+        if !crate::protocol_session::browser_command_allowed(&command) {
+            anyhow::bail!("browser command forbidden");
         }
+        self.handle(command)
     }
 
     fn install_committed_generation(
@@ -5862,7 +4962,7 @@ impl VaultCore {
         vault_id: &str,
         vault: Vault,
         bytes: Vec<u8>,
-        fingerprint: ContentFingerprint,
+        fingerprint: ContentIdentity,
         mut source_status: Option<VaultSourceStatusDto>,
     ) -> Result<()> {
         let save_profile = self.inspected_save_profile(&bytes)?;
@@ -5922,9 +5022,9 @@ impl VaultCore {
         &mut self,
         vault_id: &str,
         bytes: Vec<u8>,
-        fingerprint: ContentFingerprint,
+        fingerprint: ContentIdentity,
         provider_revision: Option<ProviderRevision>,
-        save_profile: SaveProfile,
+        save_profile: VaultEncodingProfile,
         mut source_status: Option<VaultSourceStatusDto>,
         display_name: Option<String>,
         account_label: Option<String>,
@@ -5978,7 +5078,7 @@ impl VaultCore {
     fn session_base_for_fingerprint(
         &self,
         vault_id: &str,
-        expected: &ContentFingerprint,
+        expected: &ContentIdentity,
     ) -> Result<Vec<u8>> {
         let authenticates = |bytes: &[u8]| {
             let fingerprint = fingerprint_for_cached_bytes(bytes, 0);
@@ -6028,7 +5128,7 @@ impl VaultCore {
         &self,
         vault_id: &str,
         cache_key: &RemoteCacheKey,
-        pending_fingerprint: &ContentFingerprint,
+        pending_fingerprint: &ContentIdentity,
     ) -> Result<Vec<u8>> {
         let durable = self
             .remote_cache
@@ -6050,7 +5150,7 @@ impl VaultCore {
         Ok(bytes)
     }
 
-    fn retry_publication_command(&mut self, vault_id: &str) -> Result<RuntimeResponse> {
+    pub(crate) fn retry_publication_command(&mut self, vault_id: &str) -> Result<RuntimeResponse> {
         match self.commit_working_copy(vault_id) {
             Err(error) => match classified_runtime_error_response(&error) {
                 Some(response) => Ok(response),
@@ -6064,7 +5164,6 @@ impl VaultCore {
         let (
             key,
             baseline_fingerprint,
-            baseline_provider_revision,
             save_profile,
             source,
             display_name,
@@ -6078,7 +5177,6 @@ impl VaultCore {
             (
                 transformed_key_from_loaded_vault(loaded)?,
                 loaded.baseline_fingerprint.clone(),
-                loaded.provider_revision.clone(),
                 loaded.save_profile.clone(),
                 loaded.source.clone(),
                 loaded.name.clone(),
@@ -6099,150 +5197,225 @@ impl VaultCore {
                 requires_source_migration,
             );
         }
-        let VaultSource::LocalPath(source_path) = source else {
+        let VaultSource::LocalPath(source_path) = &source else {
             unreachable!("OneDrive saves return through the CAS path")
         };
-        let current = match self.read_current_snapshot(vault_id, Some(&baseline_fingerprint)) {
-            Ok(current) => current,
-            Err(error)
-                if matches!(
-                    error.downcast_ref::<ProviderError>(),
-                    Some(ProviderError::NotFound { .. })
-                ) =>
-            {
-                let (bytes, verified_vault) =
-                    self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
-                return self.local_conflict_copy_result(
-                    vault_id,
-                    &source_path,
-                    &bytes,
-                    verified_vault,
-                    key.clone(),
-                );
-            }
-            Err(error) => {
-                return Err(error)
-                    .with_context(|| format!("failed to read current vault source: {vault_id}"));
-            }
+        self.save_local_vault(
+            vault_id,
+            source_path,
+            key,
+            &baseline_fingerprint,
+            save_profile,
+            requires_source_migration,
+        )
+    }
+
+    fn save_local_vault(
+        &mut self,
+        vault_id: &str,
+        source_path: &str,
+        key: Arc<VaultKey>,
+        baseline_fingerprint: &ContentIdentity,
+        mut local_save_profile: VaultEncodingProfile,
+        requires_source_migration: bool,
+    ) -> Result<RuntimeResponse> {
+        const MAX_SOURCE_ATTEMPTS: usize = 3;
+
+        let base_bytes = if requires_source_migration {
+            self.session_bases
+                .read(vault_id)
+                .with_context(|| format!("failed to read migrated Local File Base: {vault_id}"))?
+                .with_context(|| format!("migrated Local File Base is missing: {vault_id}"))?
+        } else {
+            self.session_base_for_fingerprint(vault_id, baseline_fingerprint)?
         };
-
-        let current_provider_revision = current
-            .provider_revision
-            .expect("Local File snapshots always carry a Provider Revision");
-        let expected_provider_revision = match baseline_provider_revision {
-            Some(expected) if expected == current_provider_revision => expected,
-            Some(_) => {
-                let (bytes, verified_vault) =
-                    self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
-                return self.local_conflict_copy_result(
-                    vault_id,
-                    &source_path,
-                    &bytes,
-                    verified_vault,
-                    key.clone(),
-                );
+        let base_vault = match Self::load_session_database(&base_bytes, &key) {
+            Ok(database) => database.vault,
+            Err(VaultCodecError::KeyMismatch) => {
+                self.unlock_historical_snapshot_from_unlock_blob(vault_id, &base_bytes)
+                    .context("failed to unlock the historical Local File Base")?
+                    .context(
+                        "Local File Base uses a historical KDF and quick unlock is unavailable",
+                    )?
+                    .0
             }
-            None if same_content_fingerprint(&current.fingerprint, &baseline_fingerprint) => {
-                current_provider_revision
-            }
-            None => {
-                let (bytes, verified_vault) =
-                    self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
-                return self.local_conflict_copy_result(
-                    vault_id,
-                    &source_path,
-                    &bytes,
-                    verified_vault,
-                    key.clone(),
-                );
-            }
+            Err(error) => return Err(error).context("failed to parse the Local File Base"),
         };
+        let base_save_profile = self
+            .inspected_save_profile(&base_bytes)
+            .context("failed to inspect the Local File Base")?;
+        let local_vault = self
+            .loaded_vault(vault_id)
+            .context("failed to read the Local Working Copy")?
+            .clone();
+        local_save_profile.clear_explicit_kdf();
+        let (local_bytes, verified_local) = Self::serialize_and_verify_vault_candidate(
+            local_vault.clone(),
+            &key,
+            local_save_profile.clone(),
+        )
+        .context("failed to verify the Local File candidate")?;
+        let mut saw_source_change = false;
 
-        if !same_content_fingerprint(&current.fingerprint, &baseline_fingerprint) {
-            let (bytes, verified_vault) =
-                self.serialize_loaded_vault_candidate(vault_id, &key, save_profile)?;
-            return self.local_conflict_copy_result(
-                vault_id,
-                &source_path,
-                &bytes,
-                verified_vault,
-                key.clone(),
-            );
-        }
-
-        let (bytes, verified_vault) = {
-            let loaded = self
-                .vault_session
-                .find_loaded(vault_id)
-                .with_context(|| format!("vault not opened: {vault_id}"))?;
-            let Some(vault) = loaded.vault.as_ref() else {
-                anyhow::bail!("vault is locked: {vault_id}");
-            };
-            Self::serialize_and_verify_vault_candidate(vault.clone(), &key, save_profile)
-                .with_context(|| format!("failed to save vault: {vault_id}"))?
-        };
-
-        let (next_provider_revision, next_fingerprint) =
-            match self.write_local_source(vault_id, &bytes, &expected_provider_revision) {
-                Ok(next) => next,
+        for attempt in 0..MAX_SOURCE_ATTEMPTS {
+            let current = match self.read_current_snapshot(vault_id, Some(baseline_fingerprint)) {
+                Ok(current) => current,
                 Err(error)
                     if matches!(
                         error.downcast_ref::<ProviderError>(),
-                        Some(ProviderError::StaleRevision { .. })
+                        Some(ProviderError::NotFound { .. })
                     ) =>
                 {
                     return self.local_conflict_copy_result(
                         vault_id,
-                        &source_path,
-                        &bytes,
-                        verified_vault,
-                        key.clone(),
+                        source_path,
+                        &local_bytes,
+                        verified_local,
+                        key,
                     );
                 }
                 Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("failed to write vault: {vault_id}"));
+                    return Err(error).with_context(|| {
+                        format!("failed to observe current Local File source: {vault_id}")
+                    });
                 }
             };
-        let mut warnings = Vec::new();
-        let retain_committed_bytes = match self.session_bases.store(vault_id, &bytes) {
-            Ok(()) => false,
-            Err(error) => {
-                warnings.push(format!(
-                    "failed to store session base for {vault_id}: {error}"
-                ));
-                true
+            let observed_revision = current
+                .provider_revision
+                .context("Local File snapshots always carry a Provider Revision")?;
+
+            let (candidate_bytes, candidate_vault, merge_report) =
+                if same_content_fingerprint(&current.fingerprint, baseline_fingerprint) {
+                    (local_bytes.clone(), verified_local.clone(), None)
+                } else {
+                    saw_source_change = true;
+                    let remote_bytes = current
+                        .bytes
+                        .context("changed Local File observation must include bytes")?;
+                    let remote_vault = match Self::load_session_database(&remote_bytes, &key) {
+                        Ok(database) => database.vault,
+                        Err(_) => {
+                            return self.local_conflict_copy_result(
+                                vault_id,
+                                source_path,
+                                &local_bytes,
+                                verified_local,
+                                key,
+                            );
+                        }
+                    };
+                    if !has_vaultkern_sync_lineage(&base_vault, &remote_vault) {
+                        return self.local_conflict_copy_result(
+                            vault_id,
+                            source_path,
+                            &local_bytes,
+                            verified_local,
+                            key,
+                        );
+                    }
+                    let remote_save_profile = match self.inspected_save_profile(&remote_bytes) {
+                        Ok(profile) => profile,
+                        Err(_) => {
+                            return self.local_conflict_copy_result(
+                                vault_id,
+                                source_path,
+                                &local_bytes,
+                                verified_local,
+                                key,
+                            );
+                        }
+                    };
+                    let merged_save_profile = match Self::merge_save_profile(
+                        &base_save_profile,
+                        &local_save_profile,
+                        &remote_save_profile,
+                    ) {
+                        Ok(profile) => profile,
+                        Err(_) => {
+                            return self.local_conflict_copy_result(
+                                vault_id,
+                                source_path,
+                                &local_bytes,
+                                verified_local,
+                                key,
+                            );
+                        }
+                    };
+                    let patched =
+                        match three_way_field_patch(&base_vault, &local_vault, &remote_vault) {
+                            Ok(patched) => patched,
+                            Err(_) => {
+                                return self.local_conflict_copy_result(
+                                    vault_id,
+                                    source_path,
+                                    &local_bytes,
+                                    verified_local,
+                                    key,
+                                );
+                            }
+                        };
+                    if ensure_patch_conflict_history_is_recoverable(
+                        &patched.vault,
+                        &patched.required_history_snapshots,
+                    )
+                    .is_err()
+                    {
+                        return self.local_conflict_copy_result(
+                            vault_id,
+                            source_path,
+                            &local_bytes,
+                            verified_local,
+                            key,
+                        );
+                    }
+                    let report = patched.report;
+                    let (bytes, verified) = Self::serialize_and_verify_vault_candidate(
+                        patched.vault,
+                        &key,
+                        merged_save_profile,
+                    )
+                    .context("failed to verify the reconciled Local File candidate")?;
+                    (bytes, verified, Some(report))
+                };
+
+            match self.write_local_source(vault_id, &candidate_bytes, &observed_revision) {
+                Ok((next_revision, next_fingerprint)) => {
+                    self.install_committed_generation(
+                        vault_id,
+                        candidate_vault,
+                        candidate_bytes,
+                        next_fingerprint,
+                        None,
+                    )?;
+                    self.vault_session
+                        .find_loaded_mut(vault_id)
+                        .expect("published Local File remains loaded")
+                        .provider_revision = Some(next_revision);
+                    return Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
+                        status: if saw_source_change {
+                            PublicationStatusDto::Reconciled
+                        } else {
+                            PublicationStatusDto::Published
+                        },
+                        reconciliation_summary: merge_report.as_ref().map(three_way_patch_summary),
+                        conflict_copy_path: None,
+                    }));
+                }
+                Err(error)
+                    if matches!(
+                        error.downcast_ref::<ProviderError>(),
+                        Some(ProviderError::StaleRevision { .. })
+                    ) && attempt + 1 < MAX_SOURCE_ATTEMPTS =>
+                {
+                    saw_source_change = true;
+                }
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("failed to publish Local File: {vault_id}"));
+                }
             }
-        };
-        if let Err(error) = self.synced_bases.store(vault_id, &bytes) {
-            warnings.push(format!(
-                "failed to store synced base for {vault_id}: {error}"
-            ));
         }
-        {
-            let loaded = self
-                .vault_session
-                .find_loaded_mut(vault_id)
-                .with_context(|| format!("vault not opened: {vault_id}"))?;
-            loaded.vault = Some(verified_vault);
-            loaded.save_profile.kdf = None;
-            loaded.bytes = if retain_committed_bytes {
-                bytes
-            } else {
-                Vec::new()
-            };
-            loaded.baseline_fingerprint = next_fingerprint;
-            loaded.provider_revision = Some(next_provider_revision);
-            loaded.requires_source_migration = false;
-        }
-        if !warnings.is_empty() {
-            self.record_local_save_warnings(warnings);
-        }
-        Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-            status: SaveVaultStatusDto::Saved,
-            merge_summary: None,
-            conflict_copy_path: None,
-        }))
+        unreachable!("bounded Local File source attempts must return")
     }
 
     fn local_conflict_copy_result(
@@ -6251,7 +5424,7 @@ impl VaultCore {
         source_path: &str,
         bytes: &[u8],
         verified_vault: Vault,
-        key: Arc<TransformedKey>,
+        key: Arc<VaultKey>,
     ) -> Result<RuntimeResponse> {
         let conflict_copy = self
             .providers
@@ -6266,9 +5439,9 @@ impl VaultCore {
                     Ok(profile) => profile,
                     Err(_) => {
                         self.install_pending_vault_candidate(vault_id, verified_vault)?;
-                        return Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                            status: SaveVaultStatusDto::ConflictCopy,
-                            merge_summary: None,
+                        return Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
+                            status: PublicationStatusDto::ConflictSplit,
+                            reconciliation_summary: None,
                             conflict_copy_path: Some(conflict_copy.identity),
                         }));
                     }
@@ -6288,7 +5461,7 @@ impl VaultCore {
                             .provider_revision = Some(remote.revision);
                         self.replace_session_transformed_key(vault_id, key)?;
                     }
-                    Err(VaultCodecError::HeaderHmacMismatch) => {
+                    Err(VaultCodecError::KeyMismatch) => {
                         match self
                             .refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes)?
                         {
@@ -6338,9 +5511,9 @@ impl VaultCore {
                 self.install_pending_vault_candidate(vault_id, verified_vault)?;
             }
         }
-        Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-            status: SaveVaultStatusDto::ConflictCopy,
-            merge_summary: None,
+        Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
+            status: PublicationStatusDto::ConflictSplit,
+            reconciliation_summary: None,
             conflict_copy_path: Some(conflict_copy.identity),
         }))
     }
@@ -6351,9 +5524,9 @@ impl VaultCore {
         vault_id: &str,
         drive_id: &str,
         item_id: &str,
-        mut key: Arc<TransformedKey>,
-        baseline_fingerprint: &ContentFingerprint,
-        mut local_save_profile: SaveProfile,
+        mut key: Arc<VaultKey>,
+        baseline_fingerprint: &ContentIdentity,
+        mut local_save_profile: VaultEncodingProfile,
         display_name: String,
         account_label: Option<String>,
         requires_source_migration: bool,
@@ -6384,7 +5557,7 @@ impl VaultCore {
             .generic_pending_kind(&cache_key, baseline_fingerprint)?
             == GenericPendingKind::ConflictCopy
         {
-            local_save_profile.kdf = None;
+            local_save_profile.clear_explicit_kdf();
             let (bytes, verified_local) =
                 Self::serialize_and_verify_vault_candidate(local_vault, &key, local_save_profile)
                     .context("failed to verify the updated pending conflict copy")?;
@@ -6418,7 +5591,7 @@ impl VaultCore {
         };
         let base_vault = match Self::load_session_database(&base_bytes, &key) {
             Ok(database) => database.vault,
-            Err(VaultCodecError::HeaderHmacMismatch) => self
+            Err(VaultCodecError::KeyMismatch) => self
                 .unlock_historical_snapshot_from_unlock_blob(vault_id, &base_bytes)
                 .context("failed to unlock the historical synced OneDrive base")?
                 .context(
@@ -6432,7 +5605,7 @@ impl VaultCore {
         let base_save_profile = self
             .inspected_save_profile(&base_bytes)
             .context("failed to inspect the synced OneDrive base")?;
-        local_save_profile.kdf = None;
+        local_save_profile.clear_explicit_kdf();
         if local_vault == base_vault
             && local_save_profile == base_save_profile
             && !requires_source_migration
@@ -6488,24 +5661,8 @@ impl VaultCore {
                     return Ok(response);
                 }
             };
-            let observed_revision = match ProviderCatalog::revision_for_observation(&state) {
-                Ok(revision) => revision,
-                Err(error) => {
-                    let response = self.save_remote_vault_to_pending_cache(
-                        vault_id,
-                        source,
-                        local_bytes,
-                        baseline_fingerprint,
-                        display_name,
-                        Some(account_label),
-                        error.to_string(),
-                        base_bytes.clone(),
-                    )?;
-                    self.install_pending_vault_candidate(vault_id, verified_local.clone())?;
-                    return Ok(response);
-                }
-            };
-            let remote_bytes = if state.matches_fingerprint(baseline_fingerprint) {
+            let observed_revision = state.revision().clone();
+            let remote_bytes = if state.matches_identity(baseline_fingerprint) {
                 base_bytes.clone()
             } else {
                 saw_source_change = true;
@@ -6532,7 +5689,7 @@ impl VaultCore {
             };
             let remote_vault = match Self::load_session_database(&remote_bytes, &key) {
                 Ok(database) => database.vault,
-                Err(VaultCodecError::HeaderHmacMismatch) => {
+                Err(VaultCodecError::KeyMismatch) => {
                     let Some((vault, refreshed_key)) = self
                         .refresh_transformed_key_from_unlock_blob(vault_id, &remote_bytes)
                         .context("failed to refresh quick unlock after the OneDrive KDF changed")?
@@ -6543,11 +5700,11 @@ impl VaultCore {
                         let locked_head = OneDriveConflictHead {
                             vault: None,
                             bytes: remote_bytes.clone(),
-                            fingerprint: ProviderCatalog::fingerprint_for_revision(
-                                &remote_bytes,
-                                &observed_revision,
-                            )?,
+                            fingerprint: state.identity_for_bytes(&remote_bytes),
                             revision: observed_revision.clone(),
+                            cache_validation_token: state
+                                .cache_validation_token()
+                                .map(str::to_owned),
                             display_name: display_name_for_cloud_name(state.display_name()),
                             account_label: account_label.clone(),
                             save_profile: remote_save_profile,
@@ -6576,11 +5733,9 @@ impl VaultCore {
                     let locked_head = OneDriveConflictHead {
                         vault: None,
                         bytes: remote_bytes.clone(),
-                        fingerprint: ProviderCatalog::fingerprint_for_revision(
-                            &remote_bytes,
-                            &observed_revision,
-                        )?,
+                        fingerprint: state.identity_for_bytes(&remote_bytes),
                         revision: observed_revision.clone(),
+                        cache_validation_token: state.cache_validation_token().map(str::to_owned),
                         display_name: display_name_for_cloud_name(state.display_name()),
                         account_label: account_label.clone(),
                         save_profile: remote_save_profile,
@@ -6606,17 +5761,15 @@ impl VaultCore {
             let conflict_head = OneDriveConflictHead {
                 vault: Some(remote_vault.clone()),
                 bytes: remote_bytes.clone(),
-                fingerprint: ProviderCatalog::fingerprint_for_revision(
-                    &remote_bytes,
-                    &observed_revision,
-                )?,
+                fingerprint: state.identity_for_bytes(&remote_bytes),
                 revision: observed_revision.clone(),
+                cache_validation_token: state.cache_validation_token().map(str::to_owned),
                 display_name: display_name_for_cloud_name(state.display_name()),
                 account_label: account_label.clone(),
                 save_profile: remote_save_profile.clone(),
                 key: Some(key.clone()),
             };
-            if !state.matches_fingerprint(baseline_fingerprint)
+            if !state.matches_identity(baseline_fingerprint)
                 && !has_vaultkern_sync_lineage(&base_vault, &remote_vault)
             {
                 return self.upload_or_persist_onedrive_conflict_copy(
@@ -6707,6 +5860,8 @@ impl VaultCore {
                     match provider.read() {
                         Ok(snapshot) if snapshot.bytes == bytes => Ok(ProviderCommit {
                             revision: snapshot.revision,
+                            identity: snapshot.identity,
+                            cache_validation_token: snapshot.cache_validation_token,
                             warnings: vec![format!(
                                 "{message}; readback confirmed that the candidate was published"
                             )],
@@ -6735,11 +5890,9 @@ impl VaultCore {
 
             match write_outcome {
                 Ok(commit) => {
-                    let fingerprint =
-                        ProviderCatalog::fingerprint_for_revision(&bytes, &commit.revision)?;
-                    let e_tag = ProviderCatalog::source_etag(&commit.revision)?;
+                    let fingerprint = commit.identity;
                     let cached_at = self.current_unix_time() as i64;
-                    let cache_result = self.remote_cache.write_with_source_etag(
+                    let cache_result = self.remote_cache.write_with_validation_token(
                         &cache_key,
                         RemoteVaultCacheEntry {
                             bytes: bytes.clone(),
@@ -6749,7 +5902,7 @@ impl VaultCore {
                             cached_at,
                             pending_sync: false,
                         },
-                        e_tag.as_deref(),
+                        commit.cache_validation_token.as_deref(),
                     );
                     let status = remote_source_status_after_commit(
                         &cache_key,
@@ -6768,13 +5921,14 @@ impl VaultCore {
                         .expect("committed vault remains loaded")
                         .provider_revision = Some(commit.revision);
                     self.replace_session_transformed_key(vault_id, key.clone())?;
-                    return Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+                    return Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
                         status: if saw_source_change {
-                            SaveVaultStatusDto::Merged
+                            PublicationStatusDto::Reconciled
                         } else {
-                            SaveVaultStatusDto::Saved
+                            PublicationStatusDto::Published
                         },
-                        merge_summary: saw_source_change.then(|| three_way_patch_summary(&report)),
+                        reconciliation_summary: saw_source_change
+                            .then(|| three_way_patch_summary(&report)),
                         conflict_copy_path: None,
                     }));
                 }
@@ -6857,14 +6011,14 @@ impl VaultCore {
         vault_id: &str,
         drive_id: &str,
         item_id: &str,
-        key: Arc<TransformedKey>,
-        baseline_fingerprint: &ContentFingerprint,
+        key: Arc<VaultKey>,
+        baseline_fingerprint: &ContentIdentity,
     ) -> Result<RuntimeResponse> {
         let state = self.providers.remote_state(drive_id, item_id)?;
-        if state.matches_fingerprint(baseline_fingerprint) {
-            return Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
-                merge_summary: None,
+        if state.matches_identity(baseline_fingerprint) {
+            return Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
+                reconciliation_summary: None,
                 conflict_copy_path: None,
             }));
         }
@@ -6872,7 +6026,7 @@ impl VaultCore {
         let snapshot = read_onedrive_provider(&mut self.providers, drive_id, item_id, &state)?;
         let (remote_vault, key) = match Self::load_session_database(&snapshot.bytes, &key) {
             Ok(database) => (database.vault, key),
-            Err(VaultCodecError::HeaderHmacMismatch) => self
+            Err(VaultCodecError::KeyMismatch) => self
                 .refresh_transformed_key_from_unlock_blob(vault_id, &snapshot.bytes)
                 .context("failed to refresh quick unlock after the OneDrive KDF changed")?
                 .context(
@@ -6886,7 +6040,7 @@ impl VaultCore {
         let cached_at = self.current_unix_time() as i64;
         let display_name = display_name_for_cloud_name(&snapshot.name);
         let account_label = snapshot.account_label.clone();
-        let cache_result = self.remote_cache.write_with_source_etag(
+        let cache_result = self.remote_cache.write_with_validation_token(
             &cache_key,
             RemoteVaultCacheEntry {
                 bytes: snapshot.bytes.clone(),
@@ -6896,7 +6050,7 @@ impl VaultCore {
                 cached_at,
                 pending_sync: false,
             },
-            state.source_etag(),
+            snapshot.cache_validation_token.as_deref(),
         );
         let status =
             remote_source_status_after_commit(&cache_key, cached_at, cache_result.as_ref().err());
@@ -6914,9 +6068,9 @@ impl VaultCore {
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.name = display_name;
         loaded.source_account_label = Some(account_label);
-        Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-            status: SaveVaultStatusDto::Merged,
-            merge_summary: None,
+        Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
+            status: PublicationStatusDto::Reconciled,
+            reconciliation_summary: None,
             conflict_copy_path: None,
         }))
     }
@@ -6925,7 +6079,7 @@ impl VaultCore {
         &mut self,
         vault_id: &str,
         bytes: &[u8],
-    ) -> Result<Option<(Vault, Arc<TransformedKey>)>> {
+    ) -> Result<Option<(Vault, Arc<VaultKey>)>> {
         self.unlock_snapshot_from_unlock_blob(vault_id, bytes, true)
     }
 
@@ -6933,7 +6087,7 @@ impl VaultCore {
         &mut self,
         vault_id: &str,
         bytes: &[u8],
-    ) -> Result<Option<(Vault, Arc<TransformedKey>)>> {
+    ) -> Result<Option<(Vault, Arc<VaultKey>)>> {
         self.unlock_snapshot_from_unlock_blob(vault_id, bytes, false)
     }
 
@@ -6942,7 +6096,7 @@ impl VaultCore {
         vault_id: &str,
         bytes: &[u8],
         refresh_cached_transformed_key: bool,
-    ) -> Result<Option<(Vault, Arc<TransformedKey>)>> {
+    ) -> Result<Option<(Vault, Arc<VaultKey>)>> {
         if !self.quick_unlock_policy_enabled() {
             return Ok(None);
         }
@@ -7005,7 +6159,7 @@ impl VaultCore {
     fn replace_session_transformed_key(
         &mut self,
         vault_id: &str,
-        key: Arc<TransformedKey>,
+        key: Arc<VaultKey>,
     ) -> Result<()> {
         let loaded = self
             .vault_session
@@ -7017,8 +6171,8 @@ impl VaultCore {
 
     fn serialize_and_verify_vault_candidate(
         mut vault: Vault,
-        key: &TransformedKey,
-        save_profile: SaveProfile,
+        key: &VaultKey,
+        save_profile: VaultEncodingProfile,
     ) -> Result<(Vec<u8>, Vault)> {
         let bytes = save_kdbx_with_history_limits_transformed(&mut vault, key, save_profile)
             .context("failed to serialize vault candidate")?;
@@ -7034,7 +6188,7 @@ impl VaultCore {
             .find_loaded_mut(vault_id)
             .with_context(|| format!("vault not opened: {vault_id}"))?;
         loaded.vault = Some(vault);
-        loaded.save_profile.kdf = None;
+        loaded.save_profile.clear_explicit_kdf();
         Ok(())
     }
 
@@ -7158,7 +6312,7 @@ impl VaultCore {
         item_id: &str,
         display_name: &str,
         account_label: &str,
-        baseline_fingerprint: &ContentFingerprint,
+        baseline_fingerprint: &ContentIdentity,
         bytes: &[u8],
         pending_vault: Option<Vault>,
         remote_head: Option<OneDriveConflictHead>,
@@ -7184,9 +6338,9 @@ impl VaultCore {
                 } else if let Some(vault) = pending_vault {
                     self.install_pending_vault_candidate(vault_id, vault)?;
                 }
-                Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                    status: SaveVaultStatusDto::ConflictCopy,
-                    merge_summary: None,
+                Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
+                    status: PublicationStatusDto::ConflictSplit,
+                    reconciliation_summary: None,
                     conflict_copy_path: Some(format!("onedrive:{}", conflict_copy.display_name)),
                 }))
             }
@@ -7228,6 +6382,7 @@ impl VaultCore {
             bytes,
             fingerprint,
             revision,
+            cache_validation_token,
             display_name,
             account_label,
             save_profile,
@@ -7238,9 +6393,8 @@ impl VaultCore {
             item_id: item_id.to_owned(),
         };
         let cache_key = remote_cache_key_for_source(&source).expect("OneDrive source");
-        let source_etag = ProviderCatalog::source_etag(&revision)?;
         let cached_at = self.current_unix_time() as i64;
-        let cache_result = self.remote_cache.write_with_source_etag(
+        let cache_result = self.remote_cache.write_with_validation_token(
             &cache_key,
             RemoteVaultCacheEntry {
                 bytes: bytes.clone(),
@@ -7250,7 +6404,7 @@ impl VaultCore {
                 cached_at,
                 pending_sync: false,
             },
-            source_etag.as_deref(),
+            cache_validation_token.as_deref(),
         );
         let mut status =
             remote_source_status_after_commit(&cache_key, cached_at, cache_result.as_ref().err());
@@ -7307,10 +6461,10 @@ impl VaultCore {
         item_id: &str,
         display_name: &str,
         account_label: &str,
-        baseline_fingerprint: &ContentFingerprint,
+        baseline_fingerprint: &ContentIdentity,
         local_vault: &Vault,
-        local_save_profile: &SaveProfile,
-        key: &TransformedKey,
+        local_save_profile: &VaultEncodingProfile,
+        key: &VaultKey,
         reason: &str,
     ) -> Result<SourceRefreshConflictDisposition> {
         let (bytes, verified_local) = Self::serialize_and_verify_vault_candidate(
@@ -7358,29 +6512,12 @@ impl VaultCore {
         }
     }
 
-    fn serialize_loaded_vault_candidate(
-        &self,
-        vault_id: &str,
-        key: &TransformedKey,
-        save_profile: SaveProfile,
-    ) -> Result<(Vec<u8>, Vault)> {
-        let loaded = self
-            .vault_session
-            .find_loaded(vault_id)
-            .with_context(|| format!("vault not opened: {vault_id}"))?;
-        let Some(vault) = loaded.vault.as_ref() else {
-            anyhow::bail!("vault is locked: {vault_id}");
-        };
-        Self::serialize_and_verify_vault_candidate(vault.clone(), key, save_profile)
-            .with_context(|| format!("failed to save vault: {vault_id}"))
-    }
-
     fn save_remote_vault_to_pending_cache(
         &mut self,
         vault_id: &str,
         source: VaultSource,
         bytes: Vec<u8>,
-        expected_cache_fingerprint: &ContentFingerprint,
+        expected_cache_fingerprint: &ContentIdentity,
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
@@ -7404,7 +6541,7 @@ impl VaultCore {
         vault_id: &str,
         source: VaultSource,
         bytes: Vec<u8>,
-        expected_cache_fingerprint: &ContentFingerprint,
+        expected_cache_fingerprint: &ContentIdentity,
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
@@ -7440,7 +6577,7 @@ impl VaultCore {
         vault_id: &str,
         source: VaultSource,
         bytes: Vec<u8>,
-        expected_cache_fingerprint: &ContentFingerprint,
+        expected_cache_fingerprint: &ContentIdentity,
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
@@ -7464,7 +6601,7 @@ impl VaultCore {
         vault_id: &str,
         source: VaultSource,
         bytes: Vec<u8>,
-        expected_cache_fingerprint: &ContentFingerprint,
+        expected_cache_fingerprint: &ContentIdentity,
         display_name: String,
         account_label: Option<String>,
         remote_error: String,
@@ -7522,12 +6659,12 @@ impl VaultCore {
         loaded.baseline_fingerprint = fingerprint;
         loaded.save_profile = save_profile;
         loaded.source_status = Some(status);
-        Ok(RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
+        Ok(RuntimeResponse::PublicationResult(PublicationResultDto {
             status: match pending_kind {
-                GenericPendingKind::SourceWrite => SaveVaultStatusDto::SavedToCache,
-                GenericPendingKind::ConflictCopy => SaveVaultStatusDto::ConflictCopy,
+                GenericPendingKind::SourceWrite => PublicationStatusDto::Pending,
+                GenericPendingKind::ConflictCopy => PublicationStatusDto::ConflictSplit,
             },
-            merge_summary: None,
+            reconciliation_summary: None,
             conflict_copy_path: (pending_kind == GenericPendingKind::ConflictCopy)
                 .then(|| "onedrive:pending-conflict-copy".into()),
         }))
@@ -7614,7 +6751,7 @@ impl VaultCore {
         }
 
         match self.providers.remote_state(&drive_id, &item_id) {
-            Ok(state) if state.matches_fingerprint(&baseline_fingerprint) => {
+            Ok(state) if state.matches_identity(&baseline_fingerprint) => {
                 self.session_base_for_fingerprint(vault_id, &baseline_fingerprint)?;
                 let cached = self.remote_cache.read(&cache_key)?;
                 let status = VaultSourceStatusDto {
@@ -7658,7 +6795,7 @@ impl VaultCore {
                         let remote_vault = match Self::load_session_database(&snapshot.bytes, &key)
                         {
                             Ok(database) => database.vault,
-                            Err(VaultCodecError::HeaderHmacMismatch) => {
+                            Err(VaultCodecError::KeyMismatch) => {
                                 let (vault, refreshed_key) = self
                                     .refresh_transformed_key_from_unlock_blob(
                                         vault_id,
@@ -7784,8 +6921,8 @@ impl VaultCore {
         drive_id: &str,
         item_id: &str,
         cache_key: RemoteCacheKey,
-        baseline_fingerprint: ContentFingerprint,
-        key: Option<Arc<TransformedKey>>,
+        baseline_fingerprint: ContentIdentity,
+        key: Option<Arc<VaultKey>>,
     ) -> Result<VaultSourceStatusDto> {
         let sync_result = self.try_upload_pending_remote_vault(
             vault_id,
@@ -7824,8 +6961,8 @@ impl VaultCore {
         drive_id: &str,
         item_id: &str,
         cache_key: &RemoteCacheKey,
-        pending_fingerprint: &ContentFingerprint,
-        key: Option<Arc<TransformedKey>>,
+        pending_fingerprint: &ContentIdentity,
+        key: Option<Arc<VaultKey>>,
     ) -> Result<VaultSourceStatusDto> {
         const MAX_SOURCE_ATTEMPTS: usize = 3;
         let mut key = key.context("pending remote vault requires an unlocked vault")?;
@@ -7896,7 +7033,7 @@ impl VaultCore {
             let remote = read_onedrive_provider(&mut self.providers, drive_id, item_id, &state)?;
             let remote_vault = match Self::load_session_database(&remote.bytes, &key) {
                 Ok(database) => database.vault,
-                Err(VaultCodecError::HeaderHmacMismatch) => {
+                Err(VaultCodecError::KeyMismatch) => {
                     let Some((vault, refreshed_key)) =
                         self.refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes)?
                     else {
@@ -8090,7 +7227,7 @@ impl VaultCore {
         cache_key: &RemoteCacheKey,
         pending: &RemoteVaultCacheEntry,
         bytes: &[u8],
-        key: Arc<TransformedKey>,
+        key: Arc<VaultKey>,
         reason: &str,
     ) -> Result<VaultSourceStatusDto> {
         let mut key = key;
@@ -8111,7 +7248,7 @@ impl VaultCore {
             &key,
         ) {
             Ok(database) => (Some(database.vault), Some(key.clone()), None),
-            Err(VaultCodecError::HeaderHmacMismatch) => {
+            Err(VaultCodecError::KeyMismatch) => {
                 match self.refresh_transformed_key_from_unlock_blob(vault_id, &remote.bytes) {
                     Ok(Some((vault, refreshed_key))) => {
                         key = refreshed_key;
@@ -8167,7 +7304,8 @@ impl VaultCore {
             vault: remote_vault,
             bytes: remote.bytes,
             fingerprint: remote.fingerprint,
-            revision: ProviderCatalog::revision_for_observation(&remote_state)?,
+            revision: remote_state.revision().clone(),
+            cache_validation_token: remote.cache_validation_token,
             display_name: display_name_for_cloud_name(&remote.name),
             account_label: remote.account_label,
             save_profile: remote_save_profile,
@@ -8201,7 +7339,7 @@ impl VaultCore {
     fn read_current_snapshot(
         &mut self,
         vault_id: &str,
-        baseline: Option<&ContentFingerprint>,
+        baseline: Option<&ContentIdentity>,
     ) -> Result<LoadedSourceSnapshot> {
         let loaded = self
             .vault_session
@@ -8215,16 +7353,16 @@ impl VaultCore {
                     .read()
                     .with_context(|| format!("failed to read current vault source: {path}"))?;
                 Ok(LoadedSourceSnapshot {
-                    fingerprint: fingerprint_for_cached_bytes(&snapshot.bytes, 0),
+                    fingerprint: snapshot.identity,
                     bytes: Some(snapshot.bytes),
                     provider_revision: Some(snapshot.revision),
                 })
             }
             VaultSource::OneDriveItem { drive_id, item_id } => {
                 let state = self.providers.remote_state(drive_id, item_id)?;
-                let provider_revision = ProviderCatalog::revision_for_observation(&state)?;
+                let provider_revision = state.revision().clone();
                 if let Some(baseline) = baseline {
-                    if state.matches_fingerprint(baseline) {
+                    if state.matches_identity(baseline) {
                         return Ok(LoadedSourceSnapshot {
                             bytes: None,
                             fingerprint: baseline.clone(),
@@ -8235,7 +7373,7 @@ impl VaultCore {
                 let snapshot = self
                     .providers
                     .read_onedrive_observation(drive_id, item_id, &state)?;
-                let provider_revision = ProviderCatalog::revision_for_observation(&state)?;
+                let provider_revision = snapshot.revision.clone();
                 Ok(LoadedSourceSnapshot {
                     bytes: Some(snapshot.bytes),
                     fingerprint: snapshot.fingerprint,
@@ -8250,7 +7388,7 @@ impl VaultCore {
         vault_id: &str,
         bytes: &[u8],
         expected: &ProviderRevision,
-    ) -> Result<(ProviderRevision, ContentFingerprint)> {
+    ) -> Result<(ProviderRevision, ContentIdentity)> {
         let source = self
             .vault_session
             .find_loaded(vault_id)
@@ -8262,7 +7400,7 @@ impl VaultCore {
         };
         let commit = self.providers.local(path).publish(expected, bytes)?;
         self.record_local_save_warnings(commit.warnings);
-        Ok((commit.revision, fingerprint_for_cached_bytes(bytes, 0)))
+        Ok((commit.revision, commit.identity))
     }
 
     fn record_local_save_warnings(&mut self, warnings: Vec<String>) {
@@ -8383,8 +7521,8 @@ fn collect_fill_candidates(
     }
 }
 
-fn three_way_patch_summary(report: &ThreeWayPatchReport) -> MergeSummaryDto {
-    MergeSummaryDto {
+fn three_way_patch_summary(report: &ThreeWayPatchReport) -> ReconciliationSummaryDto {
+    ReconciliationSummaryDto {
         merged_entries: report.merged_entries,
         history_snapshots_added: report.history_snapshots_added,
         meta_conflicts_resolved: report.meta_conflicts_resolved,
@@ -8436,7 +7574,7 @@ fn remote_source_status_after_commit(
     }
 }
 
-fn same_content_fingerprint(left: &ContentFingerprint, right: &ContentFingerprint) -> bool {
+fn same_content_fingerprint(left: &ContentIdentity, right: &ContentIdentity) -> bool {
     left.content_sha256 == right.content_sha256 && left.size_bytes == right.size_bytes
 }
 
@@ -8983,8 +8121,8 @@ fn history_matches_passkey_registration_rollback(
 
 fn save_kdbx_with_history_limits_transformed(
     vault: &mut Vault,
-    transformed_key: &TransformedKey,
-    save_profile: SaveProfile,
+    transformed_key: &VaultKey,
+    save_profile: VaultEncodingProfile,
 ) -> std::result::Result<Vec<u8>, VaultCodecError> {
     strip_retired_runtime_metadata(vault);
     let encoded = ResidentVaultCodec.encode(vault.clone(), transformed_key, save_profile)?;
@@ -9039,11 +8177,11 @@ fn entries_by_id(group: &vaultkern_core::Group) -> BTreeMap<Uuid, &Entry> {
 
 fn database_settings_dto(
     vault: &Vault,
-    profile: &SaveProfile,
+    profile: &VaultEncodingProfile,
     autosave_delay_seconds: Option<u32>,
     has_password: bool,
-) -> DatabaseSettingsDto {
-    DatabaseSettingsDto {
+) -> Result<DatabaseSettingsDto> {
+    Ok(DatabaseSettingsDto {
         metadata: DatabaseMetadataSettingsDto {
             name: vault.name.clone(),
             description: vault.description.clone(),
@@ -9061,39 +8199,38 @@ fn database_settings_dto(
         recycle_bin: DatabaseRecycleBinSettingsDto {
             enabled: vault.recycle_bin_enabled.unwrap_or(true),
         },
-        encryption: encryption_settings_dto(vault, profile),
+        encryption: encryption_settings_dto(vault, profile)?,
         autosave_delay_seconds,
         has_password,
-    }
+    })
 }
 
-fn encryption_settings_dto(vault: &Vault, profile: &SaveProfile) -> DatabaseEncryptionSettingsDto {
-    let kdf = profile
-        .kdf
-        .clone()
-        .or_else(|| retained_or_recommended_save_kdf(vault).ok())
-        .unwrap_or_else(SaveKdf::recommended);
-    DatabaseEncryptionSettingsDto {
-        compression: match profile.compression {
-            Compression::None => "none",
-            Compression::Gzip => "gzip",
+fn encryption_settings_dto(
+    vault: &Vault,
+    profile: &VaultEncodingProfile,
+) -> Result<DatabaseEncryptionSettingsDto> {
+    let settings = profile.encryption_settings(vault)?;
+    Ok(DatabaseEncryptionSettingsDto {
+        compression: match settings.compression {
+            VaultCompression::None => "none",
+            VaultCompression::Gzip => "gzip",
         }
         .into(),
-        cipher: match profile.cipher {
-            KdbxCipher::Aes256 => "aes256",
-            KdbxCipher::ChaCha20 => "chacha20",
-            KdbxCipher::Twofish => "twofish",
+        cipher: match settings.cipher {
+            VaultCipher::Aes256 => "aes256",
+            VaultCipher::ChaCha20 => "chacha20",
+            VaultCipher::Twofish => "twofish",
         }
         .into(),
-        kdf: match kdf {
-            SaveKdf::AesKdbx4 { rounds } => DatabaseKdfSettingsDto {
+        kdf: match settings.kdf {
+            VaultKdf::Aes { rounds } => DatabaseKdfSettingsDto {
                 algorithm: "aes_kdbx4".into(),
                 transform_rounds: Some(rounds),
                 iterations: None,
                 memory_kib: None,
                 parallelism: None,
             },
-            SaveKdf::Argon2d {
+            VaultKdf::Argon2d {
                 iterations,
                 memory_kib,
                 parallelism,
@@ -9104,7 +8241,7 @@ fn encryption_settings_dto(vault: &Vault, profile: &SaveProfile) -> DatabaseEncr
                 memory_kib: Some(memory_kib),
                 parallelism: Some(parallelism),
             },
-            SaveKdf::Argon2id {
+            VaultKdf::Argon2id {
                 iterations,
                 memory_kib,
                 parallelism,
@@ -9116,23 +8253,25 @@ fn encryption_settings_dto(vault: &Vault, profile: &SaveProfile) -> DatabaseEncr
                 parallelism: Some(parallelism),
             },
         },
-    }
+    })
 }
 
-fn save_profile_from_settings(settings: DatabaseEncryptionSettingsDto) -> Result<SaveProfile> {
+fn vault_encryption_settings(
+    settings: DatabaseEncryptionSettingsDto,
+) -> Result<VaultEncryptionSettings> {
     let compression = match settings.compression.as_str() {
-        "none" => Compression::None,
-        "gzip" => Compression::Gzip,
+        "none" => VaultCompression::None,
+        "gzip" => VaultCompression::Gzip,
         value => anyhow::bail!("unsupported compression setting: {value}"),
     };
     let cipher = match settings.cipher.as_str() {
-        "aes256" => KdbxCipher::Aes256,
-        "chacha20" => KdbxCipher::ChaCha20,
-        "twofish" => KdbxCipher::Twofish,
+        "aes256" => VaultCipher::Aes256,
+        "chacha20" => VaultCipher::ChaCha20,
+        "twofish" => VaultCipher::Twofish,
         value => anyhow::bail!("unsupported cipher setting: {value}"),
     };
     let kdf = match settings.kdf.algorithm.as_str() {
-        "aes_kdbx4" => SaveKdf::AesKdbx4 {
+        "aes_kdbx4" => VaultKdf::Aes {
             rounds: settings
                 .kdf
                 .transform_rounds
@@ -9152,13 +8291,13 @@ fn save_profile_from_settings(settings: DatabaseEncryptionSettingsDto) -> Result
                 .parallelism
                 .with_context(|| format!("{} requires parallelism", settings.kdf.algorithm))?;
             if settings.kdf.algorithm == "argon2d" {
-                SaveKdf::Argon2d {
+                VaultKdf::Argon2d {
                     iterations,
                     memory_kib,
                     parallelism,
                 }
             } else {
-                SaveKdf::Argon2id {
+                VaultKdf::Argon2id {
                     iterations,
                     memory_kib,
                     parallelism,
@@ -9168,12 +8307,19 @@ fn save_profile_from_settings(settings: DatabaseEncryptionSettingsDto) -> Result
         value => anyhow::bail!("unsupported kdf setting: {value}"),
     };
 
-    Ok(SaveProfile {
-        version: vaultkern_core::KdbxVersion::V4_1,
-        cipher,
+    Ok(VaultEncryptionSettings {
         compression,
-        kdf: Some(kdf),
+        cipher,
+        kdf,
     })
+}
+
+fn save_profile_from_settings(
+    settings: DatabaseEncryptionSettingsDto,
+) -> Result<VaultEncodingProfile> {
+    Ok(VaultEncodingProfile::from_encryption_settings(
+        vault_encryption_settings(settings)?,
+    ))
 }
 
 fn public_string(vault: &Vault, key: &str) -> Option<String> {
@@ -9319,7 +8465,7 @@ fn current_unix_time_ms() -> u64 {
         .unwrap_or(0)
 }
 
-fn fingerprint_for_cached_bytes(bytes: &[u8], cached_at: i64) -> ContentFingerprint {
+fn fingerprint_for_cached_bytes(bytes: &[u8], cached_at: i64) -> ContentIdentity {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     let content_sha256 = hasher
@@ -9328,10 +8474,10 @@ fn fingerprint_for_cached_bytes(bytes: &[u8], cached_at: i64) -> ContentFingerpr
         .map(|byte| format!("{byte:02x}"))
         .collect();
 
-    ContentFingerprint {
+    ContentIdentity {
         content_sha256,
         size_bytes: bytes.len() as u64,
-        modified_at: u64::try_from(cached_at).ok(),
+        observation_marker: u64::try_from(cached_at).ok(),
     }
 }
 
@@ -9388,7 +8534,7 @@ fn display_name_for_cloud_name(name: &str) -> String {
         .to_owned()
 }
 
-fn transformed_key_from_loaded_vault(loaded: &LoadedVault) -> Result<Arc<TransformedKey>> {
+fn transformed_key_from_loaded_vault(loaded: &LoadedVault) -> Result<Arc<VaultKey>> {
     loaded
         .transformed_key
         .clone()
@@ -9429,10 +8575,10 @@ fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
 }
 
 fn ensure_primary_passkey_save(response: &RuntimeResponse) -> Result<()> {
-    let RuntimeResponse::SaveVaultResult(result) = response else {
+    let RuntimeResponse::PublicationResult(result) = response else {
         anyhow::bail!("passkey mutation received an unexpected save response: {response:?}");
     };
-    if result.status == SaveVaultStatusDto::ConflictCopy {
+    if result.status == PublicationStatusDto::ConflictSplit {
         return Err(LocalPublicationError::Conflict {
             message: format!(
                 "passkey mutation was saved only to conflict copy: {}",
@@ -9484,7 +8630,7 @@ fn classified_runtime_error_response(error: &anyhow::Error) -> Option<RuntimeRes
     }))
 }
 
-fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
+pub(crate) fn query_error_response(error: anyhow::Error) -> RuntimeResponse {
     classified_runtime_error_response(&error).unwrap_or_else(|| {
         RuntimeResponse::Error(ErrorDto {
             code: "invalid_request".into(),
@@ -9997,8 +9143,12 @@ mod tests {
         Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
     };
-    use vaultkern_core::CompositeKey;
-    use vaultkern_runtime_protocol::{DatabaseCredentialsUpdateDto, EntryPasskeyUpdateDto};
+    use vaultkern_core::{
+        CompositeKey, Compression, KdbxCipher, KdbxVersion, SaveKdf, SaveProfile,
+    };
+    use vaultkern_runtime_protocol::{
+        DatabaseCredentialsUpdateDto, EntryIdListDto, EntryPasskeyUpdateDto,
+    };
     use zeroize::Zeroizing;
 
     #[test]
@@ -10060,44 +9210,6 @@ mod tests {
             "an authenticated browser channel must not require per-connection Hello"
         );
         assert!(matches!(response, RuntimeResponse::SessionState(_)));
-    }
-
-    #[test]
-    fn retired_atomic_autofill_command_is_inert_before_source_io() {
-        let mut runtime = VaultCore::for_tests();
-        runtime.reset_test_onedrive_access_counts();
-
-        let response = runtime
-            .handle_browser_command(RuntimeCommand::PersistAutofillMutation {
-                transaction_id: "legacy-transaction".into(),
-                operation_id: "legacy-operation".into(),
-                vault_id: "unopened-vault".into(),
-                plan: vaultkern_runtime_protocol::AutofillPersistPlanDto::Create {
-                    parent_group_id: "root".into(),
-                    expected_matching_entry_ids: Vec::new(),
-                    planned_entry_id: "legacy-entry".into(),
-                    desired_fields: EntryFieldsDto {
-                        title: "Legacy".into(),
-                        username: "alice".into(),
-                        password: "secret".into(),
-                        url: "https://example.test/".into(),
-                        notes: "".into(),
-                        totp_uri: None,
-                        custom_fields: Vec::new(),
-                    },
-                },
-            })
-            .expect("deprecated protocol form should return a typed compatibility error");
-
-        assert!(matches!(
-            response,
-            RuntimeResponse::Error(ErrorDto { ref code, .. }) if code == "unsupported"
-        ));
-        assert_eq!(
-            runtime.test_onedrive_access_counts(),
-            ProviderAccessCounts::default(),
-            "the compatibility form must not read from or write to a source"
-        );
     }
 
     #[test]
@@ -10304,9 +9416,9 @@ mod tests {
     #[test]
     fn external_kdf_failures_preserve_machine_readable_policy_details() {
         let error = anyhow::Error::new(VaultCodecError::ExternalKdfPolicy {
-            algorithm: vaultkern_core::ExternalKdfAlgorithm::Argon2id,
+            algorithm: VaultKdfAlgorithm::Argon2id,
             observed: 300 * 1024 * 1024,
-            decision: vaultkern_core::ExternalKdfDecision::Confirm(256 * 1024 * 1024),
+            decision: VaultKdfDecision::Confirm(256 * 1024 * 1024),
         });
 
         let failure = super::classify_external_kdf_error(&error).unwrap();
@@ -10353,10 +9465,10 @@ mod tests {
         let bytes = save_kdbx_with_history_limits_transformed(
             &mut vault,
             &transformed,
-            SaveProfile {
+            VaultEncodingProfile::from_test_profile(SaveProfile {
                 kdf: None,
                 ..profile
-            },
+            }),
         )
         .expect("runtime save should promote the file version");
         let header = vaultkern_core::inspect_kdbx_header(&bytes).expect("inspect saved header");
@@ -10399,12 +9511,12 @@ mod tests {
         let saved = save_kdbx_with_history_limits_transformed(
             &mut vault,
             &transformed,
-            SaveProfile {
+            VaultEncodingProfile::from_test_profile(SaveProfile {
                 version: KdbxVersion::V4_1,
                 cipher: KdbxCipher::Aes256,
                 compression: Compression::None,
                 kdf: None,
-            },
+            }),
         )
         .unwrap();
         let reloaded = ResidentVaultCodec.decode(&saved, &transformed).unwrap();
@@ -10751,8 +9863,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -10798,8 +9910,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -10844,8 +9956,8 @@ mod tests {
         let response = runtime.commit_working_copy(&vault_id).unwrap();
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
                 ..
             })
         ));
@@ -10907,8 +10019,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
                 ..
             })
         ));
@@ -10964,8 +10076,8 @@ mod tests {
         let response = runtime.commit_working_copy(&vault_id).unwrap();
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
                 ..
             })
         ));
@@ -11043,8 +10155,8 @@ mod tests {
         runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
                 ..
             })
         ));
@@ -11147,8 +10259,8 @@ mod tests {
             .commit_database_settings(&vault_id, update())
             .expect("retry applies to the adopted Remote Head");
         assert_eq!(
-            second.save_result.status,
-            SaveVaultStatusDto::Saved,
+            second.publication.status,
+            PublicationStatusDto::Published,
             "{second:?}"
         );
         assert_eq!(second.settings.metadata.name, "desired local settings");
@@ -11230,10 +10342,10 @@ mod tests {
         let foreign = save_kdbx_with_history_limits_transformed(
             &mut foreign,
             &transformed,
-            SaveProfile {
+            VaultEncodingProfile::from_test_profile(SaveProfile {
                 kdf: None,
                 ..SaveProfile::recommended()
-            },
+            }),
         )
         .unwrap();
         runtime.replace_test_onedrive_item("drive-1", "item-1", foreign);
@@ -11293,7 +10405,7 @@ mod tests {
             panic!("expected durable settings result, got {response:?}");
         };
         assert_eq!(result.settings.metadata.name, "published but indeterminate");
-        assert_eq!(result.save_result.status, SaveVaultStatusDto::Saved);
+        assert_eq!(result.publication.status, PublicationStatusDto::Published);
         assert_eq!(
             runtime
                 .get_database_settings(&opened.vault_id)
@@ -11337,7 +10449,7 @@ mod tests {
             panic!("expected committed database settings response");
         };
         assert_eq!(result.settings.metadata.name, "durable settings");
-        assert_eq!(result.save_result.status, SaveVaultStatusDto::Saved);
+        assert_eq!(result.publication.status, PublicationStatusDto::Published);
 
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
@@ -11778,7 +10890,14 @@ mod tests {
             .unwrap();
         let mut credential = CompositeKey::default();
         credential.add_password("demo-password");
-        let transformed = vaultkern_core::derive_transformed_key(&current, &credential).unwrap();
+        let transformed = ResidentVaultCodec
+            .derive_key_with_policy(
+                &current,
+                &credential,
+                &ExternalKdfPolicy::Desktop,
+                ExternalKdfConfirmation::Unconfirmed,
+            )
+            .unwrap();
         let mut remote = KeepassCore::new().load_kdbx(&current, &credential).unwrap();
         remote.description = Some("remote refresh".into());
         let save_profile = runtime.inspected_save_profile(&current).unwrap();
@@ -11918,10 +11037,10 @@ mod tests {
             .commit_working_copy(&opened.vault_id)
             .expect("source change after the merge snapshot must be recoverable");
 
-        let RuntimeResponse::SaveVaultResult(result) = response else {
+        let RuntimeResponse::PublicationResult(result) = response else {
             panic!("expected save result");
         };
-        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
         assert_eq!(std::fs::read(&opened.path).unwrap(), generation_b);
         assert!(
             Path::new(
@@ -11955,10 +11074,10 @@ mod tests {
             .commit_working_copy(&opened.vault_id)
             .expect("source change should take the recoverable conflict path");
 
-        let RuntimeResponse::SaveVaultResult(result) = response else {
+        let RuntimeResponse::PublicationResult(result) = response else {
             panic!("expected save result");
         };
-        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
         assert_eq!(std::fs::read(&opened.path).unwrap(), external);
         let conflict_path = result.conflict_copy_path.expect("conflict-copy path");
         assert_eq!(
@@ -11999,10 +11118,10 @@ mod tests {
             .commit_working_copy(&opened.vault_id)
             .expect("missing source should take the recoverable conflict path");
 
-        let RuntimeResponse::SaveVaultResult(result) = response else {
+        let RuntimeResponse::PublicationResult(result) = response else {
             panic!("expected save result");
         };
-        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
         assert!(!Path::new(&opened.path).exists());
         let conflict_path = result.conflict_copy_path.expect("conflict-copy path");
         let conflict_bytes = std::fs::read(conflict_path).unwrap();
@@ -12044,15 +11163,15 @@ mod tests {
         let generation_b = arm_source_change_after_merge_snapshot(&mut runtime, &opened);
 
         let response = runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: opened.vault_id.clone(),
             })
             .expect("source conflicts must be command responses");
 
-        let RuntimeResponse::SaveVaultResult(result) = response else {
+        let RuntimeResponse::PublicationResult(result) = response else {
             panic!("expected conflict-copy response, got {response:?}");
         };
-        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
         assert!(
             Path::new(
                 result
@@ -12073,15 +11192,15 @@ mod tests {
         arm_source_deletion_after_merge_snapshot(&mut runtime, &opened);
 
         let response = runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: opened.vault_id.clone(),
             })
             .expect("source deletion must be a command response");
 
-        let RuntimeResponse::SaveVaultResult(result) = response else {
+        let RuntimeResponse::PublicationResult(result) = response else {
             panic!("expected conflict-copy response, got {response:?}");
         };
-        assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
         assert!(
             Path::new(
                 result
@@ -12102,7 +11221,7 @@ mod tests {
         arm_local_write_fault(&mut runtime, DurableFaultPoint::BeforeTargetReplace);
 
         let response = runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: opened.vault_id.clone(),
             })
             .expect("pre-publish failures must be command responses");
@@ -12122,15 +11241,15 @@ mod tests {
         arm_local_backup_loss_after_publish(&mut runtime, &opened.path);
 
         let response = runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: opened.vault_id.clone(),
             })
             .expect("a reconciled publish should be a protocol response");
 
-        let RuntimeResponse::SaveVaultResult(result) = response else {
+        let RuntimeResponse::PublicationResult(result) = response else {
             panic!("expected durable save response, got {response:?}");
         };
-        assert_eq!(result.status, SaveVaultStatusDto::Saved);
+        assert_eq!(result.status, PublicationStatusDto::Published);
         let mut key = CompositeKey::default();
         key.add_password("demo-password");
         assert_eq!(
@@ -12152,15 +11271,15 @@ mod tests {
         arm_local_write_fault(&mut runtime, DurableFaultPoint::Cleanup);
 
         let response = runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: opened.vault_id.clone(),
             })
             .expect("cleanup failure does not invalidate a durable save");
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12183,8 +11302,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12196,8 +11315,8 @@ mod tests {
         );
         assert!(matches!(
             runtime.commit_working_copy(&opened.vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12227,8 +11346,8 @@ mod tests {
             .expect("the primary KDBX commit already succeeded");
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12295,8 +11414,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12325,8 +11444,8 @@ mod tests {
         );
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12344,8 +11463,8 @@ mod tests {
             .expect("the remote KDBX commit already succeeded");
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12355,8 +11474,8 @@ mod tests {
             runtime
                 .commit_working_copy(&vault_id)
                 .expect("retained committed bytes must repair the missing session base"),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12407,8 +11526,8 @@ mod tests {
             .expect("the rotated remote head should be adopted despite a base-cache failure");
         assert!(matches!(
             adopted,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Reconciled,
                 ..
             })
         ));
@@ -12423,8 +11542,8 @@ mod tests {
 
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Published,
                 ..
             })
         ));
@@ -12914,7 +12033,10 @@ mod tests {
             })
             .expect_err("pre-publish save failure must fail registration");
 
-        assert!(error.to_string().contains("failed to write vault"));
+        assert!(
+            error.to_string().contains("failed to publish Local File"),
+            "{error:#}"
+        );
         assert!(runtime.list_entries(&opened.vault_id).unwrap().is_empty());
     }
 
@@ -13059,10 +12181,10 @@ mod tests {
         let remote_bytes = save_kdbx_with_history_limits_transformed(
             &mut remote,
             &transformed_key,
-            SaveProfile {
+            VaultEncodingProfile::from_test_profile(SaveProfile {
                 kdf: None,
                 ..SaveProfile::recommended()
-            },
+            }),
         )
         .unwrap();
 
@@ -13113,8 +12235,16 @@ mod tests {
     fn platform_plugin_registration_fails_when_save_is_diverted_to_a_conflict_copy() {
         let mut runtime = VaultCore::for_tests();
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let mut foreign_generation = std::fs::read(&opened.vault_id).unwrap();
-        foreign_generation.push(0);
+        let current = std::fs::read(&opened.vault_id).unwrap();
+        let transformed = transformed_key_from_loaded_vault(
+            runtime.vault_session.find_loaded(&opened.vault_id).unwrap(),
+        )
+        .unwrap();
+        let mut foreign = ResidentVaultCodec.decode(&current, &transformed).unwrap();
+        foreign.root.id = Uuid::new_v4();
+        let profile = runtime.inspected_save_profile(&current).unwrap();
+        let foreign_generation =
+            save_kdbx_with_history_limits_transformed(&mut foreign, &transformed, profile).unwrap();
         std::fs::write(&opened.vault_id, foreign_generation).unwrap();
 
         let error = runtime
@@ -13434,210 +12564,6 @@ mod tests {
     }
 
     #[test]
-    fn compare_and_update_rejects_stale_fields_before_history_or_mutation() {
-        let mut runtime = VaultCore::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
-        let mut expected = entry_fields(&entry);
-        expected.notes = "stale snapshot".into();
-        let mut desired = entry_fields(&entry);
-        desired.password = "new-secret".into();
-
-        let response = runtime
-            .handle(RuntimeCommand::CompareAndUpdateEntryFields {
-                vault_id: opened.vault_id.clone(),
-                entry_id: entry.id.clone(),
-                expected_fields: expected,
-                desired_fields: desired,
-            })
-            .unwrap();
-
-        let RuntimeResponse::Error(error) = response else {
-            panic!("expected conflict response, got {response:?}");
-        };
-        assert_eq!(error.code, "conflict");
-        assert_eq!(
-            runtime
-                .get_entry_detail(&opened.vault_id, &entry.id)
-                .unwrap(),
-            entry
-        );
-        assert!(
-            runtime
-                .list_entry_history(&opened.vault_id, &entry.id)
-                .unwrap()
-                .items
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn compare_and_update_succeeds_once_and_preserves_unwritten_entry_state() {
-        let mut runtime = VaultCore::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let created = create_demo_entry(&mut runtime, &opened.vault_id);
-        install_test_passkey(&mut runtime, &opened.vault_id, &created.id);
-        {
-            let loaded = runtime
-                .vault_session
-                .find_loaded_mut(&opened.vault_id)
-                .unwrap();
-            runtime
-                .core
-                .update_entry_field_protection(
-                    loaded.vault.as_mut().unwrap(),
-                    &created.id,
-                    vaultkern_core::EntryFieldProtectionUpdate {
-                        protect_title: Some(true),
-                        protect_username: Some(true),
-                        protect_password: Some(false),
-                        protect_url: Some(true),
-                        protect_notes: Some(true),
-                    },
-                )
-                .unwrap();
-        }
-        let before = runtime
-            .add_entry_attachment(
-                &opened.vault_id,
-                &created.id,
-                "proof.txt".into(),
-                "cHJvb2Y=".into(),
-                true,
-            )
-            .unwrap();
-        let history_before = runtime
-            .list_entry_history(&opened.vault_id, &created.id)
-            .unwrap()
-            .items
-            .len();
-        assert!(before.passkey.is_some());
-        assert!(before.field_protection.protect_title);
-        assert!(before.field_protection.protect_username);
-        assert!(!before.field_protection.protect_password);
-        assert!(before.field_protection.protect_url);
-        assert!(before.field_protection.protect_notes);
-        let expected = entry_fields(&before);
-        let desired = EntryFieldsDto {
-            password: "new-secret".into(),
-            notes: "updated".into(),
-            ..expected.clone()
-        };
-
-        let first = runtime
-            .handle(RuntimeCommand::CompareAndUpdateEntryFields {
-                vault_id: opened.vault_id.clone(),
-                entry_id: created.id.clone(),
-                expected_fields: expected.clone(),
-                desired_fields: desired.clone(),
-            })
-            .unwrap();
-        let RuntimeResponse::EntryDetail(updated) = first else {
-            panic!("expected update, got {first:?}");
-        };
-        assert!(entry_detail_matches_fields(&updated, &desired));
-        assert_eq!(updated.passkey, before.passkey);
-        assert_eq!(updated.attachments, before.attachments);
-        assert_eq!(updated.field_protection, before.field_protection);
-        assert_eq!(
-            runtime
-                .list_entry_history(&opened.vault_id, &created.id)
-                .unwrap()
-                .items
-                .len(),
-            history_before + 1
-        );
-
-        let second = runtime
-            .handle(RuntimeCommand::CompareAndUpdateEntryFields {
-                vault_id: opened.vault_id.clone(),
-                entry_id: created.id.clone(),
-                expected_fields: expected,
-                desired_fields: desired,
-            })
-            .unwrap();
-        let RuntimeResponse::Error(error) = second else {
-            panic!("expected replay conflict, got {second:?}");
-        };
-        assert_eq!(error.code, "conflict");
-        assert_eq!(
-            runtime
-                .list_entry_history(&opened.vault_id, &created.id)
-                .unwrap()
-                .items
-                .len(),
-            history_before + 1
-        );
-    }
-
-    #[test]
-    fn compare_and_update_no_op_is_idempotent_without_history() {
-        let mut runtime = VaultCore::for_tests();
-        let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
-        let entry = create_demo_entry(&mut runtime, &opened.vault_id);
-        let fields = entry_fields(&entry);
-
-        for _ in 0..2 {
-            let response = runtime
-                .handle(RuntimeCommand::CompareAndUpdateEntryFields {
-                    vault_id: opened.vault_id.clone(),
-                    entry_id: entry.id.clone(),
-                    expected_fields: fields.clone(),
-                    desired_fields: fields.clone(),
-                })
-                .unwrap();
-            assert!(matches!(response, RuntimeResponse::EntryDetail(_)));
-        }
-        assert!(
-            runtime
-                .list_entry_history(&opened.vault_id, &entry.id)
-                .unwrap()
-                .items
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn conditional_update_requires_the_command_time_active_vault() {
-        let mut runtime = VaultCore::for_tests();
-        let (_first_dir, first) = open_unlocked_demo_vault(&mut runtime);
-        let entry = create_demo_entry(&mut runtime, &first.vault_id);
-        let fields = entry_fields(&entry);
-        runtime.commit_working_copy(&first.vault_id).unwrap();
-        let (_second_dir, second) = open_unlocked_demo_vault(&mut runtime);
-        assert_eq!(
-            runtime.vault_session.active_vault_id(),
-            Some(second.vault_id.as_str())
-        );
-
-        let update = runtime
-            .handle(RuntimeCommand::CompareAndUpdateEntryFields {
-                vault_id: first.vault_id.clone(),
-                entry_id: entry.id.clone(),
-                expected_fields: fields.clone(),
-                desired_fields: EntryFieldsDto {
-                    password: "new-secret".into(),
-                    ..fields.clone()
-                },
-            })
-            .unwrap();
-        let RuntimeResponse::Error(error) = update else {
-            panic!("expected active-vault conflict, got {update:?}");
-        };
-        assert_eq!(error.code, "conflict");
-        runtime.open_local_vault(&first.path).unwrap();
-        runtime
-            .unlock_with_password(&first.vault_id, "demo-password")
-            .unwrap();
-        assert_eq!(
-            runtime
-                .get_entry_detail(&first.vault_id, &entry.id)
-                .unwrap(),
-            entry
-        );
-    }
-
-    #[test]
     fn lowering_history_limit_prunes_live_state_without_later_resurrection() {
         let mut runtime = VaultCore::for_tests_at(1_700_000_000);
         let (_dir, opened) = open_unlocked_demo_vault(&mut runtime);
@@ -13795,8 +12721,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
                 ..
             })
         ));
@@ -14043,8 +12969,8 @@ mod tests {
         runtime.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14178,8 +13104,8 @@ mod tests {
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::Merged,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Reconciled,
                 ..
             })
         ));
@@ -14215,12 +13141,12 @@ mod tests {
         runtime.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
             runtime
-                .handle(RuntimeCommand::SaveVault {
+                .handle(RuntimeCommand::RetryVaultPublication {
                     vault_id: vault_id.clone(),
                 })
                 .unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14244,15 +13170,15 @@ mod tests {
         runtime.queue_test_onedrive_ambiguous_write(false);
 
         let response = runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: vault_id.clone(),
             })
             .unwrap();
 
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14291,8 +13217,8 @@ mod tests {
         runtime.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14351,12 +13277,12 @@ mod tests {
             .find_loaded_mut(&vault_id)
             .unwrap()
             .save_profile
-            .compression = Compression::None;
+            .set_test_compression(VaultCompression::None);
         runtime.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14390,11 +13316,11 @@ mod tests {
         let changed_remote = save_kdbx_with_history_limits_transformed(
             &mut remote_vault,
             &transformed,
-            SaveProfile {
+            VaultEncodingProfile::from_test_profile(SaveProfile {
                 cipher: KdbxCipher::ChaCha20,
                 kdf: None,
                 ..SaveProfile::recommended()
-            },
+            }),
         )
         .unwrap();
         runtime.replace_test_onedrive_item("drive-1", "item-1", changed_remote);
@@ -14470,10 +13396,10 @@ mod tests {
             save_kdbx_with_history_limits_transformed(
                 &mut vault,
                 &transformed,
-                SaveProfile {
+                VaultEncodingProfile::from_test_profile(SaveProfile {
                     kdf: None,
                     ..SaveProfile::recommended()
-                },
+                }),
             )
             .unwrap()
         };
@@ -14505,8 +13431,8 @@ mod tests {
 
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14534,8 +13460,8 @@ mod tests {
         runtime.queue_test_onedrive_ambiguous_write(false);
         assert!(matches!(
             runtime.commit_working_copy(&vault_id).unwrap(),
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::SavedToCache,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::Pending,
                 ..
             })
         ));
@@ -14617,8 +13543,8 @@ mod tests {
         let response = runtime.commit_working_copy(&vault_id).unwrap();
         assert!(matches!(
             response,
-            RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-                status: SaveVaultStatusDto::ConflictCopy,
+            RuntimeResponse::PublicationResult(PublicationResultDto {
+                status: PublicationStatusDto::ConflictSplit,
                 ..
             })
         ));

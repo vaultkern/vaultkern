@@ -10,8 +10,8 @@ use vaultkern_runtime_protocol::{
     AutofillUpdateFieldsDto, CommitStatusDto, DatabaseCredentialsUpdateDto,
     DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto,
     DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, EntryCustomFieldDto,
-    OptionalSettingUpdateDto, PROTOCOL_VERSION, RuntimeCommand, RuntimeResponse,
-    SaveVaultStatusDto,
+    OptionalSettingUpdateDto, PROTOCOL_VERSION, PublicationStatusDto, RuntimeCommand,
+    RuntimeResponse,
 };
 
 fn key() -> CompositeKey {
@@ -193,7 +193,7 @@ fn vault_with_remaining_mutation_data_bytes() -> (Vec<u8>, String, String) {
 
 fn expect_adjacent_commit(
     response: RuntimeResponse,
-    expected_status: SaveVaultStatusDto,
+    expected_status: PublicationStatusDto,
 ) -> vaultkern_runtime_protocol::EntryDetailDto {
     let result = match response {
         RuntimeResponse::EntryMutationResult(result) => result,
@@ -215,7 +215,7 @@ fn expect_adjacent_commit(
 
 fn expect_vault_commit(
     response: RuntimeResponse,
-    expected_status: SaveVaultStatusDto,
+    expected_status: PublicationStatusDto,
 ) -> Option<String> {
     let RuntimeResponse::VaultMutationResult(result) = response else {
         panic!("expected committed vault mutation");
@@ -295,7 +295,6 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
     let created = match harness.command(RuntimeCommand::CreateEntry {
         vault_id: vault_id.clone(),
         parent_group_id: root_id.clone(),
-        entry_id: None,
         title: "Local account".into(),
         username: "alice".into(),
         password: "first-password".into(),
@@ -305,7 +304,7 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
     }) {
         RuntimeResponse::EntryMutationResult(result) => {
             assert_eq!(result.commit, CommitStatusDto::Committed);
-            assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+            assert_eq!(result.publication.status, PublicationStatusDto::Published);
             result.entry.expect("created entry detail")
         }
         _ => panic!("expected committed entry mutation"),
@@ -366,7 +365,7 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::Merged
+                && result.publication.status == PublicationStatusDto::Reconciled
     ));
     let entries = match harness.command(RuntimeCommand::ListEntries {
         vault_id: vault_id.clone(),
@@ -390,7 +389,7 @@ fn resident_protocol_harness_observes_successful_and_stale_publication() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::Saved
+                && result.publication.status == PublicationStatusDto::Published
                 && result.entry.is_none()
     ));
     let published = core
@@ -487,7 +486,7 @@ fn stale_reconciliation_keeps_base_and_local_fixed_until_publication_is_confirme
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::SavedToCache
+                && result.publication.status == PublicationStatusDto::Pending
     ));
     assert!(matches!(
         harness.command(RuntimeCommand::GetEntryDetail {
@@ -529,7 +528,7 @@ fn stale_reconciliation_keeps_base_and_local_fixed_until_publication_is_confirme
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::Saved
+                && result.publication.status == PublicationStatusDto::Published
     ));
 }
 
@@ -574,7 +573,10 @@ fn successful_conflict_split_preserves_local_then_adopts_remote_head() {
     }) {
         RuntimeResponse::EntryMutationResult(result) => {
             assert_eq!(result.commit, CommitStatusDto::Committed);
-            assert_eq!(result.publication.status, SaveVaultStatusDto::ConflictCopy);
+            assert_eq!(
+                result.publication.status,
+                PublicationStatusDto::ConflictSplit
+            );
             result
                 .publication
                 .conflict_copy_path
@@ -626,7 +628,6 @@ fn successful_conflict_split_preserves_local_then_adopts_remote_head() {
         harness.command(RuntimeCommand::CreateEntry {
             vault_id,
             parent_group_id: remote_root_id,
-            entry_id: None,
             title: "After Conflict Split".into(),
             username: "alice".into(),
             password: "after-split-password".into(),
@@ -636,7 +637,7 @@ fn successful_conflict_split_preserves_local_then_adopts_remote_head() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::Saved
+                && result.publication.status == PublicationStatusDto::Published
     ));
 }
 
@@ -683,7 +684,7 @@ fn failed_conflict_copy_preservation_keeps_local_until_retry_completes_split() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::ConflictCopy
+                && result.publication.status == PublicationStatusDto::ConflictSplit
                 && result.publication.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -710,7 +711,7 @@ fn failed_conflict_copy_preservation_keeps_local_until_retry_completes_split() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::ConflictCopy
+                && result.publication.status == PublicationStatusDto::ConflictSplit
     ));
     let items_before_retry = match harness.command(RuntimeCommand::ListOneDriveChildren {
         parent_item_id: None,
@@ -791,7 +792,6 @@ fn local_file_flow_publishes_through_the_runtime_protocol() {
     let created = match harness.command(RuntimeCommand::CreateEntry {
         vault_id: vault_id.clone(),
         parent_group_id: root_id,
-        entry_id: None,
         title: "Local Provider entry".into(),
         username: "alice".into(),
         password: "secret".into(),
@@ -801,7 +801,7 @@ fn local_file_flow_publishes_through_the_runtime_protocol() {
     }) {
         RuntimeResponse::EntryMutationResult(result) => {
             assert_eq!(result.commit, CommitStatusDto::Committed);
-            assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+            assert_eq!(result.publication.status, PublicationStatusDto::Published);
             result.entry.expect("created local entry detail")
         }
         _ => panic!("expected committed local entry mutation"),
@@ -818,6 +818,107 @@ fn local_file_flow_publishes_through_the_runtime_protocol() {
             .entries
             .iter()
             .any(|entry| entry.id.to_string() == created.id)
+    );
+}
+
+#[test]
+fn local_file_stale_revision_reconciles_disjoint_changes_before_conflict_split() {
+    let core = KeepassCore::new();
+    let (base_bytes, base_entry_id) = vault_with_entry_bytes();
+    let directory = tempfile::tempdir().expect("temporary local Provider directory");
+    let path = directory.path().join("local-stale-revision.kdbx");
+    std::fs::write(&path, base_bytes).expect("write Local File Base");
+
+    let mut local = RuntimeProtocolHarness::resident();
+    local.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec!["runtime-core".into(), "resident-app".into()],
+    });
+    let local_vault_id = match local.command(RuntimeCommand::OpenLocalVault {
+        path: path.to_string_lossy().into_owned(),
+    }) {
+        RuntimeResponse::VaultOpened(handle) => handle.vault_id,
+        other => panic!("expected Local Working Copy, got {other:?}"),
+    };
+    local.command(RuntimeCommand::UnlockWithPassword {
+        vault_id: local_vault_id.clone(),
+        password: "demo-password".into(),
+    });
+
+    let mut remote_writer = RuntimeProtocolHarness::resident();
+    remote_writer.command(RuntimeCommand::Handshake {
+        protocol_version: PROTOCOL_VERSION,
+        capabilities: vec!["runtime-core".into(), "resident-app".into()],
+    });
+    let remote_vault_id = match remote_writer.command(RuntimeCommand::OpenLocalVault {
+        path: path.to_string_lossy().into_owned(),
+    }) {
+        RuntimeResponse::VaultOpened(handle) => handle.vault_id,
+        other => panic!("expected second Local Working Copy, got {other:?}"),
+    };
+    remote_writer.command(RuntimeCommand::UnlockWithPassword {
+        vault_id: remote_vault_id.clone(),
+        password: "demo-password".into(),
+    });
+    let root_id = match remote_writer.command(RuntimeCommand::ListGroups {
+        vault_id: remote_vault_id.clone(),
+    }) {
+        RuntimeResponse::GroupTree(groups) => groups.root.id,
+        other => panic!("expected group tree, got {other:?}"),
+    };
+    let remote_entry_id = match remote_writer.command(RuntimeCommand::CreateEntry {
+        vault_id: remote_vault_id,
+        parent_group_id: root_id,
+        title: "Remote account".into(),
+        username: "remote-user".into(),
+        password: "remote-password".into(),
+        url: "https://remote.example".into(),
+        notes: String::new().into(),
+        totp_uri: None,
+    }) {
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.publication.status, PublicationStatusDto::Published);
+            result.entry.expect("remote Entry").id
+        }
+        other => panic!("expected committed remote Entry, got {other:?}"),
+    };
+
+    let local_result = local.command(RuntimeCommand::UpdateEntryFields {
+        vault_id: local_vault_id,
+        entry_id: base_entry_id.clone(),
+        title: "Local account".into(),
+        username: "base-user".into(),
+        password: "base-password".into(),
+        url: "https://base.example".into(),
+        notes: "local disjoint edit".into(),
+        totp_uri: None,
+        custom_fields: Vec::new(),
+    });
+    match local_result {
+        RuntimeResponse::EntryMutationResult(result) => {
+            assert_eq!(result.commit, CommitStatusDto::Committed);
+            assert_eq!(result.publication.status, PublicationStatusDto::Reconciled);
+            assert_eq!(result.publication.conflict_copy_path, None);
+        }
+        other => panic!("expected reconciled Local Commit, got {other:?}"),
+    }
+
+    let published = core
+        .load_database(
+            &std::fs::read(path).expect("read reconciled Local File"),
+            &key(),
+        )
+        .expect("decode reconciled Local File")
+        .vault;
+    assert_eq!(
+        core.project_entry_detail(&published, &base_entry_id)
+            .expect("locally edited Entry")
+            .title,
+        "Local account"
+    );
+    assert!(
+        core.find_entry_view_by_id(&published, &remote_entry_id)
+            .is_some_and(|entry| entry.title == "Remote account")
     );
 }
 
@@ -856,7 +957,6 @@ fn resident_entry_commit_can_finish_while_publication_is_pending() {
     let created = match harness.command(RuntimeCommand::CreateEntry {
         vault_id: vault_id.clone(),
         parent_group_id: root_id,
-        entry_id: None,
         title: "Offline account".into(),
         username: "alice".into(),
         password: "first-password".into(),
@@ -866,7 +966,7 @@ fn resident_entry_commit_can_finish_while_publication_is_pending() {
     }) {
         RuntimeResponse::EntryMutationResult(result) => {
             assert_eq!(result.commit, CommitStatusDto::Committed);
-            assert_eq!(result.publication.status, SaveVaultStatusDto::SavedToCache);
+            assert_eq!(result.publication.status, PublicationStatusDto::Pending);
             result.entry.expect("pending committed entry")
         }
         _ => panic!("expected pending committed entry mutation"),
@@ -936,7 +1036,6 @@ fn pending_publication_survives_lock_restart_later_commit_and_retry() {
     let entry_id = match harness.command(RuntimeCommand::CreateEntry {
         vault_id: vault_id.clone(),
         parent_group_id: root_id,
-        entry_id: None,
         title: "Offline account".into(),
         username: "alice".into(),
         password: "first-password".into(),
@@ -946,7 +1045,7 @@ fn pending_publication_survives_lock_restart_later_commit_and_retry() {
     }) {
         RuntimeResponse::EntryMutationResult(result) => {
             assert_eq!(result.commit, CommitStatusDto::Committed);
-            assert_eq!(result.publication.status, SaveVaultStatusDto::SavedToCache);
+            assert_eq!(result.publication.status, PublicationStatusDto::Pending);
             result.entry.expect("committed offline entry").id
         }
         other => panic!("expected pending entry mutation, got {other:?}"),
@@ -1041,7 +1140,7 @@ fn pending_publication_survives_lock_restart_later_commit_and_retry() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::SavedToCache
+                && result.publication.status == PublicationStatusDto::Pending
     ));
     assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
 
@@ -1111,7 +1210,7 @@ fn entry_adjacent_protocol_intents_commit_and_publish_without_follow_up_save() {
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     assert!(detail.totp.is_none());
 
@@ -1123,7 +1222,7 @@ fn entry_adjacent_protocol_intents_commit_and_publish_without_follow_up_save() {
             data_base64: "aGVsbG8=".into(),
             protect_in_memory: true,
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     assert!(
         detail
@@ -1148,7 +1247,7 @@ fn entry_adjacent_protocol_intents_commit_and_publish_without_follow_up_save() {
                 protected: true,
             }],
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     assert!(detail.custom_fields.iter().any(|field| {
         field.key == "Environment" && field.value == "production" && field.protected
@@ -1159,7 +1258,7 @@ fn entry_adjacent_protocol_intents_commit_and_publish_without_follow_up_save() {
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     assert!(detail.passkey.is_none());
     assert_eq!(harness.provider_write_count(), writes_before + 4);
@@ -1228,7 +1327,7 @@ fn entry_adjacent_pending_commits_survive_restart_and_publish_in_receive_order()
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
     harness.make_next_publication_outcome_unknown_and_readback_unavailable();
     expect_adjacent_commit(
@@ -1239,7 +1338,7 @@ fn entry_adjacent_pending_commits_survive_restart_and_publish_in_receive_order()
             data_base64: "cGVuZGluZw==".into(),
             protect_in_memory: true,
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
     harness.make_next_publication_outcome_unknown_and_readback_unavailable();
     expect_adjacent_commit(
@@ -1258,7 +1357,7 @@ fn entry_adjacent_pending_commits_survive_restart_and_publish_in_receive_order()
                 protected: true,
             }],
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
     harness.make_next_publication_outcome_unknown_and_readback_unavailable();
     expect_adjacent_commit(
@@ -1266,7 +1365,7 @@ fn entry_adjacent_pending_commits_survive_restart_and_publish_in_receive_order()
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
     assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
 
@@ -1428,7 +1527,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             parent_group_id: root_id.clone(),
             title: "Working Parent".into(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     )
     .expect("create parent group returns its id");
     let group_id = expect_vault_commit(
@@ -1437,7 +1536,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             parent_group_id: root_id.clone(),
             title: "Working".into(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     )
     .expect("create child group returns its id");
     expect_vault_commit(
@@ -1446,7 +1545,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             group_id: group_id.clone(),
             title: "Archive".into(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_vault_commit(
         harness.command(RuntimeCommand::MoveGroup {
@@ -1454,7 +1553,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             group_id: group_id.clone(),
             target_parent_group_id: parent_group_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_vault_commit(
         harness.command(RuntimeCommand::MoveEntryToGroup {
@@ -1462,7 +1561,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             entry_id: entry_id.clone(),
             target_group_id: group_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_vault_commit(
         harness.command(RuntimeCommand::RestoreEntryHistory {
@@ -1470,14 +1569,14 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             entry_id: entry_id.clone(),
             history_index: 0,
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_vault_commit(
         harness.command(RuntimeCommand::ClearEntryHistory {
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_history_len(&mut harness, &vault_id, &entry_id, 0);
     expect_vault_commit(
@@ -1485,7 +1584,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_history_len(&mut harness, &vault_id, &entry_id, 0);
     expect_vault_commit(
@@ -1494,7 +1593,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             entry_id: entry_id.clone(),
             target_group_id: Some(root_id.clone()),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_history_len(&mut harness, &vault_id, &entry_id, 0);
     expect_vault_commit(
@@ -1502,7 +1601,7 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
             vault_id: vault_id.clone(),
             group_id: parent_group_id.clone(),
         }),
-        SaveVaultStatusDto::Saved,
+        PublicationStatusDto::Published,
     );
     expect_history_len(&mut harness, &vault_id, &entry_id, 0);
 
@@ -1539,8 +1638,8 @@ fn remaining_kdbx_mutations_commit_and_publish_through_one_protocol_intent() {
     };
     assert_eq!(settings_result.commit, CommitStatusDto::Committed);
     assert_eq!(
-        settings_result.save_result.status,
-        SaveVaultStatusDto::Saved
+        settings_result.publication.status,
+        PublicationStatusDto::Published
     );
     expect_history_len(&mut harness, &vault_id, &entry_id, 0);
     assert_eq!(harness.provider_write_count(), writes_before + 11);
@@ -1618,7 +1717,7 @@ fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
             parent_group_id: root_id,
             title: "Pending Group".into(),
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     )
     .expect("pending group creation returns its id");
 
@@ -1629,7 +1728,7 @@ fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
             entry_id: entry_id.clone(),
             target_group_id: group_id.clone(),
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
 
     harness.make_next_publication_outcome_unknown_and_readback_unavailable();
@@ -1639,7 +1738,7 @@ fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
             entry_id: entry_id.clone(),
             history_index: 0,
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
 
     harness.make_next_publication_outcome_unknown_and_readback_unavailable();
@@ -1648,7 +1747,7 @@ fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
             vault_id: vault_id.clone(),
             entry_id: entry_id.clone(),
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
 
     harness.make_next_publication_outcome_unknown_and_readback_unavailable();
@@ -1658,7 +1757,7 @@ fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
             entry_id: entry_id.clone(),
             target_group_id: Some(group_id.clone()),
         }),
-        SaveVaultStatusDto::SavedToCache,
+        PublicationStatusDto::Pending,
     );
 
     let current_settings = match harness.command(RuntimeCommand::GetDatabaseSettings {
@@ -1694,8 +1793,8 @@ fn remaining_kdbx_pending_commits_survive_restart_as_one_working_copy() {
     };
     assert_eq!(settings_result.commit, CommitStatusDto::Committed);
     assert_eq!(
-        settings_result.save_result.status,
-        SaveVaultStatusDto::SavedToCache
+        settings_result.publication.status,
+        PublicationStatusDto::Pending
     );
     assert_eq!(harness.provider_snapshot().bytes, remote_before.bytes);
 
@@ -1877,7 +1976,7 @@ fn remaining_kdbx_mutation_reconciles_repeated_stale_heads_from_fixed_base() {
             parent_group_id: root_id,
             title: "Local reconciled group".into(),
         }),
-        SaveVaultStatusDto::Merged,
+        PublicationStatusDto::Reconciled,
     )
     .expect("reconciled group creation returns its id");
 
@@ -1982,7 +2081,7 @@ fn browser_login_mutations_commit_once_and_report_pending_publication() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::Saved
+                && result.publication.status == PublicationStatusDto::Published
                 && result.entry.is_none()
     ));
     let entry_id = match harness.command(RuntimeCommand::FindFillCandidates {
@@ -2018,7 +2117,7 @@ fn browser_login_mutations_commit_once_and_report_pending_publication() {
         }),
         RuntimeResponse::EntryMutationResult(result)
             if result.commit == CommitStatusDto::Committed
-                && result.publication.status == SaveVaultStatusDto::SavedToCache
+                && result.publication.status == PublicationStatusDto::Pending
                 && result.entry.is_none()
     ));
     assert!(matches!(

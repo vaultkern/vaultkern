@@ -1,4 +1,40 @@
-use std::fmt;
+use std::fmt::{self, Write as _};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// Format-neutral identity of observed Provider content.
+///
+/// This is distinct from [`ProviderRevision`]: identity detects equivalent
+/// bytes across snapshots, while the opaque revision is the only token valid
+/// for conditional Publication.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentIdentity {
+    pub content_sha256: String,
+    pub size_bytes: u64,
+    /// Provider-defined hint that helps compare observations with matching size.
+    ///
+    /// The serialized name is retained for compatibility with existing cache
+    /// manifests, where this value originated as a Local File modification
+    /// timestamp. Other Providers may use a generation-derived marker.
+    #[serde(rename = "modified_at", alias = "observation_marker")]
+    pub observation_marker: Option<u64>,
+}
+
+impl ContentIdentity {
+    pub(crate) fn for_bytes(bytes: &[u8], observation_marker: Option<u64>) -> Self {
+        let digest = Sha256::digest(bytes);
+        let mut content_sha256 = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut content_sha256, "{byte:02x}").expect("writing to a String cannot fail");
+        }
+        Self {
+            content_sha256,
+            size_bytes: bytes.len() as u64,
+            observation_marker,
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ProviderRevision(Vec<u8>);
@@ -22,6 +58,8 @@ impl fmt::Debug for ProviderRevision {
 pub struct ProviderSnapshot {
     pub bytes: Vec<u8>,
     pub revision: ProviderRevision,
+    pub identity: ContentIdentity,
+    pub cache_validation_token: Option<String>,
 }
 
 impl fmt::Debug for ProviderSnapshot {
@@ -30,12 +68,19 @@ impl fmt::Debug for ProviderSnapshot {
             .debug_struct("ProviderSnapshot")
             .field("bytes", &"[OPAQUE]")
             .field("revision", &self.revision)
+            .field("identity", &self.identity)
+            .field(
+                "has_cache_validation_token",
+                &self.cache_validation_token.is_some(),
+            )
             .finish()
     }
 }
 
 pub struct ProviderCommit {
     pub revision: ProviderRevision,
+    pub identity: ContentIdentity,
+    pub cache_validation_token: Option<String>,
     pub warnings: Vec<String>,
 }
 
@@ -44,6 +89,11 @@ impl fmt::Debug for ProviderCommit {
         formatter
             .debug_struct("ProviderCommit")
             .field("revision", &self.revision)
+            .field("identity", &self.identity)
+            .field(
+                "has_cache_validation_token",
+                &self.cache_validation_token.is_some(),
+            )
             .field("warning_count", &self.warnings.len())
             .finish()
     }

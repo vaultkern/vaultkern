@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn native_message_loop_serializes_decode_errors_without_exiting_the_host() {
         let invalid_command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": "future-command",
             "command": { "type": "future_runtime_command" }
         });
@@ -709,7 +709,7 @@ mod tests {
     fn malformed_native_messages_extract_only_a_bounded_request_id() {
         let secret = "malformed-command-secret-must-not-be-retained";
         let invalid_command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": "request-1",
             "command": {
                 "type": "future_runtime_command",
@@ -725,7 +725,7 @@ mod tests {
 
         let oversized_request_id = "r".repeat(super::MAX_NATIVE_REQUEST_ID_BYTES + 1);
         let invalid_command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": oversized_request_id,
             "command": {
                 "type": "future_runtime_command",
@@ -739,7 +739,7 @@ mod tests {
     #[test]
     fn native_message_loop_echoes_request_id_in_response() {
         let command = serde_json::json!({
-            "version": 2,
+            "version": 3,
             "requestId": "request-1",
             "command": { "type": "get_session_state" }
         });

@@ -4,15 +4,17 @@
 //! The authoritative vault session and all Working Copy, Commit, Publication,
 //! reconciliation, and Conflict Split behavior live behind [`VaultCore`].
 
-use std::ops::{Deref, DerefMut};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::Result;
 use vaultkern_runtime_protocol::{RuntimeCommand, RuntimeResponse};
 
+use crate::protocol_session;
 use crate::providers::biometric::BiometricProvider;
 use crate::providers::onedrive_token_store::OneDriveRefreshTokenStore;
 use crate::providers::secure_storage::SecureStorageProvider;
+use crate::runtime_dispatch;
 use crate::vault_core::VaultCore;
 
 pub use crate::vault_core::{
@@ -23,7 +25,7 @@ pub use crate::vault_core::{
 
 /// Composition root and Runtime Protocol dispatcher for the resident.
 pub struct Runtime {
-    vault_core: VaultCore,
+    pub(crate) vault_core: VaultCore,
 }
 
 impl Runtime {
@@ -136,41 +138,53 @@ impl Runtime {
     }
 
     pub fn handle_browser_command(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
-        self.vault_core.handle_browser_command(command)
+        let cancelled = AtomicBool::new(false);
+        self.handle_browser_command_cancellable(command, &cancelled)
     }
 
     pub fn handle_browser_command_cancellable(
         &mut self,
         command: RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
+        cancelled: &AtomicBool,
     ) -> Result<RuntimeResponse> {
-        self.vault_core
-            .handle_browser_command_cancellable(command, cancelled)
+        self.handle_browser_command_cancellable_with_quick_unlock_handoff(command, cancelled)
+            .map(|(response, _)| response)
     }
 
     pub fn handle_browser_command_cancellable_with_quick_unlock_handoff(
         &mut self,
         command: RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
+        cancelled: &AtomicBool,
     ) -> Result<(
         RuntimeResponse,
         Option<QuickUnlockReconciliationCredentials>,
     )> {
-        self.vault_core
-            .handle_browser_command_cancellable_with_quick_unlock_handoff(command, cancelled)
+        self.authorize_browser_command_only(&command, cancelled)?;
+        self.dispatch_with_quick_unlock_handoff_cancellable(command, cancelled)
     }
 
     pub fn authorize_browser_command_only(
         &mut self,
         command: &RuntimeCommand,
-        cancelled: &std::sync::atomic::AtomicBool,
+        cancelled: &AtomicBool,
     ) -> Result<()> {
-        self.vault_core
-            .authorize_browser_command_only(command, cancelled)
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
+        }
+        if !protocol_session::browser_command_allowed(command) {
+            anyhow::bail!("browser command forbidden");
+        }
+        if cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("browser request was cancelled");
+        }
+        Ok(())
     }
 
     pub fn handle(&mut self, command: RuntimeCommand) -> Result<RuntimeResponse> {
-        self.vault_core.handle(command)
+        self.vault_core.begin_protocol_command();
+        let response = runtime_dispatch::dispatch(&mut self.vault_core, command);
+        self.vault_core.finish_protocol_command();
+        response
     }
 
     pub fn handle_with_quick_unlock_handoff(
@@ -180,26 +194,48 @@ impl Runtime {
         RuntimeResponse,
         Option<QuickUnlockReconciliationCredentials>,
     )> {
-        self.vault_core.handle_with_quick_unlock_handoff(command)
+        self.vault_core.begin_protocol_command();
+        let response = runtime_dispatch::dispatch(&mut self.vault_core, command);
+        let credentials = self.vault_core.take_quick_unlock_handoff();
+        response.map(|response| (response, credentials))
+    }
+
+    fn dispatch_with_quick_unlock_handoff_cancellable(
+        &mut self,
+        command: RuntimeCommand,
+        cancelled: &AtomicBool,
+    ) -> Result<(
+        RuntimeResponse,
+        Option<QuickUnlockReconciliationCredentials>,
+    )> {
+        self.vault_core.begin_protocol_command();
+        let response = match command {
+            RuntimeCommand::VerifyPasskeyUser {
+                ceremony_token,
+                expected_phase,
+                vault_id,
+                method,
+                password,
+            } => self
+                .vault_core
+                .verify_passkey_user_cancellable(
+                    &ceremony_token,
+                    expected_phase,
+                    &vault_id,
+                    method,
+                    password.as_deref(),
+                    cancelled,
+                )
+                .map(RuntimeResponse::PasskeyUserVerified),
+            command => runtime_dispatch::dispatch(&mut self.vault_core, command),
+        };
+        let credentials = self.vault_core.take_quick_unlock_handoff();
+        response.map(|response| (response, credentials))
     }
 }
 
 impl Default for Runtime {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl Deref for Runtime {
-    type Target = VaultCore;
-
-    fn deref(&self) -> &Self::Target {
-        &self.vault_core
-    }
-}
-
-impl DerefMut for Runtime {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.vault_core
     }
 }

@@ -8,20 +8,20 @@ use vaultkern_runtime_protocol::{
     CommitStatusDto, DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto,
     DatabaseHistorySettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
     DatabaseRecycleBinSettingsDto, DatabaseSettingsUpdateDto, EntryDetailDto,
-    OptionalSettingUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultResultDto,
-    SaveVaultStatusDto,
+    OptionalSettingUpdateDto, PublicationResultDto, PublicationStatusDto, RuntimeCommand,
+    RuntimeResponse,
 };
 
 fn saved_response() -> RuntimeResponse {
-    RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-        status: SaveVaultStatusDto::Saved,
-        merge_summary: None,
+    RuntimeResponse::PublicationResult(PublicationResultDto {
+        status: PublicationStatusDto::Published,
+        reconciliation_summary: None,
         conflict_copy_path: None,
     })
 }
 
 fn retry_publication(runtime: &mut Runtime, vault_id: &str) -> anyhow::Result<RuntimeResponse> {
-    runtime.handle(RuntimeCommand::SaveVault {
+    runtime.handle(RuntimeCommand::RetryVaultPublication {
         vault_id: vault_id.to_owned(),
     })
 }
@@ -67,7 +67,7 @@ fn committed_entry(response: RuntimeResponse) -> EntryDetailDto {
         panic!("expected committed entry mutation, got {response:?}");
     };
     assert_eq!(result.commit, CommitStatusDto::Committed);
-    assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+    assert_eq!(result.publication.status, PublicationStatusDto::Published);
     result.entry.expect("entry mutation detail")
 }
 
@@ -348,7 +348,7 @@ fn runtime_browser_v0_loop_finds_edits_saves_and_reopens_local_fill_candidate() 
         .expect("update exact login");
     assert_eq!(
         runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: handle.vault_id.clone(),
             })
             .expect("save local vault"),
@@ -444,7 +444,7 @@ fn runtime_saves_key_file_unlocked_vault_with_same_credentials() {
 
     assert_eq!(
         runtime
-            .handle(RuntimeCommand::SaveVault {
+            .handle(RuntimeCommand::RetryVaultPublication {
                 vault_id: vault.vault_id.clone(),
             })
             .unwrap(),
@@ -480,7 +480,7 @@ fn runtime_reports_saved_when_source_has_not_changed() {
         .unwrap();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault.vault_id.clone(),
         })
         .unwrap();
@@ -932,16 +932,16 @@ fn runtime_writes_conflict_copy_without_overwriting_external_entries() {
     std::fs::write(&path, external_bytes).unwrap();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault.vault_id.clone(),
         })
         .unwrap();
 
-    let RuntimeResponse::SaveVaultResult(result) = response else {
+    let RuntimeResponse::PublicationResult(result) = response else {
         panic!("expected save vault result, got {response:?}");
     };
-    assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
-    assert_eq!(result.merge_summary, None);
+    assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
+    assert_eq!(result.reconciliation_summary, None);
     let conflict_path = result
         .conflict_copy_path
         .expect("conflict copy path must be returned");
@@ -1053,14 +1053,14 @@ fn runtime_conflict_copy_keeps_local_mutation_while_source_stays_external() {
     std::fs::write(&path, external_bytes).unwrap();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault.vault_id.clone(),
         })
         .unwrap();
-    let RuntimeResponse::SaveVaultResult(result) = response else {
+    let RuntimeResponse::PublicationResult(result) = response else {
         panic!("expected save vault result, got {response:?}");
     };
-    assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+    assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
     let conflict_path = result
         .conflict_copy_path
         .expect("conflict copy path must be returned");
@@ -1109,7 +1109,6 @@ fn runtime_persists_created_entry_after_save_roundtrip() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: vault.vault_id.clone(),
             parent_group_id: root_id,
-            entry_id: None,
             title: "Created".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -1155,7 +1154,6 @@ fn runtime_persists_updated_and_deleted_entries_after_save_roundtrip() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: vault.vault_id.clone(),
             parent_group_id: root_id,
-            entry_id: None,
             title: "Created".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -1218,7 +1216,7 @@ fn runtime_persists_updated_and_deleted_entries_after_save_roundtrip() {
         panic!("expected committed deletion, got {deleted:?}");
     };
     assert_eq!(deleted.commit, CommitStatusDto::Committed);
-    assert_eq!(deleted.publication.status, SaveVaultStatusDto::Saved);
+    assert_eq!(deleted.publication.status, PublicationStatusDto::Published);
     assert!(deleted.entry.is_none());
 
     let mut final_runtime = Runtime::for_tests();

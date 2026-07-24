@@ -13,7 +13,7 @@ use crate::providers::durable_file::{
     path_file_identity, publish_temp, remove_and_sync_absence, remove_if_exists, sha256_hex,
     sync_directory, sync_parent, sync_published_target, unique_sibling_path, write_verified_temp,
 };
-use crate::providers::local_file::VaultSourceFingerprint;
+use crate::providers::provider::ContentIdentity;
 use crate::state_paths::{extension_state_dir, runtime_state_dir};
 use crate::sync::durable_replace;
 
@@ -37,7 +37,7 @@ impl RemoteCacheKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteVaultCacheEntry {
     pub bytes: Vec<u8>,
-    pub fingerprint: VaultSourceFingerprint,
+    pub fingerprint: ContentIdentity,
     pub display_name: String,
     pub account_label: String,
     pub cached_at: i64,
@@ -49,11 +49,11 @@ pub enum RemoteVaultCacheReadStatus {
     Missing,
     Current {
         entry: RemoteVaultCacheEntry,
-        source_etag: Option<String>,
+        validation_token: Option<String>,
     },
     Degraded {
         entry: RemoteVaultCacheEntry,
-        source_etag: Option<String>,
+        validation_token: Option<String>,
         warning: String,
     },
     Corrupt {
@@ -132,7 +132,7 @@ struct RemoteVaultCacheMetadata {
     remote_id: String,
     display_name: String,
     account_label: String,
-    fingerprint: VaultSourceFingerprint,
+    fingerprint: ContentIdentity,
     cached_at: i64,
     #[serde(default)]
     pending_sync: bool,
@@ -149,7 +149,8 @@ struct RemoteVaultCacheManifestV2 {
     generation: String,
     content_sha256: String,
     size_bytes: u64,
-    source_etag: Option<String>,
+    #[serde(rename = "sourceEtag")]
+    validation_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_revision: Option<u64>,
     source_modified_at: Option<u64>,
@@ -168,7 +169,8 @@ struct RemoteVaultGeneration {
     generation: String,
     content_sha256: String,
     size_bytes: u64,
-    source_etag: Option<String>,
+    #[serde(rename = "sourceEtag")]
+    validation_token: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     source_revision: Option<u64>,
     source_modified_at: Option<u64>,
@@ -242,7 +244,7 @@ enum GenericPendingWriteMode {
 #[derive(Debug, Clone, Copy)]
 struct GenericPendingWriteProof<'a> {
     mode: GenericPendingWriteMode,
-    expected_fingerprint: &'a VaultSourceFingerprint,
+    expected_fingerprint: &'a ContentIdentity,
     kind: Option<GenericPendingKind>,
 }
 
@@ -358,11 +360,11 @@ impl RemoteVaultCache {
         Ok(match self.read_authenticated_locked(key) {
             AuthenticatedCacheRead::Missing => RemoteVaultCacheReadStatus::Missing,
             AuthenticatedCacheRead::Current(cached) => RemoteVaultCacheReadStatus::Current {
-                source_etag: cached.generation.source_etag.clone(),
+                validation_token: cached.generation.validation_token.clone(),
                 entry: cached.entry,
             },
             AuthenticatedCacheRead::Degraded(cached) => RemoteVaultCacheReadStatus::Degraded {
-                source_etag: cached.generation.source_etag.clone(),
+                validation_token: cached.generation.validation_token.clone(),
                 entry: cached.entry,
                 warning:
                     "current cache generation failed authentication; using previous generation"
@@ -375,20 +377,20 @@ impl RemoteVaultCache {
     }
 
     pub fn write(&self, key: &RemoteCacheKey, entry: RemoteVaultCacheEntry) -> Result<()> {
-        self.write_with_source_etag(key, entry, None)
+        self.write_with_validation_token(key, entry, None)
     }
 
-    pub fn write_with_source_etag(
+    pub fn write_with_validation_token(
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
-        source_etag: Option<&str>,
+        validation_token: Option<&str>,
     ) -> Result<()> {
         require_durable_cache_publish(self.write_with_source_context(
             key,
             entry,
             None,
-            source_etag,
+            validation_token,
             None,
             None,
         )?)
@@ -398,7 +400,7 @@ impl RemoteVaultCache {
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
-        expected_current: &VaultSourceFingerprint,
+        expected_current: &ContentIdentity,
         base: Option<RemoteVaultCacheEntry>,
     ) -> Result<()> {
         self.write_resident_pending(
@@ -414,7 +416,7 @@ impl RemoteVaultCache {
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
-        expected_current: &VaultSourceFingerprint,
+        expected_current: &ContentIdentity,
     ) -> Result<()> {
         self.write_resident_pending(
             key,
@@ -429,7 +431,7 @@ impl RemoteVaultCache {
         &self,
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
-        expected_current: &VaultSourceFingerprint,
+        expected_current: &ContentIdentity,
         kind: GenericPendingKind,
         base: Option<RemoteVaultCacheEntry>,
     ) -> Result<()> {
@@ -453,7 +455,7 @@ impl RemoteVaultCache {
     pub(crate) fn complete_generic_pending(
         &self,
         key: &RemoteCacheKey,
-        expected_pending: &VaultSourceFingerprint,
+        expected_pending: &ContentIdentity,
         entry: RemoteVaultCacheEntry,
     ) -> Result<PendingRemoteCacheCompletion> {
         if entry.pending_sync {
@@ -483,7 +485,7 @@ impl RemoteVaultCache {
     pub(crate) fn complete_generic_pending_while<T>(
         &self,
         key: &RemoteCacheKey,
-        expected_pending: &VaultSourceFingerprint,
+        expected_pending: &ContentIdentity,
         source_write: impl FnOnce() -> Result<(T, RemoteVaultCacheEntry)>,
     ) -> Result<(T, PendingRemoteCacheCompletion)> {
         let paths = self.paths(key);
@@ -529,7 +531,7 @@ impl RemoteVaultCache {
     pub(crate) fn generic_pending_kind(
         &self,
         key: &RemoteCacheKey,
-        expected_pending: &VaultSourceFingerprint,
+        expected_pending: &ContentIdentity,
     ) -> Result<GenericPendingKind> {
         let paths = self.paths(key);
         create_dir_all_durable(&self.root).with_context(|| {
@@ -577,7 +579,7 @@ impl RemoteVaultCache {
     pub(crate) fn generic_pending_base(
         &self,
         key: &RemoteCacheKey,
-        expected_pending: &VaultSourceFingerprint,
+        expected_pending: &ContentIdentity,
     ) -> Result<Option<RemoteVaultCacheEntry>> {
         let paths = self.paths(key);
         create_dir_all_durable(&self.root).with_context(|| {
@@ -647,7 +649,7 @@ impl RemoteVaultCache {
     fn require_generic_pending_locked(
         &self,
         key: &RemoteCacheKey,
-        expected_pending: &VaultSourceFingerprint,
+        expected_pending: &ContentIdentity,
     ) -> Result<()> {
         let AuthenticatedCacheRead::Current(current) = self.read_authenticated_locked(key) else {
             return Err(PendingRemoteCacheConflict::new(
@@ -674,7 +676,7 @@ impl RemoteVaultCache {
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
         base: Option<RemoteVaultCacheEntry>,
-        source_etag: Option<&str>,
+        validation_token: Option<&str>,
         source_revision: Option<u64>,
         generic_proof: Option<GenericPendingWriteProof<'_>>,
     ) -> Result<CacheManifestPublishOutcome> {
@@ -696,7 +698,7 @@ impl RemoteVaultCache {
             key,
             entry,
             base,
-            source_etag,
+            validation_token,
             source_revision,
             generic_proof,
         )
@@ -707,7 +709,7 @@ impl RemoteVaultCache {
         key: &RemoteCacheKey,
         entry: RemoteVaultCacheEntry,
         base: Option<RemoteVaultCacheEntry>,
-        source_etag: Option<&str>,
+        validation_token: Option<&str>,
         source_revision: Option<u64>,
         generic_proof: Option<GenericPendingWriteProof<'_>>,
     ) -> Result<CacheManifestPublishOutcome> {
@@ -893,9 +895,9 @@ impl RemoteVaultCache {
                     generation,
                     content_sha256,
                     size_bytes: base.bytes.len() as u64,
-                    source_etag: None,
+                    validation_token: None,
                     source_revision: None,
-                    source_modified_at: base.fingerprint.modified_at,
+                    source_modified_at: base.fingerprint.observation_marker,
                     display_name: base.display_name,
                     account_label: base.account_label,
                     cached_at: base.cached_at,
@@ -917,9 +919,9 @@ impl RemoteVaultCache {
             generation,
             content_sha256: actual_sha256,
             size_bytes: entry.bytes.len() as u64,
-            source_etag: source_etag.map(str::to_owned),
+            validation_token: validation_token.map(str::to_owned),
             source_revision,
-            source_modified_at: entry.fingerprint.modified_at,
+            source_modified_at: entry.fingerprint.observation_marker,
             cached_at: entry.cached_at,
             pending_sync: entry.pending_sync,
             pending_kind: Some(if entry.pending_sync {
@@ -1284,9 +1286,9 @@ impl RemoteVaultCache {
                         .into_owned(),
                     content_sha256: metadata.fingerprint.content_sha256.clone(),
                     size_bytes: metadata.fingerprint.size_bytes,
-                    source_etag: None,
+                    validation_token: None,
                     source_revision: None,
-                    source_modified_at: metadata.fingerprint.modified_at,
+                    source_modified_at: metadata.fingerprint.observation_marker,
                     display_name: metadata.display_name.clone(),
                     account_label: metadata.account_label.clone(),
                     cached_at: metadata.cached_at,
@@ -1324,10 +1326,10 @@ impl RemoteVaultCache {
         }
         let bytes = read_regular_file(&self.root.join(&generation.generation))
             .map_err(|error| format!("generation is missing or unreadable: {error}"))?;
-        let fingerprint = VaultSourceFingerprint {
+        let fingerprint = ContentIdentity {
             content_sha256: generation.content_sha256.clone(),
             size_bytes: generation.size_bytes,
-            modified_at: generation.source_modified_at,
+            observation_marker: generation.source_modified_at,
         };
         if !fingerprint_authenticates(&fingerprint, &bytes) {
             return Err("generation bytes do not match manifest hash and size".to_owned());
@@ -1571,7 +1573,7 @@ impl RemoteVaultCacheManifestV2 {
             generation: self.generation.clone(),
             content_sha256: self.content_sha256.clone(),
             size_bytes: self.size_bytes,
-            source_etag: self.source_etag.clone(),
+            validation_token: self.validation_token.clone(),
             source_revision: self.source_revision,
             source_modified_at: self.source_modified_at,
             display_name: self.display_name.clone(),
@@ -1583,11 +1585,11 @@ impl RemoteVaultCacheManifestV2 {
     }
 }
 
-fn fingerprint_authenticates(fingerprint: &VaultSourceFingerprint, bytes: &[u8]) -> bool {
+fn fingerprint_authenticates(fingerprint: &ContentIdentity, bytes: &[u8]) -> bool {
     fingerprint.size_bytes == bytes.len() as u64 && fingerprint.content_sha256 == sha256_hex(bytes)
 }
 
-fn same_content_fingerprint(left: &VaultSourceFingerprint, right: &VaultSourceFingerprint) -> bool {
+fn same_content_fingerprint(left: &ContentIdentity, right: &ContentIdentity) -> bool {
     left.size_bytes == right.size_bytes && left.content_sha256 == right.content_sha256
 }
 
@@ -1822,18 +1824,18 @@ mod tests {
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, sha256_hex,
     };
-    use crate::providers::local_file::VaultSourceFingerprint;
+    use crate::providers::provider::ContentIdentity;
     use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
     use std::sync::{Arc, Barrier};
 
-    fn fingerprint(bytes: &[u8], modified_at: u64) -> VaultSourceFingerprint {
-        VaultSourceFingerprint {
+    fn fingerprint(bytes: &[u8], observation_marker: u64) -> ContentIdentity {
+        ContentIdentity {
             content_sha256: sha256_hex(bytes),
             size_bytes: bytes.len() as u64,
-            modified_at: Some(modified_at),
+            observation_marker: Some(observation_marker),
         }
     }
 
@@ -2273,18 +2275,18 @@ mod tests {
     }
 
     #[test]
-    fn source_etag_is_preserved_in_v2_manifest_and_typed_read_status() {
+    fn validation_token_is_preserved_in_v2_manifest_and_typed_read_status() {
         let dir = tempfile::tempdir().unwrap();
         let cache = RemoteVaultCache::new_at(dir.path());
         cache
-            .write_with_source_etag(&key(), entry(b"kdbx", 42, false), Some("etag-42"))
+            .write_with_validation_token(&key(), entry(b"kdbx", 42, false), Some("etag-42"))
             .unwrap();
 
         assert_eq!(read_manifest(&cache)["sourceEtag"], "etag-42");
         assert!(matches!(
             cache.read_status(&key()).unwrap(),
             RemoteVaultCacheReadStatus::Current {
-                source_etag: Some(etag),
+                validation_token: Some(etag),
                 ..
             } if etag == "etag-42"
         ));

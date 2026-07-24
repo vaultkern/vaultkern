@@ -5,6 +5,8 @@
 //! into the public Runtime façade.
 
 const RUNTIME_SOURCE: &str = include_str!("../src/runtime.rs");
+const RUNTIME_API_SOURCE: &str = include_str!("../src/runtime_api.rs");
+const RUNTIME_DISPATCH_SOURCE: &str = include_str!("../src/runtime_dispatch.rs");
 const VAULT_CORE_SOURCE: &str = include_str!("../src/vault_core.rs");
 const PROVIDER_SOURCE: &str = include_str!("../src/providers/provider.rs");
 const PROVIDER_CATALOG_SOURCE: &str = include_str!("../src/providers/catalog.rs");
@@ -22,7 +24,17 @@ fn runtime_is_a_protocol_dispatch_and_composition_facade() {
         "Runtime must stay a small façade; vault behavior belongs to VaultCore"
     );
     assert!(RUNTIME_SOURCE.contains("vault_core: VaultCore"));
-    assert!(RUNTIME_SOURCE.contains("self.vault_core.handle(command)"));
+    assert!(RUNTIME_SOURCE.contains("runtime_dispatch::dispatch(&mut self.vault_core, command)"));
+    assert!(RUNTIME_DISPATCH_SOURCE.contains("pub(crate) fn dispatch("));
+    assert!(RUNTIME_DISPATCH_SOURCE.contains("match command"));
+    assert!(
+        RUNTIME_API_SOURCE.contains("impl Runtime"),
+        "platform APIs must cross an explicit Runtime port"
+    );
+    assert!(
+        !RUNTIME_SOURCE.contains("impl std::ops::Deref"),
+        "Runtime must not expose VaultCore through Deref"
+    );
 
     for leaked_behavior in [
         "fn save_onedrive_vault",
@@ -64,13 +76,17 @@ fn vault_core_owns_the_working_copy_lifecycle_behind_abstract_seams() {
     );
 
     let production_core = VAULT_CORE_SOURCE
-        .split_once("#[cfg(test)]")
+        .split_once("#[cfg(test)]\nmod tests")
         .map_or(VAULT_CORE_SOURCE, |(production, _)| production);
     for concrete_mechanic in [
         "LocalFileVaultSourceProvider",
         "OneDriveVaultSourceProvider",
         "OneDriveProvider",
+        "OneDriveRemoteState",
         "KdbxVaultCodec",
+        "KdbxError",
+        "SaveProfile",
+        "TransformedKey",
     ] {
         assert!(
             !production_core.contains(concrete_mechanic),
@@ -116,7 +132,7 @@ fn provider_and_codec_boundaries_cannot_learn_each_others_domain() {
 #[test]
 fn superseded_direct_save_entry_points_are_gone() {
     assert!(
-        !VAULT_CORE_SOURCE.contains("pub fn save_vault"),
+        !VAULT_CORE_SOURCE.contains("pub fn retry_vault_publication"),
         "VaultCore must expose Commit and Publication, not a legacy direct-save operation"
     );
     assert!(
@@ -124,7 +140,7 @@ fn superseded_direct_save_entry_points_are_gone() {
         "web clients must not retain a mutation-plus-save orchestration primitive"
     );
     assert!(
-        !UNIFFI_SOURCE.contains(".save_vault("),
+        !UNIFFI_SOURCE.contains(".retry_vault_publication("),
         "platform façades must dispatch the Runtime Protocol instead of bypassing it"
     );
 }

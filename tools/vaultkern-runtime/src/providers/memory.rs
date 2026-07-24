@@ -1,6 +1,6 @@
 use super::provider::{
-    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
-    ProviderSnapshot,
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
 };
 use std::sync::Mutex;
 
@@ -52,6 +52,8 @@ impl Provider for InMemoryProvider {
         Ok(ProviderSnapshot {
             bytes: state.bytes.clone(),
             revision: Self::revision(state.revision),
+            identity: ContentIdentity::for_bytes(&state.bytes, Some(state.revision)),
+            cache_validation_token: None,
         })
     }
 
@@ -70,6 +72,8 @@ impl Provider for InMemoryProvider {
         state.revision = state.revision.saturating_add(1);
         Ok(ProviderCommit {
             revision: Self::revision(state.revision),
+            identity: ContentIdentity::for_bytes(bytes, Some(state.revision)),
+            cache_validation_token: None,
             warnings: Vec::new(),
         })
     }

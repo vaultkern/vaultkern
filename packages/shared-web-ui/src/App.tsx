@@ -23,7 +23,7 @@ import type {
   OneDriveAuthStatus,
   OneDriveItem,
   ResidentAppRoute,
-  SaveVaultResult,
+  PublicationResult,
   SessionState,
   VaultSourceStatus,
   UnlockCredentials,
@@ -233,7 +233,7 @@ function isCommittedMutation<T>(
   return (
     typeof value === "object" &&
     value !== null &&
-    "saveResult" in value &&
+    "publication" in value &&
     "value" in value
   );
 }
@@ -858,21 +858,24 @@ export function App({
     resetEditorState();
   }
 
-  function handleSaveResult(vaultId: string, result: SaveVaultResult | void) {
+  function handlePublicationResult(
+    vaultId: string,
+    result: PublicationResult | void
+  ) {
     if (
       result &&
-      (result.status === "saved" ||
-        result.status === "merged" ||
-        result.status === "saved_to_cache")
+      (result.status === "published" ||
+        result.status === "reconciled" ||
+        result.status === "pending")
     ) {
       void reconcileSavedSettings("vault-save");
     }
-    if (result?.status === "merged") {
+    if (result?.status === "reconciled") {
       setSaveTip(
         translate(extensionSettings.language, "Vault changed on disk. Merged and saved.")
       );
       setSourceDetailReloadKey((current) => current + 1);
-    } else if (result?.status === "saved_to_cache") {
+    } else if (result?.status === "pending") {
       setSaveTip(
         translate(extensionSettings.language, "Saved to local cache. Remote sync pending.")
       );
@@ -886,7 +889,7 @@ export function App({
           lastError: current.sourceStatus?.lastError ?? null
         }
       }));
-    } else if (result?.status === "conflict_copy") {
+    } else if (result?.status === "conflict_split") {
       setSaveTip(
         result.conflictCopyPath
           ? `${translate(
@@ -903,16 +906,16 @@ export function App({
 
   function settleMutationResult<T>(
     result: T | CommittedMutation<T>
-  ): { value: T; saveResult: SaveVaultResult | void } {
+  ): { value: T; publication: PublicationResult | void } {
     if (isCommittedMutation(result)) {
       return {
         value: result.value,
-        saveResult: result.saveResult
+        publication: result.publication
       };
     }
     return {
       value: result,
-      saveResult: undefined
+      publication: undefined
     };
   }
 
@@ -1318,12 +1321,12 @@ export function App({
       if (mutation === null) {
         return false;
       }
-      const { value: detail, saveResult } = settleMutationResult(mutation);
+      const { value: detail, publication } = settleMutationResult(mutation);
       if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return false;
       }
       setEntryDraftOutcomeUnknown(false);
-      handleSaveResult(vaultId, saveResult);
+      handlePublicationResult(vaultId, publication);
       setEntryDetail(detail);
       if (wasCreating) {
         setSelectedEntryId(detail.id);
@@ -1455,11 +1458,11 @@ export function App({
 
     try {
       const mutation = await client.deleteEntry(vaultId, entryId);
-      const { saveResult } = settleMutationResult(mutation);
+      const { publication } = settleMutationResult(mutation);
       if (!ownsVaultRequest(vaultId, requestEpoch)) {
         return false;
       }
-      handleSaveResult(vaultId, saveResult);
+      handlePublicationResult(vaultId, publication);
       clearDetailSelection();
       setWorkspaceReloadKey((current) => current + 1);
       setDialogState(null);
@@ -1495,14 +1498,14 @@ export function App({
 
     try {
       const mutation = await operation();
-      const { value: detail, saveResult } = settleMutationResult(mutation);
+      const { value: detail, publication } = settleMutationResult(mutation);
       if (ownsEntryProjection(owner)) {
         setEntryDetail(detail);
       }
       if (!ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
         return;
       }
-      handleSaveResult(owner.vaultId, saveResult);
+      handlePublicationResult(owner.vaultId, publication);
       setWorkspaceReloadKey((current) => current + 1);
     } catch (mutationError) {
       if (ownsVaultRequest(owner.vaultId, owner.sessionEpoch)) {
@@ -1743,9 +1746,9 @@ export function App({
       setDatabaseName(result.settings.metadata.name);
       resetDatabaseSettingsDraftState();
       setSettingsDraftEpoch((current) => current + 1);
-      handleSaveResult(vaultId, result.saveResult);
+      handlePublicationResult(vaultId, result.publication);
       setWorkspaceReloadKey((current) => current + 1);
-      if (result.saveResult.status === "saved") {
+      if (result.publication.status === "published") {
         setSaveTip(translate(extensionSettings.language, "Database settings saved."));
       }
       return true;

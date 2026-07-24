@@ -5,10 +5,9 @@ use super::durable_file::{
     sync_published_target, unique_sibling_path, write_verified_temp,
 };
 use super::provider::{
-    Provider, ProviderCommit, ProviderConflictCopy, ProviderError, ProviderRevision,
-    ProviderSnapshot,
+    ContentIdentity, Provider, ProviderCommit, ProviderConflictCopy, ProviderError,
+    ProviderRevision, ProviderSnapshot,
 };
-use serde::{Deserialize, Serialize};
 #[cfg(target_os = "linux")]
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,14 +22,7 @@ const LOCAL_PROVIDER_REVISION_PREFIX: &[u8] = b"local-file:v1:";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalFileSnapshot {
     pub bytes: Vec<u8>,
-    pub fingerprint: VaultSourceFingerprint,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VaultSourceFingerprint {
-    pub content_sha256: String,
-    pub size_bytes: u64,
-    pub modified_at: Option<u64>,
+    pub fingerprint: ContentIdentity,
 }
 
 #[derive(Clone)]
@@ -63,13 +55,13 @@ pub struct LocalFileWriteTxn {
     target: PathBuf,
     initial_file: File,
     initial_identity: DurableFileIdentity,
-    initial_fingerprint: VaultSourceFingerprint,
+    initial_fingerprint: ContentIdentity,
     initial_metadata: Metadata,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DurableCommit {
-    pub fingerprint: VaultSourceFingerprint,
+    pub fingerprint: ContentIdentity,
     pub warnings: Vec<String>,
 }
 
@@ -181,7 +173,7 @@ impl LocalFileVaultSourceProvider {
     pub fn write_if_unchanged(
         &self,
         path: &str,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
     ) -> Result<DurableCommit, LocalFileCommitError> {
         #[cfg(test)]
@@ -206,16 +198,15 @@ impl LocalFileProvider {
             })
     }
 
-    fn revision(fingerprint: &VaultSourceFingerprint) -> ProviderRevision {
-        let encoded =
-            serde_json::to_vec(fingerprint).expect("VaultSourceFingerprint must serialize");
+    fn revision(fingerprint: &ContentIdentity) -> ProviderRevision {
+        let encoded = serde_json::to_vec(fingerprint).expect("ContentIdentity must serialize");
         let mut revision = Vec::with_capacity(LOCAL_PROVIDER_REVISION_PREFIX.len() + encoded.len());
         revision.extend_from_slice(LOCAL_PROVIDER_REVISION_PREFIX);
         revision.extend_from_slice(&encoded);
         ProviderRevision::from_opaque_bytes(revision)
     }
 
-    fn fingerprint(revision: &ProviderRevision) -> Result<VaultSourceFingerprint, ProviderError> {
+    fn fingerprint(revision: &ProviderRevision) -> Result<ContentIdentity, ProviderError> {
         let encoded = revision
             .opaque_bytes()
             .strip_prefix(LOCAL_PROVIDER_REVISION_PREFIX)
@@ -243,6 +234,8 @@ impl Provider for LocalFileProvider {
                 })?;
         Ok(ProviderSnapshot {
             revision: Self::revision(&snapshot.fingerprint),
+            identity: snapshot.fingerprint,
+            cache_validation_token: None,
             bytes: snapshot.bytes,
         })
     }
@@ -259,6 +252,8 @@ impl Provider for LocalFileProvider {
         {
             Ok(commit) => Ok(ProviderCommit {
                 revision: Self::revision(&commit.fingerprint),
+                identity: commit.fingerprint,
+                cache_validation_token: None,
                 warnings: commit.warnings,
             }),
             Err(LocalFileCommitError::Conflict { message }) => {
@@ -273,6 +268,8 @@ impl Provider for LocalFileProvider {
                 match self.source.read_snapshot(self.path()?) {
                     Ok(snapshot) if snapshot.bytes == bytes => Ok(ProviderCommit {
                         revision: Self::revision(&snapshot.fingerprint),
+                        identity: snapshot.fingerprint,
+                        cache_validation_token: None,
                         warnings: vec![format!(
                             "local vault Publication initially had an unknown outcome but readback confirmed the intended generation: {source}"
                         )],
@@ -398,7 +395,7 @@ impl LocalFileWriteTxn {
     #[cfg(test)]
     pub fn commit(
         self,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
     ) -> Result<DurableCommit, LocalFileCommitError> {
         self.commit_inner(expected, bytes, &DurableFaultInjector::default())
@@ -407,7 +404,7 @@ impl LocalFileWriteTxn {
     #[cfg(test)]
     fn commit_with_faults(
         self,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
         faults: &DurableFaultInjector,
     ) -> Result<DurableCommit, LocalFileCommitError> {
@@ -416,7 +413,7 @@ impl LocalFileWriteTxn {
 
     fn commit_inner(
         self,
-        expected: &VaultSourceFingerprint,
+        expected: &ContentIdentity,
         bytes: &[u8],
         faults: &DurableFaultInjector,
     ) -> Result<DurableCommit, LocalFileCommitError> {
@@ -705,7 +702,7 @@ fn reconcile_published_commit(
     target: &Path,
     backup: &Path,
     initial_identity: DurableFileIdentity,
-    initial_fingerprint: &VaultSourceFingerprint,
+    initial_fingerprint: &ContentIdentity,
     intended_bytes: &[u8],
     faults: &DurableFaultInjector,
 ) -> io::Result<DurableCommit> {
@@ -750,7 +747,7 @@ fn rollback_published_commit(
     target: &Path,
     backup: &Path,
     initial_identity: DurableFileIdentity,
-    initial_fingerprint: &VaultSourceFingerprint,
+    initial_fingerprint: &ContentIdentity,
     intended_bytes: &[u8],
     faults: &DurableFaultInjector,
 ) -> io::Result<()> {
@@ -1006,7 +1003,7 @@ fn cleanup_pre_publish_hardlink_backups(_target: &Path) -> io::Result<()> {
 fn verify_backup_generation(
     backup: &Path,
     expected_identity: DurableFileIdentity,
-    expected: &VaultSourceFingerprint,
+    expected: &ContentIdentity,
 ) -> io::Result<()> {
     let opened = read_opened_snapshot(backup, false)?;
     #[cfg(unix)]
@@ -1026,7 +1023,7 @@ fn verify_backup_generation(
     Ok(())
 }
 
-fn same_content(left: &VaultSourceFingerprint, right: &VaultSourceFingerprint) -> bool {
+fn same_content(left: &ContentIdentity, right: &ContentIdentity) -> bool {
     left.content_sha256 == right.content_sha256 && left.size_bytes == right.size_bytes
 }
 
@@ -1304,17 +1301,17 @@ fn decode_picker_stdout(stdout: Vec<u8>) -> anyhow::Result<Option<String>> {
     }
 }
 
-fn fingerprint_for_bytes(bytes: &[u8], metadata: &std::fs::Metadata) -> VaultSourceFingerprint {
+fn fingerprint_for_bytes(bytes: &[u8], metadata: &std::fs::Metadata) -> ContentIdentity {
     let modified_at = metadata
         .modified()
         .ok()
         .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
         .map(|value| value.as_secs());
 
-    VaultSourceFingerprint {
+    ContentIdentity {
         content_sha256: sha256_hex(bytes),
         size_bytes: bytes.len() as u64,
-        modified_at,
+        observation_marker: modified_at,
     }
 }
 
@@ -1352,8 +1349,8 @@ fn pick_local_vault_path() -> anyhow::Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalFileCommitError, LocalFileVaultSourceProvider, VaultSourceFingerprint,
-        decode_picker_stdout, local_lock_path,
+        ContentIdentity, LocalFileCommitError, LocalFileVaultSourceProvider, decode_picker_stdout,
+        local_lock_path,
     };
     use crate::providers::durable_file::{
         DurableFaultInjector, DurableFaultPoint, ExclusiveFileLock, sha256_hex,
@@ -1469,7 +1466,12 @@ mod tests {
             .read_snapshot(path.to_str().unwrap())
             .unwrap()
             .fingerprint;
-        expected.modified_at = Some(expected.modified_at.unwrap_or_default().saturating_add(1));
+        expected.observation_marker = Some(
+            expected
+                .observation_marker
+                .unwrap_or_default()
+                .saturating_add(1),
+        );
 
         let error = provider
             .write_if_unchanged(path.to_str().unwrap(), &expected, b"generation-c")
@@ -2115,7 +2117,7 @@ mod tests {
                 .env(
                     "VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT",
                     expected
-                        .modified_at
+                        .observation_marker
                         .map(|value| value.to_string())
                         .unwrap_or_default(),
                 )
@@ -2164,13 +2166,13 @@ mod tests {
             return;
         };
         let candidate = std::env::var("VAULTKERN_LOCAL_WRITER_CANDIDATE").unwrap();
-        let expected = VaultSourceFingerprint {
+        let expected = ContentIdentity {
             content_sha256: std::env::var("VAULTKERN_LOCAL_EXPECTED_SHA256").unwrap(),
             size_bytes: std::env::var("VAULTKERN_LOCAL_EXPECTED_SIZE")
                 .unwrap()
                 .parse()
                 .unwrap(),
-            modified_at: std::env::var("VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT")
+            observation_marker: std::env::var("VAULTKERN_LOCAL_EXPECTED_MODIFIED_AT")
                 .unwrap()
                 .parse()
                 .ok(),

@@ -796,8 +796,6 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry(
     ): Short
-    external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_save(
-    ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_session_state(
     ): Short
     external fun uniffi_vaultkern_uniffi_checksum_method_vaultsession_sources(
@@ -929,8 +927,6 @@ external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_lock_session(`ptr`: 
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_open_vault(`ptr`: Long,`path`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_read_entry(`ptr`: Long,`vaultId`: RustBuffer.ByValue,`entryId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
-): RustBuffer.ByValue
-external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_save(`ptr`: Long,`vaultId`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
 external fun uniffi_vaultkern_uniffi_fn_method_vaultsession_session_state(`ptr`: Long,uniffi_out_err: UniffiRustCallStatus,
 ): RustBuffer.ByValue
@@ -1176,9 +1172,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532.toShort()) {
-        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-    }
-    if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_save() != 19815.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_vaultkern_uniffi_checksum_method_vaultsession_session_state() != 59333.toShort()) {
@@ -3030,8 +3023,6 @@ public interface VaultSessionInterface {
 
     fun `readEntry`(`vaultId`: kotlin.String, `entryId`: kotlin.String): EntryDetailDto
 
-    fun `save`(`vaultId`: kotlin.String): SaveVaultResultDto
-
     fun `sessionState`(): SessionStateDto
 
     fun `sources`(): VaultSources
@@ -3266,20 +3257,6 @@ open class VaultSession: Disposable, AutoCloseable, VaultSessionInterface
     UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_read_entry(
         it,
         FfiConverterString.lower(`vaultId`),FfiConverterString.lower(`entryId`),_status)
-}
-    }
-    )
-    }
-
-
-
-    @Throws(VaultKernException::class)override fun `save`(`vaultId`: kotlin.String): SaveVaultResultDto {
-            return FfiConverterTypeSaveVaultResultDto.lift(
-    callWithHandle {
-    uniffiRustCallWithError(VaultKernException) { _status ->
-    UniffiLib.uniffi_vaultkern_uniffi_fn_method_vaultsession_save(
-        it,
-        FfiConverterString.lower(`vaultId`),_status)
 }
     }
     )
@@ -4708,54 +4685,6 @@ public object FfiConverterTypeEntrySummaryDto: FfiConverterRustBuffer<EntrySumma
 
 
 
-data class MergeSummaryDto (
-    var `mergedEntries`: kotlin.ULong
-    ,
-    var `historySnapshotsAdded`: kotlin.ULong
-    ,
-    var `metaConflictsResolved`: kotlin.UInt
-    ,
-    var `iconConflictsResolved`: kotlin.UInt
-
-){
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeMergeSummaryDto: FfiConverterRustBuffer<MergeSummaryDto> {
-    override fun read(buf: ByteBuffer): MergeSummaryDto {
-        return MergeSummaryDto(
-            FfiConverterULong.read(buf),
-            FfiConverterULong.read(buf),
-            FfiConverterUInt.read(buf),
-            FfiConverterUInt.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: MergeSummaryDto) = (
-            FfiConverterULong.allocationSize(value.`mergedEntries`) +
-            FfiConverterULong.allocationSize(value.`historySnapshotsAdded`) +
-            FfiConverterUInt.allocationSize(value.`metaConflictsResolved`) +
-            FfiConverterUInt.allocationSize(value.`iconConflictsResolved`)
-    )
-
-    override fun write(value: MergeSummaryDto, buf: ByteBuffer) {
-            FfiConverterULong.write(value.`mergedEntries`, buf)
-            FfiConverterULong.write(value.`historySnapshotsAdded`, buf)
-            FfiConverterUInt.write(value.`metaConflictsResolved`, buf)
-            FfiConverterUInt.write(value.`iconConflictsResolved`, buf)
-    }
-}
-
-
-
 data class OneDriveAuthSessionDto (
     var `authUrl`: kotlin.String
     ,
@@ -5221,49 +5150,6 @@ public object FfiConverterTypePlatformPasskeyRegistrationOutput: FfiConverterRus
             FfiConverterString.write(value.`entryId`, buf)
             FfiConverterTypePlatformPasskeyCredential.write(value.`credential`, buf)
             FfiConverterByteArray.write(value.`authenticatorData`, buf)
-    }
-}
-
-
-
-data class SaveVaultResultDto (
-    var `status`: SaveVaultStatusDto
-    ,
-    var `mergeSummary`: MergeSummaryDto?
-    ,
-    var `conflictCopyPath`: kotlin.String?
-
-){
-
-
-
-
-
-    companion object
-}
-
-/**
- * @suppress
- */
-public object FfiConverterTypeSaveVaultResultDto: FfiConverterRustBuffer<SaveVaultResultDto> {
-    override fun read(buf: ByteBuffer): SaveVaultResultDto {
-        return SaveVaultResultDto(
-            FfiConverterTypeSaveVaultStatusDto.read(buf),
-            FfiConverterOptionalTypeMergeSummaryDto.read(buf),
-            FfiConverterOptionalString.read(buf),
-        )
-    }
-
-    override fun allocationSize(value: SaveVaultResultDto) = (
-            FfiConverterTypeSaveVaultStatusDto.allocationSize(value.`status`) +
-            FfiConverterOptionalTypeMergeSummaryDto.allocationSize(value.`mergeSummary`) +
-            FfiConverterOptionalString.allocationSize(value.`conflictCopyPath`)
-    )
-
-    override fun write(value: SaveVaultResultDto, buf: ByteBuffer) {
-            FfiConverterTypeSaveVaultStatusDto.write(value.`status`, buf)
-            FfiConverterOptionalTypeMergeSummaryDto.write(value.`mergeSummary`, buf)
-            FfiConverterOptionalString.write(value.`conflictCopyPath`, buf)
     }
 }
 
@@ -5742,42 +5628,6 @@ public object FfiConverterTypeResidentPlatform: FfiConverterRustBuffer<ResidentP
 
 
 
-enum class SaveVaultStatusDto {
-
-    SAVED,
-    MERGED,
-    SAVED_TO_CACHE,
-    CONFLICT_COPY;
-
-
-
-
-    companion object
-}
-
-
-/**
- * @suppress
- */
-public object FfiConverterTypeSaveVaultStatusDto: FfiConverterRustBuffer<SaveVaultStatusDto> {
-    override fun read(buf: ByteBuffer) = try {
-        SaveVaultStatusDto.values()[buf.getInt() - 1]
-    } catch (e: IndexOutOfBoundsException) {
-        throw RuntimeException("invalid enum value, something is very wrong!!", e)
-    }
-
-    override fun allocationSize(value: SaveVaultStatusDto) = 4UL
-
-    override fun write(value: SaveVaultStatusDto, buf: ByteBuffer) {
-        buf.putInt(value.ordinal + 1)
-    }
-}
-
-
-
-
-
-
 enum class UnlockBlobStatusDto {
 
     UNLOCKED,
@@ -6173,38 +6023,6 @@ public object FfiConverterOptionalTypeEntryPasskeyDto: FfiConverterRustBuffer<En
         } else {
             buf.put(1)
             FfiConverterTypeEntryPasskeyDto.write(value, buf)
-        }
-    }
-}
-
-
-
-
-/**
- * @suppress
- */
-public object FfiConverterOptionalTypeMergeSummaryDto: FfiConverterRustBuffer<MergeSummaryDto?> {
-    override fun read(buf: ByteBuffer): MergeSummaryDto? {
-        if (buf.get().toInt() == 0) {
-            return null
-        }
-        return FfiConverterTypeMergeSummaryDto.read(buf)
-    }
-
-    override fun allocationSize(value: MergeSummaryDto?): ULong {
-        if (value == null) {
-            return 1UL
-        } else {
-            return 1UL + FfiConverterTypeMergeSummaryDto.allocationSize(value)
-        }
-    }
-
-    override fun write(value: MergeSummaryDto?, buf: ByteBuffer) {
-        if (value == null) {
-            buf.put(0)
-        } else {
-            buf.put(1)
-            FfiConverterTypeMergeSummaryDto.write(value, buf)
         }
     }
 }

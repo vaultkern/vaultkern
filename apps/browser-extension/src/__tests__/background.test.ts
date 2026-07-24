@@ -206,7 +206,7 @@ function createPort() {
           emitMessage(
             {
               type: "handshake",
-              protocolVersion: 2,
+              protocolVersion: 3,
               capabilities: RUNTIME_CAPABILITIES
             },
             requestId
@@ -306,7 +306,7 @@ async function completePasskeyLedgerReconciliation(
 ) {
   await vi.waitFor(() => {
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      version: 2,
+      version: 3,
       command: {
         type: "reconcile_passkey_ceremony_ledger",
         active_connection_id: expect.any(String)
@@ -470,7 +470,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: { type: "get_session_state" }
       }));
     });
@@ -483,7 +483,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "find_fill_candidates",
           vault_id: "vault-1",
@@ -515,7 +515,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "get_autofill_credential",
           vault_id: "vault-1",
@@ -660,7 +660,7 @@ describe("background bridge", () => {
 
       await vi.waitFor(() => {
         expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-          version: 2,
+          version: 3,
           command: {
             type: "find_fill_candidates",
             vault_id: "vault-1",
@@ -692,7 +692,7 @@ describe("background bridge", () => {
 
       await vi.waitFor(() => {
         expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-          version: 2,
+          version: 3,
           command: {
             type: "get_autofill_credential",
             vault_id: "vault-1",
@@ -812,7 +812,7 @@ describe("background bridge", () => {
       await vi.waitFor(() => {
         expect(port.postMessage).toHaveBeenCalledWith(
           expect.objectContaining({
-            version: 2,
+            version: 3,
             command: { type: "get_session_state" }
           })
         );
@@ -827,7 +827,7 @@ describe("background bridge", () => {
       await vi.waitFor(() => {
         expect(port.postMessage).toHaveBeenCalledWith(
           expect.objectContaining({
-            version: 2,
+            version: 3,
             command: {
               type: "find_fill_candidates",
               vault_id: "vault-1",
@@ -930,7 +930,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: { type: "get_session_state" }
       }));
     });
@@ -943,7 +943,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "find_fill_candidates",
           vault_id: "vault-1",
@@ -1035,7 +1035,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: { type: "get_session_state" }
       }));
     });
@@ -1048,7 +1048,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "find_fill_candidates",
           vault_id: "vault-1",
@@ -1139,7 +1139,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: { type: "get_session_state" }
       }));
     });
@@ -1152,7 +1152,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "find_fill_candidates",
           vault_id: "vault-1",
@@ -1251,7 +1251,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: { type: "get_session_state" }
       }));
     });
@@ -1264,7 +1264,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "find_fill_candidates",
           vault_id: "vault-1",
@@ -1364,7 +1364,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: { type: "get_session_state" }
       }));
     });
@@ -1377,7 +1377,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "find_fill_candidates",
           vault_id: "vault-1",
@@ -1901,7 +1901,7 @@ describe("background bridge", () => {
     expect(attach).toHaveBeenCalledTimes(1);
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
@@ -1919,7 +1919,7 @@ describe("background bridge", () => {
     }
 
     const response = sendRuntimeMessage(listeners, {
-      version: 2,
+      version: 3,
       command: { type: "get_session_state" }
     });
 
@@ -1945,7 +1945,7 @@ describe("background bridge", () => {
     await vi.advanceTimersByTimeAsync(20_000);
 
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      version: 2,
+      version: 3,
       command: { type: "get_session_state" }
     }));
     expect(postedCommandCount(port, "get_session_state")).toBe(2);
@@ -1973,7 +1973,7 @@ describe("background bridge", () => {
           port.emitMessage(
             {
               type: "handshake",
-              protocolVersion: 2,
+              protocolVersion: 3,
               capabilities: RUNTIME_CAPABILITIES
             },
             requestId
@@ -2050,7 +2050,7 @@ describe("background bridge", () => {
     expect(recentVaultLists).toBe(0);
 
     const response = sendRuntimeMessage(listeners, {
-      version: 2,
+      version: 3,
       command: {
         type: "unlock_current_vault",
         password: "demo-password",
@@ -2140,7 +2140,7 @@ describe("background bridge", () => {
     await completePasskeyLedgerReconciliation(port);
 
     const response = sendRuntimeMessage(listeners, {
-      version: 2,
+      version: 3,
       command: { type: "get_session_state" }
     });
     await vi.waitFor(() => {
@@ -2227,7 +2227,7 @@ describe("background bridge", () => {
     }
 
     const response = sendRuntimeMessage(listeners, {
-      version: 2,
+      version: 3,
       command: { type: "get_session_state" }
     });
 
@@ -2283,7 +2283,7 @@ describe("background bridge", () => {
 
     const responsePromise = new Promise<unknown>((resolve) => {
       const handled = listener(
-        { version: 2, command: { type: "get_session_state" } },
+        { version: 3, command: { type: "get_session_state" } },
         trustedExtensionPageSender(),
         resolve
       );
@@ -2307,7 +2307,7 @@ describe("background bridge", () => {
       }
     });
     expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-      version: 2,
+      version: 3,
       command: { type: "get_session_state" }
     }));
 
@@ -2356,7 +2356,7 @@ describe("background bridge", () => {
     }
 
     const handled = listener(
-      { version: 2, command: { type: "get_session_state" } },
+      { version: 3, command: { type: "get_session_state" } },
       trustedExtensionPageSender(),
       resolveResponse
     );
@@ -2739,7 +2739,7 @@ describe("background bridge", () => {
     });
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
@@ -2821,7 +2821,7 @@ describe("background bridge", () => {
     await import("../background");
     await vi.waitFor(() => {
       expect(firstPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
@@ -2844,7 +2844,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(secondPort.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
@@ -2914,7 +2914,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
@@ -3015,7 +3015,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "reconcile_passkey_ceremony_ledger",
           active_connection_id: expect.any(String)
@@ -3029,7 +3029,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "query_passkey_ceremony_ledger",
           ceremony_token: "token-pre-s4"
@@ -3040,7 +3040,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: expect.objectContaining({
           type: "register_passkey_ceremony",
           ceremony_token: "token-pre-s4",
@@ -3052,7 +3052,7 @@ describe("background bridge", () => {
 
     await vi.waitFor(() => {
       expect(port.postMessage).toHaveBeenCalledWith(expect.objectContaining({
-        version: 2,
+        version: 3,
         command: {
           type: "advance_passkey_ceremony_phase",
           ceremony_token: "token-pre-s4",

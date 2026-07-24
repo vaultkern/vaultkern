@@ -15,8 +15,8 @@ use vaultkern_runtime_protocol::{
     EntryMutationResultDto, EntryPasskeyDto, EntryPasskeyUpdateDto,
     PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto,
     PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto, PasskeyFrameKindDto,
-    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto, RuntimeCommand,
-    RuntimeResponse, SaveVaultStatusDto,
+    PasskeyUserVerificationMethodDto, PasskeyUserVerificationRequirementDto, PublicationStatusDto,
+    RuntimeCommand, RuntimeResponse,
 };
 
 const TEST_PASSKEY_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgCrpkgmenhRkrdg3Y\n7G0+YmeyFRGgpisH5R5e75gwVHGhRANCAASOCmJegf0Fo1V7ixK+W5u/Jx8bpbIq\nCY0G7WFVp5KD6xMSKPekuRmz+kxK2wiZrN6MrH8kbCDmwLZRxnM73nXs\n-----END PRIVATE KEY-----\n";
@@ -31,7 +31,7 @@ fn expect_committed_entry_mutation(response: RuntimeResponse) -> EntryMutationRe
         panic!("expected committed entry mutation, got {response:?}");
     };
     assert_eq!(result.commit, CommitStatusDto::Committed);
-    assert_eq!(result.publication.status, SaveVaultStatusDto::Saved);
+    assert_eq!(result.publication.status, PublicationStatusDto::Published);
     result
 }
 
@@ -933,7 +933,6 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
-            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -999,53 +998,6 @@ fn runtime_creates_updates_and_deletes_entries_through_protocol_commands() {
         expect_committed_entry_mutation(deleted).entry.is_none(),
         "delete does not return a committed entry"
     );
-}
-
-#[test]
-fn runtime_treats_the_deprecated_planned_entry_id_as_inert() {
-    let core = KeepassCore::new();
-    let mut key = CompositeKey::default();
-    key.add_password("demo-password");
-    let bytes = core
-        .save_kdbx(&Vault::empty("demo"), &key, SaveProfile::recommended())
-        .unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("demo.kdbx");
-    std::fs::write(&path, bytes).unwrap();
-    let mut runtime = Runtime::for_tests();
-    let handle = runtime.open_local_vault(path.to_str().unwrap()).unwrap();
-    runtime
-        .unlock_with_password(&handle.vault_id, "demo-password")
-        .unwrap();
-    let root_id = runtime.list_groups(&handle.vault_id).unwrap().root.id;
-    let deprecated_entry_id = "11111111-1111-4111-8111-111111111111";
-    let mut created_entry_ids = Vec::new();
-
-    for _ in 0..2 {
-        let response = runtime
-            .handle(RuntimeCommand::CreateEntry {
-                vault_id: handle.vault_id.clone(),
-                parent_group_id: root_id.clone(),
-                entry_id: Some(deprecated_entry_id.into()),
-                title: "Original".into(),
-                username: "alice".into(),
-                password: "secret".into(),
-                url: "https://example.com".into(),
-                notes: String::new().into(),
-                totp_uri: None,
-            })
-            .unwrap();
-        let detail = expect_committed_entry_mutation(response)
-            .entry
-            .expect("manual create returns a committed entry");
-        assert_ne!(detail.id, deprecated_entry_id);
-        assert_eq!(detail.title, "Original");
-        created_entry_ids.push(detail.id);
-    }
-    assert_ne!(created_entry_ids[0], created_entry_ids[1]);
-
-    let entries = runtime.list_entries(&handle.vault_id).unwrap();
-    assert_eq!(entries.len(), 2);
 }
 
 #[test]
@@ -2637,7 +2589,7 @@ fn runtime_creates_passkey_registration_entry_and_can_assert_with_it() {
     );
 
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: handle.vault_id.clone(),
         })
         .expect("save registered passkey entry");
@@ -3175,11 +3127,11 @@ fn runtime_reregistration_preserves_user_fields_and_enforces_history_limit() {
     );
 
     let saved = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: handle.vault_id.clone(),
         })
         .unwrap();
-    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+    assert!(matches!(saved, RuntimeResponse::PublicationResult(_)));
 
     let history = runtime
         .handle(RuntimeCommand::ListEntryHistory {
@@ -3269,11 +3221,11 @@ fn runtime_rolls_back_overwritten_passkey_registration_from_history() {
     assert!(!second_registration.created);
 
     let saved = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: handle.vault_id.clone(),
         })
         .unwrap();
-    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+    assert!(matches!(saved, RuntimeResponse::PublicationResult(_)));
 
     runtime
         .handle(RuntimeCommand::AbortPasskeyRegistration {
@@ -3737,7 +3689,7 @@ fn runtime_aborts_saved_uncommitted_passkey_registration_by_ceremony_token() {
             vault_id: handle.vault_id.clone(),
         })
         .unwrap();
-    assert!(matches!(saved, RuntimeResponse::SaveVaultResult(_)));
+    assert!(matches!(saved, RuntimeResponse::PublicationResult(_)));
 
     let aborted = runtime
         .handle(RuntimeCommand::AbortPasskeyRegistration {
@@ -4819,7 +4771,6 @@ fn runtime_manages_entry_attachments_through_protocol_commands() {
         .handle(RuntimeCommand::CreateEntry {
             vault_id: handle.vault_id.clone(),
             parent_group_id: root_id,
-            entry_id: None,
             title: "Example".into(),
             username: "alice".into(),
             password: "secret".into(),
@@ -5061,7 +5012,6 @@ fn runtime_updates_entry_modified_time_after_manager_mutations() {
             .handle(RuntimeCommand::CreateEntry {
                 vault_id: vault.vault_id.clone(),
                 parent_group_id: root_id,
-                entry_id: None,
                 title: "Created".into(),
                 username: "alice".into(),
                 password: "secret".into(),

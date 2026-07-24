@@ -60,7 +60,7 @@ export interface DatabaseSettingsCommitResult {
   type: "database_settings_commit_result";
   commit: "committed";
   settings: DatabaseSettings;
-  saveResult: SaveVaultResult;
+  publication: PublicationResult;
 }
 
 export interface DatabaseSettingsUpdate {
@@ -233,10 +233,10 @@ export interface EntryAttachmentContentUpdate {
   dataBase64: string;
 }
 
-export type SaveVaultResult = {
-  type: "save_vault_result";
-  status: "saved" | "merged" | "saved_to_cache" | "conflict_copy";
-  mergeSummary?: {
+export type PublicationResult = {
+  type: "publication_result";
+  status: "published" | "reconciled" | "pending" | "conflict_split";
+  reconciliationSummary?: {
     mergedEntries: number;
     historySnapshotsAdded: number;
   } | null;
@@ -245,30 +245,30 @@ export type SaveVaultResult = {
 
 export interface CommittedMutation<T> {
   value: T;
-  saveResult: SaveVaultResult;
+  publication: PublicationResult;
 }
 
 export interface CommittedVaultMutation {
-  saveResult: SaveVaultResult;
+  publication: PublicationResult;
   createdGroupId?: string;
 }
 
 export interface CommittedAutofillMutation {
   commit: "committed";
-  saveResult: SaveVaultResult;
+  publication: PublicationResult;
 }
 
 interface EntryMutationResponse<T> {
   type: "entry_mutation_result";
   commit: "committed";
-  publication: Omit<SaveVaultResult, "type">;
+  publication: Omit<PublicationResult, "type">;
   entry?: T;
 }
 
 interface VaultMutationResponse {
   type: "vault_mutation_result";
   commit: "committed";
-  publication: Omit<SaveVaultResult, "type">;
+  publication: Omit<PublicationResult, "type">;
   createdGroupId?: string;
 }
 
@@ -276,7 +276,7 @@ interface DatabaseSettingsMutationResponse {
   type: "database_settings_commit_result";
   commit: "committed";
   settings: DatabaseSettings;
-  saveResult: Omit<SaveVaultResult, "type">;
+  publication: Omit<PublicationResult, "type">;
 }
 
 export interface EntryHistoryItem {
@@ -1041,10 +1041,7 @@ export class RuntimeClient {
       : (undefined as T);
     return {
       value,
-      saveResult: {
-        type: "save_vault_result",
-        ...response.publication
-      }
+      publication: publicationResult(response.publication)
     };
   }
 
@@ -1061,10 +1058,7 @@ export class RuntimeClient {
     }
     return {
       commit: response.commit,
-      saveResult: {
-        type: "save_vault_result",
-        ...response.publication
-      }
+      publication: publicationResult(response.publication)
     };
   }
 
@@ -1079,10 +1073,7 @@ export class RuntimeClient {
       throw new TypeError("runtime returned an invalid committed vault mutation");
     }
     return {
-      saveResult: {
-        type: "save_vault_result",
-        ...response.publication
-      },
+      publication: publicationResult(response.publication),
       ...(response.createdGroupId === undefined
         ? {}
         : { createdGroupId: response.createdGroupId })
@@ -1104,10 +1095,7 @@ export class RuntimeClient {
     }
     return {
       ...response,
-      saveResult: {
-        type: "save_vault_result",
-        ...response.saveResult
-      }
+      publication: publicationResult(response.publication)
     };
   }
 
@@ -1140,6 +1128,15 @@ function isRuntimeErrorResponse(value: unknown): value is RuntimeErrorResponse {
     typeof (value as { code?: unknown }).code === "string" &&
     typeof (value as { message?: unknown }).message === "string"
   );
+}
+
+function publicationResult(
+  result: Omit<PublicationResult, "type">
+): PublicationResult {
+  return {
+    type: "publication_result",
+    ...result
+  };
 }
 
 function normalizeOptionalSecret(value: string | null | undefined): string | null {

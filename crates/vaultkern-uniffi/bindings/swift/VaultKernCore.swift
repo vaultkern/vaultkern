@@ -1491,8 +1491,6 @@ public protocol VaultSessionProtocol: AnyObject, Sendable {
 
     func readEntry(vaultId: String, entryId: String) throws  -> EntryDetailDto
 
-    func save(vaultId: String) throws  -> SaveVaultResultDto
-
     func sessionState() throws  -> SessionStateDto
 
     func sources()  -> VaultSources
@@ -1642,15 +1640,6 @@ open func readEntry(vaultId: String, entryId: String)throws  -> EntryDetailDto  
             self.uniffiCloneHandle(),
         FfiConverterString.lower(vaultId),
         FfiConverterString.lower(entryId),$0
-    )
-})
-}
-
-open func save(vaultId: String)throws  -> SaveVaultResultDto  {
-    return try  FfiConverterTypeSaveVaultResultDto_lift(try rustCallWithError(FfiConverterTypeVaultKernError_lift) {
-    uniffi_vaultkern_uniffi_fn_method_vaultsession_save(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(vaultId),$0
     )
 })
 }
@@ -2697,68 +2686,6 @@ public func FfiConverterTypeEntrySummaryDto_lower(_ value: EntrySummaryDto) -> R
 }
 
 
-public struct MergeSummaryDto: Equatable, Hashable {
-    public var mergedEntries: UInt64
-    public var historySnapshotsAdded: UInt64
-    public var metaConflictsResolved: UInt32
-    public var iconConflictsResolved: UInt32
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(mergedEntries: UInt64, historySnapshotsAdded: UInt64, metaConflictsResolved: UInt32, iconConflictsResolved: UInt32) {
-        self.mergedEntries = mergedEntries
-        self.historySnapshotsAdded = historySnapshotsAdded
-        self.metaConflictsResolved = metaConflictsResolved
-        self.iconConflictsResolved = iconConflictsResolved
-    }
-
-
-
-
-}
-
-#if compiler(>=6)
-extension MergeSummaryDto: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeMergeSummaryDto: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> MergeSummaryDto {
-        return
-            try MergeSummaryDto(
-                mergedEntries: FfiConverterUInt64.read(from: &buf),
-                historySnapshotsAdded: FfiConverterUInt64.read(from: &buf),
-                metaConflictsResolved: FfiConverterUInt32.read(from: &buf),
-                iconConflictsResolved: FfiConverterUInt32.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: MergeSummaryDto, into buf: inout [UInt8]) {
-        FfiConverterUInt64.write(value.mergedEntries, into: &buf)
-        FfiConverterUInt64.write(value.historySnapshotsAdded, into: &buf)
-        FfiConverterUInt32.write(value.metaConflictsResolved, into: &buf)
-        FfiConverterUInt32.write(value.iconConflictsResolved, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeMergeSummaryDto_lift(_ buf: RustBuffer) throws -> MergeSummaryDto {
-    return try FfiConverterTypeMergeSummaryDto.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeMergeSummaryDto_lower(_ value: MergeSummaryDto) -> RustBuffer {
-    return FfiConverterTypeMergeSummaryDto.lower(value)
-}
-
-
 public struct OneDriveAuthSessionDto: Equatable, Hashable {
     public var authUrl: String
     public var redirectUri: String
@@ -3371,64 +3298,6 @@ public func FfiConverterTypePlatformPasskeyRegistrationOutput_lower(_ value: Pla
 }
 
 
-public struct SaveVaultResultDto: Equatable, Hashable {
-    public var status: SaveVaultStatusDto
-    public var mergeSummary: MergeSummaryDto?
-    public var conflictCopyPath: String?
-
-    // Default memberwise initializers are never public by default, so we
-    // declare one manually.
-    public init(status: SaveVaultStatusDto, mergeSummary: MergeSummaryDto?, conflictCopyPath: String?) {
-        self.status = status
-        self.mergeSummary = mergeSummary
-        self.conflictCopyPath = conflictCopyPath
-    }
-
-
-
-
-}
-
-#if compiler(>=6)
-extension SaveVaultResultDto: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeSaveVaultResultDto: FfiConverterRustBuffer {
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SaveVaultResultDto {
-        return
-            try SaveVaultResultDto(
-                status: FfiConverterTypeSaveVaultStatusDto.read(from: &buf),
-                mergeSummary: FfiConverterOptionTypeMergeSummaryDto.read(from: &buf),
-                conflictCopyPath: FfiConverterOptionString.read(from: &buf)
-        )
-    }
-
-    public static func write(_ value: SaveVaultResultDto, into buf: inout [UInt8]) {
-        FfiConverterTypeSaveVaultStatusDto.write(value.status, into: &buf)
-        FfiConverterOptionTypeMergeSummaryDto.write(value.mergeSummary, into: &buf)
-        FfiConverterOptionString.write(value.conflictCopyPath, into: &buf)
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSaveVaultResultDto_lift(_ buf: RustBuffer) throws -> SaveVaultResultDto {
-    return try FfiConverterTypeSaveVaultResultDto.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSaveVaultResultDto_lower(_ value: SaveVaultResultDto) -> RustBuffer {
-    return FfiConverterTypeSaveVaultResultDto.lower(value)
-}
-
-
 public struct SessionStateDto: Equatable, Hashable {
     public var unlocked: Bool
     public var activeVaultId: String?
@@ -4020,87 +3889,6 @@ public func FfiConverterTypeResidentPlatform_lower(_ value: ResidentPlatform) ->
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 
-public enum SaveVaultStatusDto: Equatable, Hashable {
-
-    case saved
-    case merged
-    case savedToCache
-    case conflictCopy
-
-
-
-
-
-}
-
-#if compiler(>=6)
-extension SaveVaultStatusDto: Sendable {}
-#endif
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public struct FfiConverterTypeSaveVaultStatusDto: FfiConverterRustBuffer {
-    typealias SwiftType = SaveVaultStatusDto
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SaveVaultStatusDto {
-        let variant: Int32 = try readInt(&buf)
-        switch variant {
-
-        case 1: return .saved
-
-        case 2: return .merged
-
-        case 3: return .savedToCache
-
-        case 4: return .conflictCopy
-
-        default: throw UniffiInternalError.unexpectedEnumCase
-        }
-    }
-
-    public static func write(_ value: SaveVaultStatusDto, into buf: inout [UInt8]) {
-        switch value {
-
-
-        case .saved:
-            writeInt(&buf, Int32(1))
-
-
-        case .merged:
-            writeInt(&buf, Int32(2))
-
-
-        case .savedToCache:
-            writeInt(&buf, Int32(3))
-
-
-        case .conflictCopy:
-            writeInt(&buf, Int32(4))
-
-        }
-    }
-}
-
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSaveVaultStatusDto_lift(_ buf: RustBuffer) throws -> SaveVaultStatusDto {
-    return try FfiConverterTypeSaveVaultStatusDto.lift(buf)
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-public func FfiConverterTypeSaveVaultStatusDto_lower(_ value: SaveVaultStatusDto) -> RustBuffer {
-    return FfiConverterTypeSaveVaultStatusDto.lower(value)
-}
-
-
-// Note that we don't yet support `indirect` for enums.
-// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
-
 public enum UnlockBlobStatusDto: Equatable, Hashable {
 
     case unlocked
@@ -4434,30 +4222,6 @@ fileprivate struct FfiConverterOptionTypeEntryPasskeyDto: FfiConverterRustBuffer
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeEntryPasskeyDto.read(from: &buf)
-        default: throw UniffiInternalError.unexpectedOptionalTag
-        }
-    }
-}
-
-#if swift(>=5.8)
-@_documentation(visibility: private)
-#endif
-fileprivate struct FfiConverterOptionTypeMergeSummaryDto: FfiConverterRustBuffer {
-    typealias SwiftType = MergeSummaryDto?
-
-    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
-        guard let value = value else {
-            writeInt(&buf, Int8(0))
-            return
-        }
-        writeInt(&buf, Int8(1))
-        FfiConverterTypeMergeSummaryDto.write(value, into: &buf)
-    }
-
-    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
-        switch try readInt(&buf) as Int8 {
-        case 0: return nil
-        case 1: return try FfiConverterTypeMergeSummaryDto.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -4906,9 +4670,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_read_entry() != 21532) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_save() != 19815) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_vaultkern_uniffi_checksum_method_vaultsession_session_state() != 59333) {

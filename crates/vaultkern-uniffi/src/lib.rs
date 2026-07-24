@@ -864,61 +864,6 @@ impl From<EntryFieldsDto> for protocol::EntryFieldsDto {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
-pub enum SaveVaultStatusDto {
-    Saved,
-    Merged,
-    SavedToCache,
-    ConflictCopy,
-}
-
-impl From<protocol::SaveVaultStatusDto> for SaveVaultStatusDto {
-    fn from(value: protocol::SaveVaultStatusDto) -> Self {
-        match value {
-            protocol::SaveVaultStatusDto::Saved => Self::Saved,
-            protocol::SaveVaultStatusDto::Merged => Self::Merged,
-            protocol::SaveVaultStatusDto::SavedToCache => Self::SavedToCache,
-            protocol::SaveVaultStatusDto::ConflictCopy => Self::ConflictCopy,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct MergeSummaryDto {
-    pub merged_entries: u64,
-    pub history_snapshots_added: u64,
-    pub meta_conflicts_resolved: u32,
-    pub icon_conflicts_resolved: u32,
-}
-
-impl From<protocol::MergeSummaryDto> for MergeSummaryDto {
-    fn from(value: protocol::MergeSummaryDto) -> Self {
-        Self {
-            merged_entries: value.merged_entries as u64,
-            history_snapshots_added: value.history_snapshots_added as u64,
-            meta_conflicts_resolved: value.meta_conflicts_resolved,
-            icon_conflicts_resolved: value.icon_conflicts_resolved,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
-pub struct SaveVaultResultDto {
-    pub status: SaveVaultStatusDto,
-    pub merge_summary: Option<MergeSummaryDto>,
-    pub conflict_copy_path: Option<String>,
-}
-
-impl From<protocol::SaveVaultResultDto> for SaveVaultResultDto {
-    fn from(value: protocol::SaveVaultResultDto) -> Self {
-        Self {
-            status: value.status.into(),
-            merge_summary: value.merge_summary.map(Into::into),
-            conflict_copy_path: value.conflict_copy_path,
-        }
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct PlatformPasskeyCredential {
     pub credential_id: Vec<u8>,
@@ -1288,19 +1233,6 @@ impl VaultSession {
             }),
             _ => Err(VaultKernError::Core {
                 details: "entry Commit returned an unexpected runtime response".into(),
-            }),
-        }
-    }
-
-    pub fn save(&self, vault_id: String) -> Result<SaveVaultResultDto, VaultKernError> {
-        match self
-            .shared
-            .lock_for_session_mutation()?
-            .handle(protocol::RuntimeCommand::SaveVault { vault_id })?
-        {
-            protocol::RuntimeResponse::SaveVaultResult(result) => Ok(result.into()),
-            _ => Err(VaultKernError::Core {
-                details: "vault save returned an unexpected runtime response".into(),
             }),
         }
     }

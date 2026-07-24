@@ -4,11 +4,11 @@ use vaultkern_core::{
 };
 use vaultkern_runtime::Runtime;
 use vaultkern_runtime_protocol::{
-    DatabaseSettingsUpdateDto, RuntimeCommand, RuntimeResponse, SaveVaultStatusDto,
+    DatabaseSettingsUpdateDto, PublicationStatusDto, RuntimeCommand, RuntimeResponse,
 };
 
 fn retry_publication(runtime: &mut Runtime, vault_id: &str) -> anyhow::Result<RuntimeResponse> {
-    runtime.handle(RuntimeCommand::SaveVault {
+    runtime.handle(RuntimeCommand::RetryVaultPublication {
         vault_id: vault_id.to_owned(),
     })
 }
@@ -112,15 +112,15 @@ fn runtime_opens_unlocks_and_saves_onedrive_vault_reference() {
     assert!(session.unlocked);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: session.active_vault_id.unwrap(),
         })
         .unwrap();
 
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Saved && result.merge_summary.is_none()
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Published && result.reconciliation_summary.is_none()
     ));
 }
 
@@ -649,10 +649,10 @@ fn runtime_updates_remote_cache_after_successful_save() {
         "alice",
         "saved-password",
         "https://saved.example",
-        "saved",
+        "published",
     );
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -723,14 +723,14 @@ fn runtime_saves_remote_vault_to_pending_cache_when_remote_write_fails() {
     runtime.queue_test_onedrive_ambiguous_write(false);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     match response {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::SavedToCache);
-            assert_eq!(result.merge_summary, None);
+        RuntimeResponse::PublicationResult(result) => {
+            assert_eq!(result.status, PublicationStatusDto::Pending);
+            assert_eq!(result.reconciliation_summary, None);
         }
         other => panic!("expected save result, got {other:?}"),
     }
@@ -812,7 +812,7 @@ fn runtime_retries_pending_cache_by_uploading_local_version() {
     );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -875,7 +875,7 @@ fn runtime_retries_pending_cache_by_merging_changed_remote_before_upload() {
     );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -953,14 +953,14 @@ fn runtime_publishes_deleted_source_pending_as_conflict_copy_after_remote_kdf_ro
     );
     runtime.remove_test_onedrive_item("drive-1", "item-1");
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -1119,14 +1119,14 @@ fn kdf_rotated_rebase_with_unknown_put_keeps_a_retryable_remote_base() {
     runtime.queue_test_onedrive_ambiguous_write(false);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
                 && result.conflict_copy_path.is_none()
     ));
 
@@ -1186,14 +1186,14 @@ fn runtime_retries_generic_pending_with_fresh_three_way_patch_after_cas_failure(
     );
     runtime.queue_test_onedrive_ambiguous_write(false);
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     let mut raced_remote = core.load_database(&initial_bytes, &key()).unwrap().vault;
@@ -1273,7 +1273,7 @@ fn runtime_pending_cas_exhaustion_stays_pending_without_conflict_split() {
     );
     runtime.queue_test_onedrive_ambiguous_write(false);
     runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
@@ -1443,16 +1443,16 @@ fn runtime_rebases_local_fields_onto_a_changed_onedrive_source() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", external_bytes);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .expect("007 field patch should rebase representable changes");
     assert!(
         matches!(
             &response,
-            RuntimeResponse::SaveVaultResult(result)
-                if result.status == SaveVaultStatusDto::Merged
-                    && result.merge_summary.is_some()
+            RuntimeResponse::PublicationResult(result)
+                if result.status == PublicationStatusDto::Reconciled
+                    && result.reconciliation_summary.is_some()
                     && result.conflict_copy_path.is_none()
         ),
         "unexpected save response: {response:?}"
@@ -1515,14 +1515,14 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
     runtime.reset_test_onedrive_access_counts();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
                 && result.conflict_copy_path.is_none()
     ));
     let counts = runtime.test_onedrive_access_counts();
@@ -1587,14 +1587,14 @@ fn runtime_adopts_changed_remote_without_writing_when_local_is_untouched() {
     runtime.reset_test_onedrive_access_counts();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
                 && result.conflict_copy_path.is_none()
     ));
     assert_eq!(runtime.test_onedrive_access_counts().writes, 1);
@@ -1663,14 +1663,14 @@ fn runtime_adopts_untouched_remote_after_kdf_rotation_with_quick_unlock() {
     runtime.reset_test_onedrive_access_counts();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
                 && result.conflict_copy_path.is_none()
     ));
     assert_eq!(runtime.test_onedrive_access_counts().writes, 0);
@@ -1755,14 +1755,14 @@ fn runtime_retries_etag_cas_with_a_fresh_three_way_patch() {
     runtime.queue_test_onedrive_precondition_failure(Some(raced_remote_bytes));
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
     ));
     assert_eq!(runtime.test_onedrive_access_counts().writes, 2);
 
@@ -1841,12 +1841,12 @@ fn retention_that_cannot_keep_the_conflict_loser_uses_a_conflict_copy() {
     runtime.queue_test_onedrive_precondition_failure(Some(remote_bytes.clone()));
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.is_some()
     ));
     assert_eq!(
@@ -1935,14 +1935,14 @@ fn runtime_refreshes_quick_unlock_after_remote_kdf_rotation_before_merging() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", rotated_remote_bytes);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Merged
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Reconciled
     ));
 
     let uploaded = runtime
@@ -2012,23 +2012,23 @@ fn remote_kdf_rotation_with_unrelated_lineage_splits_once_then_adopts_remote() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .expect("Conflict Split must preserve Local before adopting Remote");
-    let RuntimeResponse::SaveVaultResult(result) = response else {
-        panic!("expected SaveVaultResult");
+    let RuntimeResponse::PublicationResult(result) = response else {
+        panic!("expected PublicationResult");
     };
-    assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+    assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
     assert!(runtime.list_entries(&vault_id).unwrap().is_empty());
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .expect("the adopted Remote Head must be the new common Base");
-    let RuntimeResponse::SaveVaultResult(result) = response else {
-        panic!("expected SaveVaultResult");
+    let RuntimeResponse::PublicationResult(result) = response else {
+        panic!("expected PublicationResult");
     };
-    assert_eq!(result.status, SaveVaultStatusDto::Saved);
+    assert_eq!(result.status, PublicationStatusDto::Published);
 }
 
 #[test]
@@ -2075,11 +2075,11 @@ fn unrepresentable_remote_lineage_uploads_a_sibling_conflict_copy() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", unrelated);
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     let conflict_path = match response {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        RuntimeResponse::PublicationResult(result) => {
+            assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
             result
                 .conflict_copy_path
                 .expect("OneDrive conflict-copy path")
@@ -2159,12 +2159,12 @@ fn foreign_writer_with_same_root_uses_a_conflict_copy_instead_of_field_patch() {
     runtime.replace_test_onedrive_item("drive-1", "item-1", foreign_bytes.clone());
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
     ));
     assert_eq!(
         runtime
@@ -2232,14 +2232,14 @@ fn failed_conflict_copy_upload_falls_back_to_durable_pending_state() {
     runtime.fail_next_test_onedrive_conflict_copy();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault {
+        .handle(RuntimeCommand::RetryVaultPublication {
             vault_id: vault_id.clone(),
         })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -2301,12 +2301,12 @@ fn failed_unrepresentable_patch_conflict_copy_also_falls_back_to_pending() {
     runtime.fail_next_test_onedrive_conflict_copy();
 
     let response = runtime
-        .handle(RuntimeCommand::SaveVault { vault_id })
+        .handle(RuntimeCommand::RetryVaultPublication { vault_id })
         .unwrap();
     assert!(matches!(
         response,
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::ConflictCopy
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::ConflictSplit
                 && result.conflict_copy_path.as_deref()
                     == Some("onedrive:pending-conflict-copy")
     ));
@@ -2430,8 +2430,8 @@ fn repeated_generic_pending_saves_keep_the_fixed_base() {
     runtime.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
         retry_publication(&mut runtime, &vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     let mut second_edit = runtime.get_database_settings(&vault_id).unwrap().metadata;
@@ -2448,8 +2448,8 @@ fn repeated_generic_pending_saves_keep_the_fixed_base() {
     runtime.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
         retry_publication(&mut runtime, &vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     assert_eq!(
@@ -2555,8 +2555,8 @@ fn shared_synced_base_changes_do_not_rebase_an_existing_generic_pending_save() {
     first.queue_test_onedrive_ambiguous_write(false);
     assert!(matches!(
         retry_publication(&mut first, &vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::SavedToCache
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Pending
     ));
 
     let mut second_edit = second.get_database_settings(&vault_id).unwrap().metadata;
@@ -2674,8 +2674,8 @@ fn logical_conflict_splits_once_and_next_save_uses_the_adopted_remote() {
 
     let first = retry_publication(&mut runtime, &vault_id).unwrap();
     let conflict_path = match first {
-        RuntimeResponse::SaveVaultResult(result) => {
-            assert_eq!(result.status, SaveVaultStatusDto::ConflictCopy);
+        RuntimeResponse::PublicationResult(result) => {
+            assert_eq!(result.status, PublicationStatusDto::ConflictSplit);
             result.conflict_copy_path.unwrap()
         }
         other => panic!("expected conflict copy, got {other:?}"),
@@ -2686,8 +2686,8 @@ fn logical_conflict_splits_once_and_next_save_uses_the_adopted_remote() {
         .expect("unlock the adopted Remote Head");
     assert!(matches!(
         retry_publication(&mut runtime, &vault_id).unwrap(),
-        RuntimeResponse::SaveVaultResult(result)
-            if result.status == SaveVaultStatusDto::Saved
+        RuntimeResponse::PublicationResult(result)
+            if result.status == PublicationStatusDto::Published
     ));
 
     let RuntimeResponse::OneDriveItemList(list) = runtime

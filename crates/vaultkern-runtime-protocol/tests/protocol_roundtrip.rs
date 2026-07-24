@@ -1,32 +1,29 @@
 use vaultkern_runtime_protocol::{
-    AutofillCacheStateDto, AutofillCommittedFingerprintDto, AutofillPersistConflictCodeDto,
-    AutofillPersistDispositionDto, AutofillPersistDurabilityDto, AutofillPersistOutcomeDto,
-    AutofillPersistPlanDto, AutofillPersistResultDto, AutofillUpdateFieldsDto, CommitStatusDto,
-    DatabaseCredentialsUpdateDto, DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto,
-    DatabaseKdfSettingsDto, DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto,
-    DatabaseRecycleBinSettingsDto, DatabaseSettingsCommitResultDto, DatabaseSettingsDto,
-    DatabaseSettingsUpdateDto, EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto,
-    EntryHistoryDetailDto, EntryHistoryItemDto, EntryHistoryListDto, EntryMutationResultDto,
-    EntryPasskeyDto, EntryPasskeyUpdateDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto,
-    GroupTreeDto, HandshakeDto, MergeSummaryDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto,
-    OneDriveItemDto, OneDriveItemListDto, OptionalSettingUpdateDto, PROTOCOL_VERSION,
-    PasskeyAssertionDto, PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto,
-    PasskeyCeremonyDurableStateDto, PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto,
-    PasskeyCeremonyPhaseDto, PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto,
-    PasskeyCeremonyRegisteredDto, PasskeyCredentialCandidateDto, PasskeyCredentialListDto,
-    PasskeyCredentialStatusBatchDto, PasskeyCredentialStatusDto, PasskeyFrameKindDto,
-    PasskeyRegistrationDto, PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
+    AutofillUpdateFieldsDto, CommitStatusDto, DatabaseCredentialsUpdateDto,
+    DatabaseEncryptionSettingsDto, DatabaseHistorySettingsDto, DatabaseKdfSettingsDto,
+    DatabaseMetadataSettingsDto, DatabasePublicMetadataSettingsDto, DatabaseRecycleBinSettingsDto,
+    DatabaseSettingsCommitResultDto, DatabaseSettingsDto, DatabaseSettingsUpdateDto,
+    EntryAttachmentContentDto, EntryDetailDto, EntryFieldsDto, EntryHistoryDetailDto,
+    EntryHistoryItemDto, EntryHistoryListDto, EntryMutationResultDto, EntryPasskeyDto,
+    EntryPasskeyUpdateDto, EntrySummaryDto, FillCandidateListDto, GroupNodeDto, GroupTreeDto,
+    HandshakeDto, OneDriveAuthSessionDto, OneDriveAuthStatusDto, OneDriveItemDto,
+    OneDriveItemListDto, OptionalSettingUpdateDto, PROTOCOL_VERSION, PasskeyAssertionDto,
+    PasskeyCeremonyAdvancedDto, PasskeyCeremonyDeliveryStateDto, PasskeyCeremonyDurableStateDto,
+    PasskeyCeremonyKindDto, PasskeyCeremonyLedgerDto, PasskeyCeremonyPhaseDto,
+    PasskeyCeremonyReconciledDto, PasskeyCeremonyReconciliationDto, PasskeyCeremonyRegisteredDto,
+    PasskeyCredentialCandidateDto, PasskeyCredentialListDto, PasskeyCredentialStatusBatchDto,
+    PasskeyCredentialStatusDto, PasskeyFrameKindDto, PasskeyRegistrationDto,
+    PasskeyUserVerificationCapabilityDto, PasskeyUserVerificationMethodDto,
     PasskeyUserVerificationRequirementDto, PasskeyUserVerifiedDto, ProtocolEnvelope,
-    RuntimeCommand, RuntimeResponse, SaveVaultResultDto, SaveVaultStatusDto, SessionStateDto,
-    VaultHandleDto, VaultMutationResultDto, VaultReferenceDto, VaultReferenceListDto,
-    VaultSourceStatusDto,
+    PublicationResultDto, PublicationStatusDto, ReconciliationSummaryDto, RuntimeCommand,
+    RuntimeResponse, SessionStateDto, VaultHandleDto, VaultMutationResultDto, VaultReferenceDto,
+    VaultReferenceListDto, VaultSourceStatusDto,
 };
 
 static_assertions::assert_not_impl_any!(RuntimeResponse: Clone);
 static_assertions::assert_not_impl_any!(EntryDetailDto: Clone);
 static_assertions::assert_not_impl_any!(EntryMutationResultDto: Clone);
 static_assertions::assert_not_impl_any!(EntryFieldsDto: Clone);
-static_assertions::assert_not_impl_any!(AutofillPersistPlanDto: Clone);
 static_assertions::assert_not_impl_any!(EntryHistoryDetailDto: Clone);
 static_assertions::assert_not_impl_any!(vaultkern_runtime_protocol::EntryCustomFieldDto: Clone);
 static_assertions::assert_not_impl_any!(EntryAttachmentContentDto: Clone);
@@ -41,14 +38,14 @@ fn autofill_update_fields(password: &str) -> AutofillUpdateFieldsDto {
 }
 
 #[test]
-fn narrowed_browser_autofill_dtos_start_a_new_protocol_major() {
-    assert_eq!(PROTOCOL_VERSION, 2);
+fn resident_owned_publication_starts_protocol_v3() {
+    assert_eq!(PROTOCOL_VERSION, 3);
 }
 
 #[test]
 fn protocol_roundtrips_the_version_and_capability_handshake() {
     let envelope = ProtocolEnvelope::new(RuntimeCommand::Handshake {
-        protocol_version: 2,
+        protocol_version: PROTOCOL_VERSION,
         capabilities: vec!["runtime-core".into(), "browser-extension".into()],
     });
     let decoded: ProtocolEnvelope =
@@ -56,29 +53,13 @@ fn protocol_roundtrips_the_version_and_capability_handshake() {
     assert_eq!(decoded, envelope);
 
     let response = RuntimeResponse::Handshake(HandshakeDto {
-        protocol_version: 2,
+        protocol_version: PROTOCOL_VERSION,
         capabilities: vec!["runtime-core".into()],
     });
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["type"], "handshake");
     assert_eq!(json["protocolVersion"], PROTOCOL_VERSION);
     assert_eq!(json["capabilities"], serde_json::json!(["runtime-core"]));
-}
-
-#[test]
-fn protocol_decodes_the_inert_logical_operation_id_for_compatibility() {
-    let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
-        "version": 2,
-        "operationId": "client-a-save-1",
-        "command": {
-            "type": "save_vault",
-            "vault_id": "vault-1"
-        }
-    }))
-    .unwrap();
-
-    let encoded = serde_json::to_value(envelope).unwrap();
-    assert_eq!(encoded["operationId"], "client-a-save-1");
 }
 
 #[test]
@@ -89,7 +70,7 @@ fn protocol_envelope_serializes_open_local_vault_command() {
 
     let json = serde_json::to_string(&envelope).unwrap();
 
-    assert!(json.contains("\"version\":2"));
+    assert!(json.contains("\"version\":3"));
     assert!(json.contains("\"open_local_vault\""));
     assert!(json.contains("/tmp/demo.kdbx"));
 }
@@ -121,7 +102,7 @@ fn database_optional_setting_updates_distinguish_unchanged_clear_and_set() {
 #[test]
 fn protocol_rejects_the_superseded_conditional_create_command() {
     let json = r#"{
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "create_entry_if_matching_entry_ids",
             "vault_id": "vault-1",
@@ -238,9 +219,9 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
         RuntimeResponse::DatabaseSettingsCommitResult(DatabaseSettingsCommitResultDto {
             commit: CommitStatusDto::Committed,
             settings,
-            save_result: SaveVaultResultDto {
-                status: SaveVaultStatusDto::Saved,
-                merge_summary: None,
+            publication: PublicationResultDto {
+                status: PublicationStatusDto::Published,
+                reconciliation_summary: None,
                 conflict_copy_path: None,
             },
         });
@@ -248,7 +229,7 @@ fn protocol_roundtrips_database_settings_commands_and_response() {
     assert_eq!(value["type"], "database_settings_commit_result");
     assert_eq!(value["commit"], "committed");
     assert_eq!(value["settings"]["metadata"]["name"], "Project Vault");
-    assert_eq!(value["saveResult"]["status"], "saved");
+    assert_eq!(value["publication"]["status"], "published");
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(value).expect("deserialize commit response"),
         commit_response
@@ -314,9 +295,9 @@ fn protocol_roundtrips_remaining_vault_mutations_and_commit_result() {
 
     let response = RuntimeResponse::VaultMutationResult(VaultMutationResultDto {
         commit: CommitStatusDto::Committed,
-        publication: SaveVaultResultDto {
-            status: SaveVaultStatusDto::SavedToCache,
-            merge_summary: None,
+        publication: PublicationResultDto {
+            status: PublicationStatusDto::Pending,
+            reconciliation_summary: None,
             conflict_copy_path: None,
         },
         created_group_id: Some("group-created".into()),
@@ -324,7 +305,7 @@ fn protocol_roundtrips_remaining_vault_mutations_and_commit_result() {
     let value = serde_json::to_value(&response).expect("serialize vault mutation result");
     assert_eq!(value["type"], "vault_mutation_result");
     assert_eq!(value["commit"], "committed");
-    assert_eq!(value["publication"]["status"], "saved_to_cache");
+    assert_eq!(value["publication"]["status"], "pending");
     assert_eq!(value["createdGroupId"], "group-created");
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(value)
@@ -403,31 +384,29 @@ fn protocol_roundtrips_remote_source_status() {
 }
 
 #[test]
-fn protocol_roundtrips_save_vault_result_response() {
-    let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-        status: SaveVaultStatusDto::Merged,
-        merge_summary: Some(MergeSummaryDto {
-            merged_entries: 2,
-            history_snapshots_added: 1,
-            meta_conflicts_resolved: 1,
-            icon_conflicts_resolved: 1,
-        }),
+fn protocol_roundtrips_publication_result_response() {
+    let summary: ReconciliationSummaryDto =
+        serde_json::from_str(include_str!("fixtures/reconciliation_summary.json"))
+            .expect("deserialize reconciliation summary fixture");
+    let response = RuntimeResponse::PublicationResult(PublicationResultDto {
+        status: PublicationStatusDto::Reconciled,
+        reconciliation_summary: Some(summary),
         conflict_copy_path: None,
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
-    assert_eq!(value["type"], "save_vault_result");
-    assert_eq!(value["status"], "merged");
-    assert_eq!(value["mergeSummary"]["mergedEntries"], 2);
-    assert_eq!(value["mergeSummary"]["historySnapshotsAdded"], 1);
-    assert_eq!(value["mergeSummary"]["metaConflictsResolved"], 1);
-    assert_eq!(value["mergeSummary"]["iconConflictsResolved"], 1);
+    assert_eq!(value["type"], "publication_result");
+    assert_eq!(value["status"], "reconciled");
+    assert_eq!(value["reconciliationSummary"]["mergedEntries"], 2);
+    assert_eq!(value["reconciliationSummary"]["historySnapshotsAdded"], 1);
+    assert_eq!(value["reconciliationSummary"]["metaConflictsResolved"], 1);
+    assert_eq!(value["reconciliationSummary"]["iconConflictsResolved"], 1);
 
     // Additive evolution: a summary emitted by an older peer (without the
     // two conflict counters) still deserializes, defaulting them to zero.
-    let legacy: MergeSummaryDto =
-        serde_json::from_str(r#"{"mergedEntries":2,"historySnapshotsAdded":1}"#)
-            .expect("deserialize legacy merge summary");
+    let legacy: ReconciliationSummaryDto =
+        serde_json::from_str(include_str!("fixtures/reconciliation_summary_legacy.json"))
+            .expect("deserialize legacy reconciliation summary");
     assert_eq!(legacy.meta_conflicts_resolved, 0);
     assert_eq!(legacy.icon_conflicts_resolved, 0);
 
@@ -437,16 +416,16 @@ fn protocol_roundtrips_save_vault_result_response() {
 
 #[test]
 fn protocol_roundtrips_local_cache_save_result_response() {
-    let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-        status: SaveVaultStatusDto::SavedToCache,
-        merge_summary: None,
+    let response = RuntimeResponse::PublicationResult(PublicationResultDto {
+        status: PublicationStatusDto::Pending,
+        reconciliation_summary: None,
         conflict_copy_path: None,
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
-    assert_eq!(value["type"], "save_vault_result");
-    assert_eq!(value["status"], "saved_to_cache");
-    assert!(value["mergeSummary"].is_null());
+    assert_eq!(value["type"], "publication_result");
+    assert_eq!(value["status"], "pending");
+    assert!(value["reconciliationSummary"].is_null());
 
     let decoded: RuntimeResponse = serde_json::from_value(value).expect("deserialize response");
     assert_eq!(decoded, response);
@@ -454,14 +433,14 @@ fn protocol_roundtrips_local_cache_save_result_response() {
 
 #[test]
 fn protocol_roundtrips_conflict_copy_save_result() {
-    let response = RuntimeResponse::SaveVaultResult(SaveVaultResultDto {
-        status: SaveVaultStatusDto::ConflictCopy,
-        merge_summary: None,
+    let response = RuntimeResponse::PublicationResult(PublicationResultDto {
+        status: PublicationStatusDto::ConflictSplit,
+        reconciliation_summary: None,
         conflict_copy_path: Some(r"C:\Vaults\personal (VaultKern conflict 1).kdbx".into()),
     });
 
     let value = serde_json::to_value(&response).expect("serialize response");
-    assert_eq!(value["status"], "conflict_copy");
+    assert_eq!(value["status"], "conflict_split");
     assert_eq!(
         value["conflictCopyPath"],
         r"C:\Vaults\personal (VaultKern conflict 1).kdbx"
@@ -733,9 +712,9 @@ fn protocol_roundtrips_entry_detail_response_shape() {
 fn protocol_roundtrips_committed_entry_mutation_state() {
     let response = RuntimeResponse::EntryMutationResult(EntryMutationResultDto {
         commit: CommitStatusDto::Committed,
-        publication: SaveVaultResultDto {
-            status: SaveVaultStatusDto::SavedToCache,
-            merge_summary: None,
+        publication: PublicationResultDto {
+            status: PublicationStatusDto::Pending,
+            reconciliation_summary: None,
             conflict_copy_path: None,
         },
         entry: None,
@@ -744,7 +723,7 @@ fn protocol_roundtrips_committed_entry_mutation_state() {
     let value = serde_json::to_value(&response).expect("serialize committed entry mutation");
     assert_eq!(value["type"], "entry_mutation_result");
     assert_eq!(value["commit"], "committed");
-    assert_eq!(value["publication"]["status"], "saved_to_cache");
+    assert_eq!(value["publication"]["status"], "pending");
     assert!(value.get("entry").is_none());
     assert_eq!(
         serde_json::from_value::<RuntimeResponse>(value).expect("deserialize committed mutation"),
@@ -773,18 +752,12 @@ fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
     let command = RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-1".into(),
-        entry_id: None,
         title: "title".into(),
         username: "username".into(),
         password: "command-password-secret".into(),
         url: "https://example.com".into(),
         notes: "notes".into(),
         totp_uri: None,
-    };
-    let plan = AutofillPersistPlanDto::Update {
-        entry_id: "entry-1".into(),
-        expected_fields: autofill_update_fields("expected-fields-secret"),
-        desired_fields: autofill_update_fields("desired-fields-secret"),
     };
     let custom_field = vaultkern_runtime_protocol::EntryCustomFieldDto {
         key: "RecoveryCode".into(),
@@ -840,7 +813,6 @@ fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
 
     let debug_outputs = [
         format!("{command:?}"),
-        format!("{plan:?}"),
         format!("{custom_field:?}"),
         format!("{detail:?}"),
         format!("{history:?}"),
@@ -850,8 +822,6 @@ fn protocol_debug_redacts_all_entry_secret_bearing_dtos() {
     for debug in debug_outputs {
         for secret in [
             "command-password-secret",
-            "expected-fields-secret",
-            "desired-fields-secret",
             "custom-field-secret",
             "entry-detail-secret",
             "totp-code-secret",
@@ -922,16 +892,9 @@ fn protocol_secret_dtos_explicitly_zeroize_owned_buffers() {
         data_base64: "attachment-secret".into(),
         protect_in_memory: true,
     };
-    let mut plan = AutofillPersistPlanDto::Update {
-        entry_id: "entry-1".into(),
-        expected_fields: autofill_update_fields("expected-secret"),
-        desired_fields: autofill_update_fields("desired-secret"),
-    };
-
     detail.zeroize();
     history.zeroize();
     attachment.zeroize();
-    plan.zeroize();
 
     assert!(detail.password.is_empty());
     assert!(detail.totp.is_none());
@@ -939,20 +902,6 @@ fn protocol_secret_dtos_explicitly_zeroize_owned_buffers() {
     assert!(detail.custom_fields.is_empty());
     assert!(history.custom_fields.is_empty());
     assert!(attachment.data_base64.is_empty());
-    let AutofillPersistPlanDto::Update {
-        expected_fields,
-        desired_fields,
-        ..
-    } = &plan
-    else {
-        panic!("expected update plan");
-    };
-    assert!(expected_fields.password.is_empty());
-    assert!(expected_fields.username.is_empty());
-    assert!(expected_fields.url.is_empty());
-    assert!(desired_fields.password.is_empty());
-    assert!(desired_fields.username.is_empty());
-    assert!(desired_fields.url.is_empty());
 }
 
 #[test]
@@ -961,7 +910,6 @@ fn protocol_secret_dtos_guarantee_zeroize_on_drop() {
 
     assert_zeroize_on_drop::<EntryDetailDto>();
     assert_zeroize_on_drop::<EntryFieldsDto>();
-    assert_zeroize_on_drop::<AutofillPersistPlanDto>();
     assert_zeroize_on_drop::<EntryHistoryDetailDto>();
     assert_zeroize_on_drop::<vaultkern_runtime_protocol::EntryCustomFieldDto>();
     assert_zeroize_on_drop::<EntryAttachmentContentDto>();
@@ -1228,21 +1176,9 @@ fn protocol_roundtrips_list_groups_command() {
 
 #[test]
 fn protocol_roundtrips_entry_mutation_commands() {
-    fn fields(password: &str) -> EntryFieldsDto {
-        EntryFieldsDto {
-            title: "Example".into(),
-            username: "alice".into(),
-            password: password.into(),
-            url: "https://example.com".into(),
-            notes: "demo".into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        }
-    }
     let create = ProtocolEnvelope::new(RuntimeCommand::CreateEntry {
         vault_id: "vault-1".into(),
         parent_group_id: "group-root".into(),
-        entry_id: Some("11111111-1111-4111-8111-111111111111".into()),
         title: "Example".into(),
         username: "alice".into(),
         password: "secret".into(),
@@ -1267,12 +1203,6 @@ fn protocol_roundtrips_entry_mutation_commands() {
             protected: true,
         }],
     });
-    let compare_and_update = ProtocolEnvelope::new(RuntimeCommand::CompareAndUpdateEntryFields {
-        vault_id: "vault-1".into(),
-        entry_id: "entry-1".into(),
-        expected_fields: fields("secret"),
-        desired_fields: fields("secret-2"),
-    });
     let clear_totp = ProtocolEnvelope::new(RuntimeCommand::ClearEntryTotp {
         vault_id: "vault-1".into(),
         entry_id: "entry-1".into(),
@@ -1282,7 +1212,7 @@ fn protocol_roundtrips_entry_mutation_commands() {
         entry_id: "entry-1".into(),
     });
 
-    for envelope in [create, update, compare_and_update, clear_totp, delete] {
+    for envelope in [create, update, clear_totp, delete] {
         let json = serde_json::to_string(&envelope).unwrap();
         let decoded: ProtocolEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, envelope);
@@ -1317,220 +1247,6 @@ fn protocol_roundtrips_scoped_browser_entry_mutations_without_receipt_identity()
             serde_json::from_value::<ProtocolEnvelope>(json).unwrap(),
             envelope
         );
-    }
-}
-
-#[test]
-fn protocol_accepts_runtime_web_client_atomic_entry_field_shape() {
-    let envelope: ProtocolEnvelope = serde_json::from_value(serde_json::json!({
-        "version": 2,
-        "command": {
-            "type": "compare_and_update_entry_fields",
-            "vault_id": "vault-1",
-            "entry_id": "entry-1",
-            "expected_fields": {
-                "title": "Example",
-                "username": "alice",
-                "password": "old-secret",
-                "url": "https://example.com/login",
-                "notes": "",
-                "totpUri": null,
-                "customFields": []
-            },
-            "desired_fields": {
-                "title": "Example",
-                "username": "alice",
-                "password": "new-secret",
-                "url": "https://example.com/login",
-                "notes": "",
-                "totpUri": null,
-                "customFields": []
-            }
-        }
-    }))
-    .expect("deserialize runtime web client envelope");
-
-    let RuntimeCommand::CompareAndUpdateEntryFields {
-        expected_fields,
-        desired_fields,
-        ..
-    } = envelope.command
-    else {
-        panic!("expected atomic update command");
-    };
-    assert_eq!(expected_fields.password, "old-secret");
-    assert_eq!(desired_fields.password, "new-secret");
-}
-
-#[test]
-fn protocol_decodes_deprecated_autofill_persist_plans_for_compatibility() {
-    fn fields(password: &str) -> EntryFieldsDto {
-        EntryFieldsDto {
-            title: "Example".into(),
-            username: "alice".into(),
-            password: password.into(),
-            url: "https://example.com/login".into(),
-            notes: String::new().into(),
-            totp_uri: None,
-            custom_fields: vec![],
-        }
-    }
-
-    let update = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
-        transaction_id: "transaction-1".into(),
-        operation_id: "operation-1".into(),
-        vault_id: "vault-1".into(),
-        plan: AutofillPersistPlanDto::Update {
-            entry_id: "entry-1".into(),
-            expected_fields: autofill_update_fields("old-secret"),
-            desired_fields: autofill_update_fields("new-secret"),
-        },
-    });
-    let create = ProtocolEnvelope::new(RuntimeCommand::PersistAutofillMutation {
-        transaction_id: "transaction-2".into(),
-        operation_id: "operation-2".into(),
-        vault_id: "vault-1".into(),
-        plan: AutofillPersistPlanDto::Create {
-            parent_group_id: "group-root".into(),
-            planned_entry_id: "12345678-1234-4abc-8def-1234567890ab".into(),
-            expected_matching_entry_ids: vec!["entry-existing".into()],
-            desired_fields: fields("new-secret"),
-        },
-    });
-
-    for envelope in [update, create] {
-        let json = serde_json::to_value(&envelope).expect("serialize atomic persist plan");
-        assert_eq!(json["command"]["type"], "persist_autofill_mutation");
-        assert!(json["command"].get("transaction_id").is_some());
-        assert!(json["command"].get("operation_id").is_some());
-        assert!(json["command"].get("vault_id").is_some());
-        assert!(json["command"]["plan"].get("desired_fields").is_some());
-        assert!(json["command"].get("transactionId").is_none());
-        assert_eq!(
-            serde_json::from_value::<ProtocolEnvelope>(json).expect("roundtrip atomic plan"),
-            envelope
-        );
-    }
-}
-
-#[test]
-fn protocol_decodes_deprecated_autofill_results_for_compatibility() {
-    for disposition in [
-        AutofillPersistDispositionDto::Committed,
-        AutofillPersistDispositionDto::Replayed,
-    ] {
-        let response = RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
-            transaction_id: "transaction-1".into(),
-            operation_id: "operation-1".into(),
-            vault_id: "vault-1".into(),
-            outcome: AutofillPersistOutcomeDto::Durable {
-                disposition,
-                entry_id: "entry-1".into(),
-                durability: AutofillPersistDurabilityDto::Source,
-                cache_state: AutofillCacheStateDto::Current,
-                committed_fingerprint: AutofillCommittedFingerprintDto {
-                    content_sha256:
-                        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".into(),
-                    size_bytes: 4096,
-                },
-                merge_summary: Some(MergeSummaryDto {
-                    merged_entries: 2,
-                    history_snapshots_added: 1,
-                    meta_conflicts_resolved: 0,
-                    icon_conflicts_resolved: 0,
-                }),
-                receipt_version: 1,
-            },
-        });
-
-        let json = serde_json::to_value(&response).expect("serialize atomic durable response");
-        assert_eq!(json["type"], "autofill_persist_result");
-        assert_eq!(json["transactionId"], "transaction-1");
-        assert_eq!(json["operationId"], "operation-1");
-        assert_eq!(json["vaultId"], "vault-1");
-        assert_eq!(json["outcome"], "durable");
-        assert!(json.get("entryId").is_some());
-        assert!(json.get("cacheState").is_some());
-        assert!(json.get("committedFingerprint").is_some());
-        assert!(json.get("receiptVersion").is_some());
-        assert!(json.get("transaction_id").is_none());
-        assert_eq!(
-            serde_json::from_value::<RuntimeResponse>(json).expect("roundtrip durable response"),
-            response
-        );
-    }
-}
-
-#[test]
-fn protocol_preserves_deprecated_autofill_conflict_codes_for_compatibility() {
-    let codes = [
-        AutofillPersistConflictCodeDto::ActiveVaultMismatch,
-        AutofillPersistConflictCodeDto::UpdatePreconditionFailed,
-        AutofillPersistConflictCodeDto::CreateMatchingSetChanged,
-        AutofillPersistConflictCodeDto::PlannedEntryIdCollision,
-        AutofillPersistConflictCodeDto::OperationBindingMismatch,
-        AutofillPersistConflictCodeDto::ConcurrentVaultChanges,
-        AutofillPersistConflictCodeDto::SourceChangedRetryExhausted,
-        AutofillPersistConflictCodeDto::LegacyCreateOutcomeAmbiguous,
-    ];
-
-    for code in codes {
-        let response = RuntimeResponse::AutofillPersistResult(AutofillPersistResultDto {
-            transaction_id: "transaction-1".into(),
-            operation_id: "operation-1".into(),
-            vault_id: "vault-1".into(),
-            outcome: AutofillPersistOutcomeDto::Conflict {
-                code,
-                retryable: matches!(
-                    code,
-                    AutofillPersistConflictCodeDto::ActiveVaultMismatch
-                        | AutofillPersistConflictCodeDto::SourceChangedRetryExhausted
-                ),
-            },
-        });
-        let json = serde_json::to_value(&response).expect("serialize conflict response");
-        assert_eq!(json["outcome"], "conflict");
-        assert_eq!(
-            serde_json::from_value::<RuntimeResponse>(json).expect("roundtrip conflict response"),
-            response
-        );
-    }
-}
-
-#[test]
-fn protocol_rejects_unknown_or_malformed_deprecated_autofill_results() {
-    let unknown_outcome = serde_json::json!({
-        "type": "autofill_persist_result",
-        "transactionId": "transaction-1",
-        "operationId": "operation-1",
-        "vaultId": "vault-1",
-        "outcome": "eventually_durable"
-    });
-    let unknown_conflict = serde_json::json!({
-        "type": "autofill_persist_result",
-        "transactionId": "transaction-1",
-        "operationId": "operation-1",
-        "vaultId": "vault-1",
-        "outcome": "conflict",
-        "code": "overwrite_anyway",
-        "retryable": false
-    });
-    let missing_fingerprint = serde_json::json!({
-        "type": "autofill_persist_result",
-        "transactionId": "transaction-1",
-        "operationId": "operation-1",
-        "vaultId": "vault-1",
-        "outcome": "durable",
-        "disposition": "committed",
-        "entryId": "entry-1",
-        "durability": "source",
-        "cacheState": "current",
-        "mergeSummary": null,
-        "receiptVersion": 1
-    });
-
-    for malformed in [unknown_outcome, unknown_conflict, missing_fingerprint] {
-        assert!(serde_json::from_value::<RuntimeResponse>(malformed).is_err());
     }
 }
 
@@ -1628,7 +1344,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
     );
 
     let legacy_assertion_json = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "create_passkey_assertion",
             "ceremony_token": "ceremony-token-1",
@@ -1678,7 +1394,7 @@ fn protocol_roundtrips_passkey_assertion_command_and_response() {
     );
 
     let missing_token_assertion_json = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "create_passkey_assertion",
             "vault_id": "vault-1",
@@ -1787,7 +1503,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
         commit
     );
     let missing_token_commit_json = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "commit_passkey_registration",
             "vault_id": "vault-1",
@@ -1798,7 +1514,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
     assert!(serde_json::from_value::<ProtocolEnvelope>(missing_token_commit_json).is_err());
 
     let missing_token_registration_json = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "create_passkey_registration",
             "vault_id": "vault-1",
@@ -1843,7 +1559,7 @@ fn protocol_roundtrips_passkey_registration_command_and_response() {
 #[test]
 fn protocol_rejects_legacy_passkey_rollback_command() {
     let legacy_rollback_json = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "rollback_passkey_registration",
             "ceremony_token": "ceremony-token-1",
@@ -1979,7 +1695,7 @@ fn protocol_roundtrips_passkey_credential_status_batch_command_and_response() {
 #[test]
 fn protocol_rejects_passkey_credential_status_without_relying_party() {
     let command_json = serde_json::json!({
-        "version": 2,
+        "version": 3,
         "command": {
             "type": "passkey_credential_status",
             "ceremony_token": "token-1",

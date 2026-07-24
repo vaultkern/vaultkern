@@ -10,7 +10,7 @@ export interface RuntimeHandshake {
   capabilities: string[];
 }
 
-export const RUNTIME_PROTOCOL_VERSION = 2;
+export const RUNTIME_PROTOCOL_VERSION = 3;
 
 export function createNegotiatedRuntimeTransport(
   transport: RuntimeTransport,

@@ -2,12 +2,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use url::form_urlencoded::byte_serialize;
-use vaultkern_core::{SaveProfile, TransformedKey, Vault};
+use vaultkern_core::Vault;
 use vaultkern_runtime_protocol::{SessionStateDto, VaultSourceStatusDto};
 
-use crate::providers::local_file::VaultSourceFingerprint;
-use crate::providers::provider::ProviderRevision;
+use crate::providers::provider::{ContentIdentity, ProviderRevision};
 use crate::unlock::MasterCredentialShape;
+use crate::vault_format::{VaultEncodingProfile, VaultKey};
 
 #[derive(Debug, Clone, Default)]
 struct SessionState {
@@ -65,13 +65,13 @@ pub(crate) struct LoadedVault {
     pub(crate) source: VaultSource,
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
-    pub(crate) baseline_fingerprint: VaultSourceFingerprint,
+    pub(crate) baseline_fingerprint: ContentIdentity,
     pub(crate) provider_revision: Option<ProviderRevision>,
     pub(crate) credential_shape: MasterCredentialShape,
-    pub(crate) save_profile: SaveProfile,
+    pub(crate) save_profile: VaultEncodingProfile,
     pub(crate) requires_source_migration: bool,
     pub(crate) vault: Option<Vault>,
-    pub(crate) transformed_key: Option<Arc<TransformedKey>>,
+    pub(crate) transformed_key: Option<Arc<VaultKey>>,
     pub(crate) source_status: Option<VaultSourceStatusDto>,
     pub(crate) source_account_label: Option<String>,
 }
@@ -191,7 +191,7 @@ impl VaultSession {
         &mut self,
         vault_id: &str,
         vault: Vault,
-        transformed_key: TransformedKey,
+        transformed_key: VaultKey,
         credential_shape: MasterCredentialShape,
         current_vault_ref_id: Option<String>,
     ) -> anyhow::Result<()> {
@@ -212,7 +212,7 @@ impl VaultSession {
         &mut self,
         vault_id: &str,
         vault: Vault,
-        transformed_key: TransformedKey,
+        transformed_key: VaultKey,
         credential_shape: MasterCredentialShape,
         current_vault_ref_id: Option<String>,
     ) -> anyhow::Result<()> {
@@ -230,7 +230,7 @@ impl VaultSession {
     }
 
     #[cfg(test)]
-    pub(crate) fn transformed_key(&self, vault_id: &str) -> Option<&TransformedKey> {
+    pub(crate) fn transformed_key(&self, vault_id: &str) -> Option<&VaultKey> {
         self.loaded
             .get(vault_id)
             .and_then(|loaded| loaded.transformed_key.as_deref())
@@ -240,10 +240,11 @@ impl VaultSession {
 #[cfg(test)]
 mod tests {
     use super::{LoadedVault, VaultSession, VaultSource, onedrive_remote_id, onedrive_vault_id};
-    use crate::providers::local_file::VaultSourceFingerprint;
+    use crate::providers::provider::ContentIdentity;
     use crate::providers::provider::ProviderRevision;
     use crate::unlock::MasterCredentialShape;
-    use vaultkern_core::{SaveProfile, TransformedKey, Vault};
+    use crate::vault_format::{VaultEncodingProfile, VaultKey};
+    use vaultkern_core::Vault;
     use vaultkern_runtime_protocol::VaultSourceStatusDto;
 
     enum Transition {
@@ -261,9 +262,9 @@ mod tests {
         source: VaultSource,
         name: String,
         bytes: Vec<u8>,
-        baseline_fingerprint: VaultSourceFingerprint,
+        baseline_fingerprint: ContentIdentity,
         provider_revision: Option<ProviderRevision>,
-        save_profile: SaveProfile,
+        save_profile: VaultEncodingProfile,
         requires_source_migration: bool,
         source_status: Option<VaultSourceStatusDto>,
         source_account_label: Option<String>,
@@ -388,17 +389,17 @@ mod tests {
             source: VaultSource::LocalPath(format!("/tmp/{name}.kdbx")),
             name: name.to_owned(),
             bytes: vec![marker, marker + 1],
-            baseline_fingerprint: VaultSourceFingerprint {
+            baseline_fingerprint: ContentIdentity {
                 content_sha256: format!("fingerprint-{marker}"),
                 size_bytes: 2,
-                modified_at: Some(u64::from(marker)),
+                observation_marker: Some(u64::from(marker)),
             },
             provider_revision: None,
             credential_shape: MasterCredentialShape {
                 has_password: true,
                 has_key_file: true,
             },
-            save_profile: SaveProfile::recommended(),
+            save_profile: VaultEncodingProfile::recommended(),
             requires_source_migration: false,
             vault: Some(Vault::empty(name)),
             transformed_key: None,
@@ -487,7 +488,7 @@ mod tests {
             .finish_unlock(
                 "vault-a",
                 Vault::empty("unlocked"),
-                TransformedKey::from_zeroizing(zeroize::Zeroizing::new([0x33; 32])),
+                VaultKey::from_zeroizing(zeroize::Zeroizing::new([0x33; 32])),
                 credential_shape,
                 Some("ref-a".into()),
             )
